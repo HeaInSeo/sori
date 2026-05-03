@@ -27,6 +27,16 @@ const (
 	// MediaTypeDataSpec is the current media type used by the experimental data
 	// referrer helpers.
 	MediaTypeDataSpec = "application/vnd.nodevault.dataspec.v1+json"
+
+	// MediaTypeToolProfile is the media type for observed dry-run profile referrers.
+	// It carries validationHash, observedIoProfile, observedResourceProfile, and
+	// contractCheck for a given tool image.
+	MediaTypeToolProfile = "application/vnd.nodevault.toolprofile.v1+json"
+
+	// MediaTypeSecurityScan is the media type for security scan result referrers.
+	// It carries CVE summary, scanner identity, and policy evaluation results
+	// for a given tool image.
+	MediaTypeSecurityScan = "application/vnd.nodevault.security.v1+json"
 )
 
 // ReferrerTarget is the target interface accepted by the experimental referrer
@@ -62,6 +72,26 @@ func PushToolSpecReferrer(ctx context.Context, target ReferrerTarget, subjectDig
 // yet part of the intended long-lived core surface.
 func PushDataSpecReferrer(ctx context.Context, target ReferrerTarget, subjectDigest string, specJSON []byte) (SpecReferrerResult, error) {
 	return pushSpecReferrer(ctx, target, subjectDigest, specJSON, MediaTypeDataSpec)
+}
+
+// PushToolProfileReferrer uploads an observed dry-run profile referrer artifact
+// for the given tool image. The profileJSON must be a valid JSON document
+// conforming to the toolprofile payload defined in OBSERVED_PROFILE_SPEC.md.
+//
+// Experimental: this helper is NodeVault-oriented, subject to change, and not
+// yet part of the intended long-lived core surface.
+func PushToolProfileReferrer(ctx context.Context, target ReferrerTarget, subjectDigest string, profileJSON []byte) (SpecReferrerResult, error) {
+	return pushSpecReferrer(ctx, target, subjectDigest, profileJSON, MediaTypeToolProfile)
+}
+
+// PushSecurityReferrer uploads a security scan result referrer artifact for the
+// given tool image. The securityJSON must be a valid JSON document conforming
+// to the security referrer payload defined in SECURITY_SCAN_SPEC.md.
+//
+// Experimental: this helper is NodeVault-oriented, subject to change, and not
+// yet part of the intended long-lived core surface.
+func PushSecurityReferrer(ctx context.Context, target ReferrerTarget, subjectDigest string, securityJSON []byte) (SpecReferrerResult, error) {
+	return pushSpecReferrer(ctx, target, subjectDigest, securityJSON, MediaTypeSecurityScan)
 }
 
 // NewReferrerLocalStore opens an OCI layout store for the experimental
