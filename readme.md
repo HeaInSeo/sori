@@ -1,6 +1,6 @@
 # sori
 
-OCI 기반 참조 데이터(볼륨) 패키징 라이브러리.  
+OCI 기반 참조 데이터(볼륨) 패키징 및 referrer push 라이브러리.  
 디렉터리를 OCI 아티팩트로 변환하고, 로컬 OCI 스토어와 원격 레지스트리(Harbor 등) 사이의 push/fetch를 담당한다.
 
 ## 개요
@@ -8,31 +8,26 @@ OCI 기반 참조 데이터(볼륨) 패키징 라이브러리.
 `sori`는 바이오인포매틱스 파이프라인에서 사용하는 참조 데이터(genome, annotation 등)를  
 OCI 이미지 형식으로 패키징하는 Go 라이브러리다.
 
-범용 라이브러리화 로드맵은 [docs/generalization-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/generalization-sprint-plan.md:1)에 정리되어 있다.
-공개 API 안정도 분류는 [docs/public-api.md](/opt/go/src/github.com/HeaInSeo/sori/docs/public-api.md:1)에 정리되어 있다.
-후속 개선 스프린트는 [docs/post-v1-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/post-v1-sprint-plan.md:1)에 정리되어 있다.
-현재 수준 기준 후속 성숙화 계획은 [docs/maturity-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/maturity-sprint-plan.md:1)에 정리되어 있다.
-stable API 승격 전 검토 항목은 [docs/stable-api-promotion.md](/opt/go/src/github.com/HeaInSeo/sori/docs/stable-api-promotion.md:1)에 정리되어 있다.
-현재 시점 이후 후속 스프린트는 [docs/followup-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/followup-sprint-plan.md:1)에 정리되어 있다.
-registry 통합 테스트 골격은 [docs/registry-integration.md](/opt/go/src/github.com/HeaInSeo/sori/docs/registry-integration.md:1)에 정리되어 있다.
-운영 환경 체크리스트는 [docs/operations.md](/opt/go/src/github.com/HeaInSeo/sori/docs/operations.md:1)에 정리되어 있다.
-stub 파일 처리 방향은 [docs/stub-status.md](/opt/go/src/github.com/HeaInSeo/sori/docs/stub-status.md:1)에 정리되어 있다.
+- **Core**: OCI volume packaging + push/fetch + artifact metadata
+- **Experimental**: NodeVault-oriented referrer push (toolspec / toolprofile / security / dataspec)
 
-현재 내부 구현은 아래 하위 패키지로 일부 분리되어 있다.
+| 문서 | 내용 |
+|------|------|
+| [docs/public-api.md](docs/public-api.md) | 공개 API 안정도 분류 |
+| [docs/generalization-sprint-plan.md](docs/generalization-sprint-plan.md) | 범용 라이브러리화 로드맵 |
+| [docs/maturity-sprint-plan.md](docs/maturity-sprint-plan.md) | 성숙화 계획 |
+| [docs/stable-api-promotion.md](docs/stable-api-promotion.md) | stable API 승격 검토 항목 |
+| [docs/followup-sprint-plan.md](docs/followup-sprint-plan.md) | 후속 스프린트 계획 |
+| [docs/registry-integration.md](docs/registry-integration.md) | registry 통합 테스트 골격 |
+| [docs/operations.md](docs/operations.md) | 운영 환경 체크리스트 |
+| [docs/stub-status.md](docs/stub-status.md) | 과거 stub 처리 내역 |
+
+내부 하위 패키지:
 
 - `archiveutil`: deterministic tar.gz 생성과 안전한 untar
 - `registryutil`: remote repository/TLS/auth/http client 구성
 - `catalogutil`: JSON catalog load/save 공통 유틸
 - `adapters/nodevault`: NodeVault 친화 metadata adapter 초안
-
-주요 기능:
-- 디렉터리를 OCI 레이어(tar.gz)로 변환 — 결정론적(deterministic) 해시 보장
-- 로컬 OCI 스토어(`oras-go` `oci.Store`)에 푸시
-- 원격 레지스트리(Harbor, registry:2 등)로 복사
-- 상위 계층이 바로 쓸 수 있는 package/push 결과 구조 제공
-- 객체 기반 `Client` API 제공
-- 볼륨 컬렉션 인덱스(`volume-collection.json`) 관리
-- 순차/병렬 fetch 지원
 
 ## 의존성
 
@@ -46,7 +41,7 @@ stub 파일 처리 방향은 [docs/stub-status.md](/opt/go/src/github.com/HeaInS
 ## 빠른 시작
 
 ```go
-import "github.com/seoyhaein/sori"
+import "github.com/HeaInSeo/sori"
 
 ctx := context.Background()
 
@@ -131,8 +126,7 @@ if err != nil { ... }
 fmt.Println(registerResp.CASHash)
 ```
 
-위 예시에서 `4~6` 단계는 stable core 흐름이고, `7~9` 단계는 현재 기준으로 experimental 계층이다.
-새 사용처는 가능하면 `Client` + `BuildArtifactMetadata`까지를 기본 진입 경로로 보는 편이 안전하다.
+단계 `4~6`은 stable core 흐름이고, `7~9`는 experimental 계층이다.
 
 ## 설정 파일 (`sori-oci.json`)
 
@@ -166,7 +160,7 @@ fmt.Println(registerResp.CASHash)
 ```go
 func LoadConfig(path string) (*Config, error)
 func InitConfig(path string) (*Config, error)          // deprecated 호환용 로더
-func (conf *Config) EnsureDir() error                  // local.path 디렉터리 생성
+func (conf *Config) EnsureDir() error
 func (conf *Config) NewClient(opts ...ClientOption) *Client
 ```
 
@@ -223,8 +217,6 @@ func (m *CollectionManager) Flush() error
 func (m *CollectionManager) PublishVolumeFromDir(ctx, volDir, displayName, tag string) error
 ```
 
-`NewCollectionManager`는 `rootDir`이 없으면 자동으로 생성한다.
-
 ### 상위 package / dataspec API
 
 ```go
@@ -252,14 +244,14 @@ type PackageResult struct {
 }
 
 type RemoteTarget struct {
-    Registry   string
-    Repository string
-    PlainHTTP  bool
+    Registry    string
+    Repository  string
+    PlainHTTP   bool
     InsecureTLS bool
-    Username   string
-    Password   string
-    Token      string
-    CAFile     string
+    Username    string
+    Password    string
+    Token       string
+    CAFile      string
 }
 
 func PackageVolume(ctx context.Context, req PackageRequest) (*PackageResult, error)
@@ -269,8 +261,7 @@ func BuildDataSpec(pkg *PackageResult, push *PushResult, req PackageRequest) (*D
 func PushRemoteDataSpecReferrer(ctx context.Context, push *PushResult, target RemoteTarget, spec *DataSpec) (*ReferrerPushResult, error)
 ```
 
-이 계층은 `CollectionManager` 없이도 `NodeVault` 같은 상위 서비스가 `package -> push -> metadata 생성` 흐름을 바로 이어붙일 수 있게 하기 위한 API다.
-`PushRemoteDataSpecReferrer`는 원격 subject manifest digest를 기준으로 `application/vnd.nodevault.dataspec.v1+json` referrer manifest를 업로드한다.
+이 계층은 `CollectionManager` 없이도 `NodeVault` 같은 상위 서비스가 `package → push → metadata 생성` 흐름을 바로 이어붙일 수 있게 하기 위한 API다.
 
 ### Generic Metadata
 
@@ -287,6 +278,87 @@ func ArtifactMetadataToRegisteredDataDefinition(meta *ArtifactMetadata, req Data
 
 `ArtifactMetadata`는 core 계층의 중립 metadata 모델이다. `DataSpec`과 `RegisteredDataDefinition`은 이 모델을 NodeVault 친화 구조로 변환한 adapter 결과다.
 
+### Experimental: OCI Referrer Push
+
+이미지 digest에 대한 referrer artifact를 Harbor 등의 OCI 레지스트리에 push하는 실험적 API.  
+NodeVault의 toolspec / toolprofile / security referrer 축을 지원한다.
+
+#### Media type 상수
+
+```go
+const (
+    MediaTypeToolSpec    = "application/vnd.nodevault.toolspec.v1+json"
+    MediaTypeDataSpec    = "application/vnd.nodevault.dataspec.v1+json"
+    MediaTypeToolProfile = "application/vnd.nodevault.toolprofile.v1+json"
+    MediaTypeSecurityScan = "application/vnd.nodevault.security.v1+json"
+)
+```
+
+#### ReferrerTarget / SpecReferrerResult
+
+```go
+type ReferrerTarget interface {
+    oras.Target
+}
+
+type SpecReferrerResult struct {
+    ReferrerDigest string
+    SubjectDigest  string
+    MediaType      string
+}
+```
+
+#### Push 함수
+
+```go
+// toolspec: 등록 시점 declared spec referrer
+func PushToolSpecReferrer(ctx context.Context, target ReferrerTarget, subjectDigest string, specJSON []byte) (SpecReferrerResult, error)
+
+// dataspec: data artifact referrer
+func PushDataSpecReferrer(ctx context.Context, target ReferrerTarget, subjectDigest string, specJSON []byte) (SpecReferrerResult, error)
+
+// toolprofile: observed dry-run profile referrer (validationHash, observedIoProfile 등)
+func PushToolProfileReferrer(ctx context.Context, target ReferrerTarget, subjectDigest string, profileJSON []byte) (SpecReferrerResult, error)
+
+// security: CVE scan result referrer (trivy-operator 연동)
+func PushSecurityReferrer(ctx context.Context, target ReferrerTarget, subjectDigest string, securityJSON []byte) (SpecReferrerResult, error)
+```
+
+#### Target 생성 헬퍼
+
+```go
+func NewReferrerLocalStore(path string) (ReferrerTarget, error)
+func NewReferrerRemoteRepository(repoRef string, plainHTTP bool, credential *auth.Credential) (ReferrerTarget, error)
+func MarshalSpec(v interface{}) ([]byte, error)
+```
+
+#### 사용 예시
+
+```go
+import "github.com/HeaInSeo/sori"
+
+// 원격 Harbor에 toolspec referrer push
+target, err := sori.NewReferrerRemoteRepository(
+    "harbor.local/project/bwa-mem2:latest",
+    true,
+    &auth.Credential{Username: "user", Password: "pass"},
+)
+if err != nil { ... }
+
+specJSON, _ := sori.MarshalSpec(myToolSpec)
+result, err := sori.PushToolSpecReferrer(ctx, target, "sha256:IMAGE_DIGEST", specJSON)
+if err != nil { ... }
+fmt.Println(result.ReferrerDigest)
+
+// toolprofile referrer push (dry-run 결과)
+profileJSON, _ := sori.MarshalSpec(myProfile)
+profileResult, err := sori.PushToolProfileReferrer(ctx, target, "sha256:IMAGE_DIGEST", profileJSON)
+
+// security scan referrer push
+secJSON, _ := sori.MarshalSpec(mySecuritySummary)
+secResult, err := sori.PushSecurityReferrer(ctx, target, "sha256:IMAGE_DIGEST", secJSON)
+```
+
 ### 검증 유틸리티
 
 ```go
@@ -300,9 +372,9 @@ func ValidateVolumeDir(volDir string) ([]byte, error)
 
 ```go
 type PushResult struct {
-    Reference string
-    Repository string
-    Tag string
+    Reference      string
+    Repository     string
+    Tag            string
     ManifestDigest string
 }
 
@@ -311,11 +383,10 @@ func FetchVolSeq(ctx, destRoot, repo, tag string) (*VolumeIndex, error)
 func FetchVolParallel(ctx, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error)
 ```
 
-`PushLocalToRemote`, `PackageVolume`, `VolumeIndex.PublishVolume` 같은 package-level 함수는 호환용 low-level wrapper다.
+`PushLocalToRemote`, `PackageVolume`, `VolumeIndex.PublishVolume`은 호환용 low-level wrapper다.  
 새 코드는 `Client` 기반 API 사용을 권장한다.
+
 원격 Harbor가 HTTPS와 사설 CA를 사용하는 경우 `RemoteTarget.CAFile`에 PEM 경로를 주면 TLS root CA에 반영된다.
-registry별 차이를 줄이기 위해 `RemoteTarget`은 `HTTPClient`, `Transport`, `AuthProvider`, `ReferrersCapability`도 받을 수 있다.
-`ReferrersCapability`를 지정하지 않으면 oras-go 기본 자동 감지를 사용한다.
 
 ### Error 모델
 
@@ -375,19 +446,8 @@ func (c *DataCatalog) Get(casHash string) (*RegisteredDataDefinition, error)
 func (c *DataCatalog) List(stableRef string) ([]RegisteredDataDefinition, error)
 ```
 
-이 계층은 `NodeKit`의 `DataRegisterRequest`와 `Catalog`의 `AdminDataList` 사이를 잇는 최소 로컬 구현이다.
+이 계층은 `NodeKit`의 `DataRegisterRequest`와 `Catalog`의 `AdminDataList` 사이를 잇는 최소 로컬 구현이다.  
 현재는 `rootDir/registered-data.json`에 저장한다.
-
-## API 안정도
-
-- Stable:
-  `Config.NewClient`, `Client` 기반 package/push/fetch, `BuildArtifactMetadata`, typed error, option 모델
-- Compatibility:
-  `InitConfig`, `PackageVolume`, `PushLocalToRemote`, `VolumeIndex.PublishVolume`
-- Experimental:
-  `DataSpec`, referrer API, registration/catalog API
-
-자세한 목록은 [docs/public-api.md](/opt/go/src/github.com/HeaInSeo/sori/docs/public-api.md:1)를 따른다.
 
 ### tar.gz 유틸리티
 
@@ -396,13 +456,26 @@ func TarGzDir(fsDir, prefixPath string) ([]byte, error)   // 결정론적 tar.gz
 func UntarGzDir(gzipStream io.Reader, dest string) error   // tar.gz 해제
 ```
 
+## API 안정도
+
+| 계층 | 포함 항목 |
+|------|-----------|
+| **Stable** | `Config.NewClient`, `Client` 기반 package/push/fetch, `BuildArtifactMetadata`, typed error, option 모델 |
+| **Compatibility** | `InitConfig`, `PackageVolume`, `PushLocalToRemote`, `VolumeIndex.PublishVolume` |
+| **Experimental** | `DataSpec`, referrer API (`PushToolSpecReferrer` / `PushToolProfileReferrer` / `PushSecurityReferrer` / `PushDataSpecReferrer`), registration/catalog API |
+
+자세한 목록은 [docs/public-api.md](docs/public-api.md)를 따른다.
+
 ## 테스트 실행
 
 ```bash
 # 단위 테스트 (외부 인프라 불필요)
+go test -short ./...
+
+# 특정 테스트만
 go test -v -run "TestGenerateAndSaveVolumeIndex|TestTarGzDirDeterministic|TestExtractTarGz|TestMerge|TestLoadOrNewCollection_New|TestManager|TestValidateVolumeDir|TestLoadConfig_TempDir|TestPublishFetchRoundTrip" ./...
 
-# 전체 테스트 (TestPublishVolumeOther, TestOciService01 등은 로컬 OCI 스토어 필요)
+# 전체 테스트 (로컬 OCI 스토어 필요)
 go test -v ./...
 ```
 
@@ -411,8 +484,9 @@ root 권한이 없는 환경에서는 `TestLoadConfig` / `TestInitConfig`가 자
 
 ## 알려진 제한 사항
 
-- 과거 stub였던 `local-registry.go`, `pipeline-index.go`, `oci-crud.go`는 제거했고, 판단 배경은 `docs/stub-status.md`에 남겨 두었다.
-- Harbor webhook 연동과 referrer 조회 API는 아직 미구현. 현재는 dataspec referrer push까지만 제공한다.
+- referrer 조회(list referrers) API는 미구현. 현재는 push까지만 제공한다.
+- `toolprofile` / `security` referrer push는 payload 구조를 호출자가 직접 구성해야 한다. payload 스펙은 NodeVault의 `docs/OBSERVED_PROFILE_SPEC.md`, `docs/SECURITY_SCAN_SPEC.md` 참조.
+- 과거 stub였던 `local-registry.go`, `pipeline-index.go`, `oci-crud.go`는 제거했다. 판단 배경은 [docs/stub-status.md](docs/stub-status.md) 참조.
 
 ## 라이선스
 
