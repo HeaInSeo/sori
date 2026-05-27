@@ -277,21 +277,21 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 		}
 		partPath := layerDesc.Annotations[annotationPartitionPath]
 		if partPath == "" {
-			layerRC.Close()
+			_ = layerRC.Close()
 			return nil, integrityError("FetchVolSeq", fmt.Sprintf("missing partitionPath annotation for layer %s", layerDesc.Digest), nil)
 		}
 		if _, dup := seen[partPath]; dup {
-			layerRC.Close()
+			_ = layerRC.Close()
 			return nil, conflictError("FetchVolSeq", fmt.Sprintf("duplicate partition path %q", partPath), nil)
 		}
 		seen[partPath] = struct{}{}
 
 		if err := os.MkdirAll(destRoot, 0o755); err != nil {
-			layerRC.Close()
+			_ = layerRC.Close()
 			return nil, transportError("FetchVolSeq", fmt.Sprintf("create destination root %s", destRoot), err)
 		}
 		if err := archiveutil.UntarGzDir(layerRC, destRoot); err != nil {
-			layerRC.Close()
+			_ = layerRC.Close()
 			return nil, integrityError("FetchVolSeq", fmt.Sprintf("extract layer %s", layerDesc.Digest), err)
 		}
 		if err := layerRC.Close(); err != nil {
@@ -402,13 +402,13 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 				continue
 			}
 			if err := os.MkdirAll(destRoot, 0o755); err != nil {
-				layerRC.Close()
+				_ = layerRC.Close()
 				results <- jobResult{idx: meta.idx, err: transportError("FetchVolParallel", fmt.Sprintf("mkdir %s", destRoot), err)}
 				cancel()
 				continue
 			}
 			if err := archiveutil.UntarGzDir(layerRC, destRoot); err != nil {
-				layerRC.Close()
+				_ = layerRC.Close()
 				results <- jobResult{idx: meta.idx, err: integrityError("FetchVolParallel", fmt.Sprintf("extract layer %s", meta.desc.Digest), err)}
 				cancel()
 				continue

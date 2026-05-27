@@ -8,13 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/stretchr/testify/assert"
-	"oras.land/oras-go/v2/content/oci"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
+	"oras.land/oras-go/v2/content/oci"
 )
 
 func TestGenerateAndSaveVolumeIndex(t *testing.T) {
@@ -89,7 +90,7 @@ func TestTarGzDirDeterministic(t *testing.T) {
 	// tar -xzf test-vol.tar.gz
 }
 
-//TODO 몇가지 버그가 있다. 수정해야 한다.
+// TODO 몇가지 버그가 있다. 수정해야 한다.
 
 // TestFetchVolumeFromOCI pushes a small volume to a local OCI store, fetches it back, and verifies
 // both file contents and VolumeIndex metadata.
@@ -436,7 +437,7 @@ func TestValidateVolumeDir_CreateConfigBlob_NoTempSurvivorOnFailure(t *testing.T
 	if err := os.Chmod(tmp, 0o555); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	t.Cleanup(func() { os.Chmod(tmp, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(tmp, 0o755) })
 
 	_, err := ValidateVolumeDir(tmp)
 	if err == nil {

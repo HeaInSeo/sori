@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opencontainers/go-digest"
 	"github.com/HeaInSeo/sori/catalogutil"
+	"github.com/opencontainers/go-digest"
 )
 
 const registeredDataCatalogJSON = "registered-data.json"

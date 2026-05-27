@@ -1,0 +1,53 @@
+name: Tests
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
+      - ".github/**/*.md"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
+      - ".github/**/*.md"
+
+# Node.js 24 opt-in (enforcement: 2026-06-02)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run on Ubuntu
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify module state
+        run: |
+          go mod tidy
+          git diff --exit-code
+
+      - name: Run tests
+        run: make test
+
+      - name: Generate coverage report
+        run: make coverage
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sori-coverage
+          path: reports/

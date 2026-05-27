@@ -52,7 +52,7 @@ func TestWriteFileAtomic_NoTempSurvivorOnFailure(t *testing.T) {
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
 	target := filepath.Join(dir, "out.json")
 	err := writeFileAtomic(target, []byte("{}"), 0o644)

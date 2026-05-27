@@ -32,8 +32,8 @@ func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
 	if err != nil {
 		return nil, transportError("TarGzDir", "create gzip writer", err)
 	}
-	gw.Header.ModTime = time.Unix(0, 0)
-	gw.Header.OS = 0
+	gw.ModTime = time.Unix(0, 0)
+	gw.OS = 0
 
 	tw := tar.NewWriter(gw)
 	for _, path := range entries {
@@ -125,8 +125,8 @@ func TarGzDirFiles(fsDir, prefixPath string, skipNames map[string]struct{}) ([]b
 	if err != nil {
 		return nil, transportError("TarGzDirFiles", "create gzip writer", err)
 	}
-	gw.Header.ModTime = time.Unix(0, 0)
-	gw.Header.OS = 0
+	gw.ModTime = time.Unix(0, 0)
+	gw.OS = 0
 
 	tw := tar.NewWriter(gw)
 	for _, path := range filePaths {
@@ -216,7 +216,7 @@ func UntarGzDir(gzipStream io.Reader, dest string) error {
 				return transportError("UntarGzDir", "open file "+target, err)
 			}
 			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
+				_ = f.Close()
 				return transportError("UntarGzDir", "copy file "+target, err)
 			}
 			if err := f.Close(); err != nil {

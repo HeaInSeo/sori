@@ -1,0 +1,215 @@
+version: "2"
+
+# ------------------------------------------------------------------------------
+# Run options
+# ------------------------------------------------------------------------------
+run:
+  allow-parallel-runners: true
+
+# ------------------------------------------------------------------------------
+# Linters
+# ------------------------------------------------------------------------------
+linters:
+  default: none
+
+  enable:
+    # Loop variable capture (Go 1.22+ range semantics)
+    - copyloopvar
+
+    # Import boundary enforcement (see depguard settings below)
+    - depguard
+
+    # Duplicate code detection
+    - dupl
+
+    # Missing error-return checks
+    - errcheck
+
+    # Repeated string literals that could be constants
+    - goconst
+
+    # Cognitive complexity limit
+    - gocognit
+
+    # Cyclomatic complexity limit
+    - gocyclo
+
+    # go vet (includes copylocks, shadow)
+    - govet
+
+    # Ineffective assignments
+    - ineffassign
+
+    # Line length
+    - lll
+
+    # Spelling
+    - misspell
+
+    # Naked returns
+    - nakedret
+
+    # Slice pre-allocation hints
+    - prealloc
+
+    # Style / quality checks
+    - revive
+
+    # Strong static analysis (replaces many individual checkers)
+    - staticcheck
+
+    # Unnecessary type conversions
+    - unconvert
+
+    # Unused function parameters
+    - unparam
+
+    # Unused code
+    - unused
+
+  settings:
+    # --------------------------------------------------------------------------
+    # depguard: keep sori a pure OCI library — no Kubernetes dependencies.
+    # archiveutil and catalogutil are also guarded from importing the root
+    # sori package so they stay reusable standalone utilities.
+    # --------------------------------------------------------------------------
+    depguard:
+      rules:
+        no_k8s:
+          files:
+            - "**/*.go"
+          deny:
+            - pkg: "k8s.io/**"
+              desc: "sori is a pure OCI library; Kubernetes dependencies are not allowed."
+            - pkg: "sigs.k8s.io/**"
+              desc: "sori is a pure OCI library; controller-runtime dependencies are not allowed."
+
+        archiveutil_no_sori_root:
+          files:
+            - "archiveutil/**/*.go"
+          deny:
+            - pkg: "github.com/HeaInSeo/sori"
+              desc: "archiveutil must stay a self-contained utility and must not import the root sori package."
+
+        catalogutil_no_sori_root:
+          files:
+            - "catalogutil/**/*.go"
+          deny:
+            - pkg: "github.com/HeaInSeo/sori"
+              desc: "catalogutil must stay a self-contained utility and must not import the root sori package."
+
+    # --------------------------------------------------------------------------
+    # govet — shadow excluded: shadowing in if-init and closure scopes is
+    # idiomatic Go and produces too many false positives.
+    # --------------------------------------------------------------------------
+    govet:
+      enable:
+        - copylocks
+
+    # --------------------------------------------------------------------------
+    # gocyclo / gocognit — fetch and publish functions are inherently complex
+    # --------------------------------------------------------------------------
+    gocyclo:
+      min-complexity: 20
+
+    gocognit:
+      min-complexity: 20
+
+    # --------------------------------------------------------------------------
+    # goconst
+    # --------------------------------------------------------------------------
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+
+    # --------------------------------------------------------------------------
+    # errcheck — defer close and best-effort cleanup are intentionally ignored.
+    # --------------------------------------------------------------------------
+    errcheck:
+      exclude-functions:
+        - "os.Remove"
+        - "os.RemoveAll"
+        - "os.Chmod"
+
+    # --------------------------------------------------------------------------
+    # lll — raised to 170 to accommodate long OCI/ORAS function signatures
+    # that include clock-injection parameters (now func() time.Time).
+    # --------------------------------------------------------------------------
+    lll:
+      line-length: 170
+
+    # --------------------------------------------------------------------------
+    # revive
+    # --------------------------------------------------------------------------
+    revive:
+      rules:
+        - name: comment-spacings
+        - name: import-shadowing
+
+  # ----------------------------------------------------------------------------
+  # Exclusions
+  # ----------------------------------------------------------------------------
+  exclusions:
+    generated: lax
+
+    rules:
+      # Test files: relax dupl, lll, complexity, and prealloc
+      - linters:
+          - dupl
+          - lll
+          - gocognit
+          - gocyclo
+          - goconst
+          - unparam
+          - prealloc
+          - depguard
+        path: ".*_test\\.go"
+
+      # The parallel fetch worker closure and publish loop are intentionally
+      # dense — complexity warnings on these specific functions are accepted.
+      - linters:
+          - gocognit
+          - gocyclo
+        path: "volume_publish_fetch\\.go"
+
+      # catalogutil has its own inline writeFileAtomic copy — dupl is expected.
+      - linters:
+          - dupl
+        path: "catalogutil/json_catalog\\.go"
+
+      # archiveutil tar/gz functions are inherently complex IO state machines.
+      - linters:
+          - gocognit
+          - gocyclo
+        path: "archiveutil/archive\\.go"
+
+      # defer X.Close() is idiomatic Go — errcheck cannot handle the error there.
+      - linters:
+          - errcheck
+        source: "^\\s+defer "
+
+      # writeFileAtomic perm is kept as a parameter for future flexibility.
+      # archiveutil/errors.go validationError wraps nil intentionally for API symmetry.
+      - linters:
+          - unparam
+        path: "(fileutil\\.go|archiveutil/errors\\.go|catalogutil/errors\\.go)"
+
+    paths:
+      - third_party$
+      - builtin$
+      - ^examples
+
+# ------------------------------------------------------------------------------
+# Formatters
+# ------------------------------------------------------------------------------
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - ^examples

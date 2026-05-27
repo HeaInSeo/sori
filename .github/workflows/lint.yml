@@ -1,0 +1,40 @@
+name: Lint
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
+      - ".github/**/*.md"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
+      - ".github/**/*.md"
+
+permissions:
+  contents: read
+
+# Node.js 24 opt-in (enforcement: 2026-06-02)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Run on Ubuntu
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run lint guardrail
+        run: make lint
