@@ -28,6 +28,12 @@ const (
 	annotationVolumeDisplayName = "org.example.volumeDisplayName"
 )
 
+const (
+	annotationLayerKind = "org.example.layerKind"
+	layerKindRootFiles  = "root-files"
+	layerKindPartition  = "partition"
+)
+
 // rootFileSkipNames lists files that must not appear in the root-files layer
 // because they are handled via other mechanisms (config descriptor, fetch-side
 // reconstruction).
@@ -94,6 +100,7 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 			Size:      int64(len(layerData)),
 			Annotations: map[string]string{
 				annotationPartitionPath: rootBase,
+				annotationLayerKind:     layerKindPartition,
 			},
 		}
 		pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
@@ -118,6 +125,7 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 				Size:      int64(len(rootFileData)),
 				Annotations: map[string]string{
 					annotationPartitionPath: rootBase,
+					annotationLayerKind:     layerKindRootFiles,
 				},
 			}
 			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(rootFileData))
@@ -156,6 +164,7 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 				Size:      int64(len(layerData)),
 				Annotations: map[string]string{
 					annotationPartitionPath: part.Path,
+					annotationLayerKind:     layerKindPartition,
 				},
 			}
 			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
@@ -262,29 +271,49 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 	vi := &VolumeIndex{
 		VolumeRef:   manifestDesc.Digest.String(),
 		DisplayName: manifest.Annotations[annotationVolumeDisplayName],
-		Partitions:  make([]Partition, len(manifest.Layers)),
+		Partitions:  nil,
 	}
 	if ts := manifest.Annotations[ocispec.AnnotationCreated]; ts != "" {
 		vi.CreatedAt = ts
 	}
 
 	seen := make(map[string]struct{})
+	var partitionPaths []string
 
-	for i, layerDesc := range manifest.Layers {
+	for _, layerDesc := range manifest.Layers {
 		layerRC, err := store.Fetch(ctx, layerDesc)
 		if err != nil {
 			return nil, transportError("FetchVolSeq", fmt.Sprintf("fetch layer %s", layerDesc.Digest), err)
 		}
 		partPath := layerDesc.Annotations[annotationPartitionPath]
+		layerKind := layerDesc.Annotations[annotationLayerKind]
 		if partPath == "" {
 			_ = layerRC.Close()
 			return nil, integrityError("FetchVolSeq", fmt.Sprintf("missing partitionPath annotation for layer %s", layerDesc.Digest), nil)
+		}
+		if filepath.IsAbs(partPath) {
+			_ = layerRC.Close()
+			return nil, integrityError("FetchVolSeq", "partition path must be relative: "+partPath, nil)
+		}
+		if !filepath.IsLocal(partPath) {
+			_ = layerRC.Close()
+			return nil, integrityError("FetchVolSeq", "partition path is not local: "+partPath, nil)
 		}
 		if _, dup := seen[partPath]; dup {
 			_ = layerRC.Close()
 			return nil, conflictError("FetchVolSeq", fmt.Sprintf("duplicate partition path %q", partPath), nil)
 		}
 		seen[partPath] = struct{}{}
+
+		if layerKind == "" || layerKind == layerKindPartition {
+			for _, existing := range partitionPaths {
+				if partitionPathsOverlap(existing, partPath) {
+					_ = layerRC.Close()
+					return nil, integrityError("FetchVolSeq", fmt.Sprintf("partition paths overlap: %q and %q", existing, partPath), nil)
+				}
+			}
+			partitionPaths = append(partitionPaths, partPath)
+		}
 
 		if err := os.MkdirAll(destRoot, 0o755); err != nil {
 			_ = layerRC.Close()
@@ -297,7 +326,9 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 		if err := layerRC.Close(); err != nil {
 			return nil, transportError("FetchVolSeq", fmt.Sprintf("close layer reader %s", layerDesc.Digest), err)
 		}
-		vi.Partitions[i] = Partition{Name: partPath, Path: partPath, ManifestRef: layerDesc.Digest.String()}
+		if layerKind == "" || layerKind == layerKindPartition {
+			vi.Partitions = append(vi.Partitions, Partition{Name: partPath, Path: partPath, ManifestRef: layerDesc.Digest.String()})
+		}
 	}
 
 	if err := restoreConfigBlob(ctx, store, manifest, destRoot); err != nil {
@@ -336,30 +367,47 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 	vi := &VolumeIndex{
 		VolumeRef:   manifestDesc.Digest.String(),
 		DisplayName: manifest.Annotations[annotationVolumeDisplayName],
-		Partitions:  make([]Partition, n),
+		Partitions:  nil,
 	}
 	if ts := manifest.Annotations[ocispec.AnnotationCreated]; ts != "" {
 		vi.CreatedAt = ts
 	}
 
 	seen := make(map[string]struct{}, n)
+	var partitionPaths []string
 	type layerMeta struct {
-		idx  int
-		desc ocispec.Descriptor
-		path string
+		idx         int
+		desc        ocispec.Descriptor
+		path        string
+		isRootFiles bool
 	}
 	metas := make([]layerMeta, 0, n)
 
 	for i, layer := range manifest.Layers {
 		partPath := layer.Annotations[annotationPartitionPath]
+		layerKind := layer.Annotations[annotationLayerKind]
 		if partPath == "" {
 			return nil, integrityError("FetchVolParallel", fmt.Sprintf("missing partitionPath annotation for layer %s", layer.Digest), nil)
+		}
+		if filepath.IsAbs(partPath) {
+			return nil, integrityError("FetchVolParallel", "partition path must be relative: "+partPath, nil)
+		}
+		if !filepath.IsLocal(partPath) {
+			return nil, integrityError("FetchVolParallel", "partition path is not local: "+partPath, nil)
 		}
 		if _, dup := seen[partPath]; dup {
 			return nil, conflictError("FetchVolParallel", fmt.Sprintf("duplicate partition path %q", partPath), nil)
 		}
 		seen[partPath] = struct{}{}
-		metas = append(metas, layerMeta{i, layer, partPath})
+		if layerKind == "" || layerKind == layerKindPartition {
+			for _, existing := range partitionPaths {
+				if partitionPathsOverlap(existing, partPath) {
+					return nil, integrityError("FetchVolParallel", fmt.Sprintf("partition paths overlap: %q and %q", existing, partPath), nil)
+				}
+			}
+			partitionPaths = append(partitionPaths, partPath)
+		}
+		metas = append(metas, layerMeta{i, layer, partPath, layerKind == layerKindRootFiles})
 	}
 
 	if concurrency <= 0 || concurrency > n {
@@ -377,9 +425,10 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 	defer cancel()
 
 	type jobResult struct {
-		idx int
-		p   Partition
-		err error
+		idx         int
+		p           Partition
+		err         error
+		isRootFiles bool
 	}
 
 	jobs := make(chan layerMeta)
@@ -420,8 +469,9 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 			}
 
 			results <- jobResult{
-				idx: meta.idx,
-				p:   Partition{Name: meta.path, Path: meta.path, ManifestRef: meta.desc.Digest.String()},
+				idx:         meta.idx,
+				p:           Partition{Name: meta.path, Path: meta.path, ManifestRef: meta.desc.Digest.String()},
+				isRootFiles: meta.isRootFiles,
 			}
 		}
 	}
@@ -447,6 +497,7 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 		close(results)
 	}()
 
+	collected := make(map[int]jobResult, n)
 	var firstErr error
 	for r := range results {
 		if r.err != nil && firstErr == nil {
@@ -454,12 +505,19 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 			cancel()
 		}
 		if r.err == nil {
-			vi.Partitions[r.idx] = r.p
+			collected[r.idx] = r
 		}
 	}
 
 	if firstErr != nil {
 		return nil, firstErr
+	}
+
+	for i := 0; i < n; i++ {
+		r, ok := collected[i]
+		if ok && !r.isRootFiles {
+			vi.Partitions = append(vi.Partitions, r.p)
+		}
 	}
 
 	if err := restoreConfigBlob(ctx, store, manifest, destRoot); err != nil {
@@ -479,7 +537,7 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 // (on success), preventing the partial-extraction state that direct extraction
 // leaves behind when a layer download or unpack fails midway.
 //
-// Precondition: destRoot must be absent or empty (call ensureEmptyDir first).
+// Precondition: destRoot must not exist (call ensureEmptyDir first).
 func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
 	parent := filepath.Dir(destRoot)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -505,13 +563,6 @@ func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concur
 	}
 	if err != nil {
 		return nil, err
-	}
-
-	// Remove empty destRoot if present so Rename can succeed cross-platform.
-	if _, statErr := os.Stat(destRoot); statErr == nil {
-		if err := os.Remove(destRoot); err != nil {
-			return nil, transportError("fetchVolWithStaging", "remove empty destination for rename", err)
-		}
 	}
 
 	if err := os.Rename(stagingDir, destRoot); err != nil {
@@ -550,12 +601,23 @@ func restoreConfigBlob(ctx context.Context, fetcher content.Fetcher, manifest oc
 	if err != nil {
 		return transportError("restoreConfigBlob", "read config blob", err)
 	}
+	if err := validateJSONBytes(data); err != nil {
+		return integrityError("restoreConfigBlob", "config blob contains invalid JSON", err)
+	}
 
 	configPath := filepath.Join(destRoot, rootBase, ConfigBlobJson)
 	if err := writeFileAtomic(configPath, data, 0o644); err != nil {
 		return transportError("restoreConfigBlob", "write configblob.json", err)
 	}
 	return nil
+}
+
+// partitionPathsOverlap reports whether two partition paths overlap,
+// meaning one is a filesystem ancestor of the other.
+func partitionPathsOverlap(a, b string) bool {
+	a = filepath.ToSlash(a)
+	b = filepath.ToSlash(b)
+	return strings.HasPrefix(b+"/", a+"/") || strings.HasPrefix(a+"/", b+"/")
 }
 
 func pushDataSpecManifest(ctx context.Context, target content.Pusher, subjectDesc ocispec.Descriptor, spec *DataSpec) (*ReferrerPushResult, error) {

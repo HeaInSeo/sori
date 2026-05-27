@@ -12,9 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
+	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
 )
 
@@ -82,8 +85,8 @@ func TestTarGzDirDeterministic(t *testing.T) {
 		t.Fatalf("tarGzDirDeterministic failed: %v", err)
 	}
 
-	outFile := "test-vol.tar.gz"
-	if err := os.WriteFile(outFile, data1, 0o777); err != nil {
+	outFile := filepath.Join(t.TempDir(), "test-vol.tar.gz")
+	if err := os.WriteFile(outFile, data1, 0o644); err != nil {
 		t.Fatalf("failed to write tarball: %v", err)
 	}
 	t.Logf("wrote deterministic tarball: %s (%d bytes)", outFile, len(data1))
@@ -110,6 +113,96 @@ func TestFetchVolumeFromOCI(t *testing.T) {
 		t.Fatalf("FetchVolSeq failed: %v", err)
 	}
 
+}
+
+// TestFetchVolSeq_RejectsOverlappingPartitionPaths verifies that FetchVolSeq
+// returns an ErrIntegrity error when two layers have overlapping partition paths.
+func TestFetchVolSeq_RejectsOverlappingPartitionPaths(t *testing.T) {
+	ctx := context.Background()
+	storePath := t.TempDir()
+
+	store, err := oci.New(storePath)
+	if err != nil {
+		t.Fatalf("oci.New: %v", err)
+	}
+
+	makeTarGzLayer := func(partPath string) (ocispec.Descriptor, []byte) {
+		buf := &bytes.Buffer{}
+		gw := gzip.NewWriter(buf)
+		tw := tar.NewWriter(gw)
+		hdr := &tar.Header{
+			Name:     partPath + "/",
+			Typeflag: tar.TypeDir,
+			Mode:     0755,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("WriteHeader: %v", err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatalf("tar close: %v", err)
+		}
+		if err := gw.Close(); err != nil {
+			t.Fatalf("gzip close: %v", err)
+		}
+		data := buf.Bytes()
+		desc := ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageLayerGzip,
+			Digest:    digest.FromBytes(data),
+			Size:      int64(len(data)),
+			Annotations: map[string]string{
+				annotationPartitionPath: partPath,
+				annotationLayerKind:     layerKindPartition,
+			},
+		}
+		return desc, data
+	}
+
+	desc1, data1 := makeTarGzLayer("vol/sub")
+	desc2, data2 := makeTarGzLayer("vol/sub/deeper")
+
+	if err := store.Push(ctx, desc1, bytes.NewReader(data1)); err != nil {
+		t.Fatalf("push layer1: %v", err)
+	}
+	if err := store.Push(ctx, desc2, bytes.NewReader(data2)); err != nil {
+		t.Fatalf("push layer2: %v", err)
+	}
+
+	configBlob := []byte("{}")
+	configDesc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageConfig,
+		Digest:    digest.FromBytes(configBlob),
+		Size:      int64(len(configBlob)),
+	}
+	if err := store.Push(ctx, configDesc, bytes.NewReader(configBlob)); err != nil {
+		t.Fatalf("push config: %v", err)
+	}
+
+	manifestDesc, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1,
+		ocispec.MediaTypeImageManifest,
+		oras.PackManifestOptions{
+			ConfigDescriptor: &configDesc,
+			Layers:           []ocispec.Descriptor{desc1, desc2},
+			ManifestAnnotations: map[string]string{
+				ocispec.AnnotationCreated:   time.Now().UTC().Format(time.RFC3339),
+				annotationVolumeDisplayName: "overlap-test",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("PackManifest: %v", err)
+	}
+	if err := store.Tag(ctx, manifestDesc, "overlap.v1"); err != nil {
+		t.Fatalf("Tag: %v", err)
+	}
+
+	destDir := t.TempDir()
+	_, err = FetchVolSeq(ctx, destDir, storePath, "overlap.v1")
+	if err == nil {
+		t.Fatal("expected error for overlapping partition paths, got nil")
+	}
+	if !errors.Is(err, ErrIntegrity) && !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("expected ErrIntegrity or 'overlap' in error, got %v", err)
+	}
 }
 
 // TestPushLocalToRemote_Harbor 실제 Harbor 레지스트리에 푸시
@@ -655,6 +748,88 @@ func TestPublishFetchRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPublishFetchRoundTrip_WithRootFiles(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	// 1. Create a temp vol dir with root files and one partition subdir.
+	volDir := filepath.Join(tmp, "vol")
+	if err := os.MkdirAll(filepath.Join(volDir, "docs"), 0o755); err != nil {
+		t.Fatalf("MkdirAll docs: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(volDir, "partA"), 0o755); err != nil {
+		t.Fatalf("MkdirAll partA: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(volDir, "README.md"), []byte("# readme"), 0o644); err != nil {
+		t.Fatalf("WriteFile README.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(volDir, "docs", "guide.txt"), []byte("guide content"), 0o644); err != nil {
+		t.Fatalf("WriteFile guide.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(volDir, "partA", "data.bin"), []byte("binary data"), 0o644); err != nil {
+		t.Fatalf("WriteFile data.bin: %v", err)
+	}
+
+	// 2. Create OCI store and client.
+	ociStore := filepath.Join(tmp, "oci")
+	client := NewClient(WithLocalStorePath(ociStore))
+
+	// 3. Package the volume.
+	pkg, err := client.PackageVolume(ctx, PackageRequest{
+		SourceDir:   volDir,
+		Tag:         "rf.v1",
+		DisplayName: "RF Test",
+	})
+	if err != nil {
+		t.Fatalf("PackageVolume: %v", err)
+	}
+	// Should have exactly 1 partition (partA); docs is a subdir but should be packaged in root-files layer (not as partition).
+	// Actually GenerateVolumeIndex picks up all subdirs: docs and partA are both partitions.
+	// The root-files layer carries README.md only. Partitions carry docs and partA.
+	if len(pkg.Partitions) == 0 {
+		t.Fatalf("expected at least 1 partition, got 0")
+	}
+
+	// 4. Fetch to destDir.
+	destDir := filepath.Join(tmp, "dest")
+	volDirBase := filepath.Base(volDir)
+	vi, err := FetchVolSeq(ctx, destDir, ociStore, "rf.v1")
+	if err != nil {
+		t.Fatalf("FetchVolSeq: %v", err)
+	}
+
+	// 5. Assert README.md was restored.
+	readmePath := filepath.Join(destDir, volDirBase, "README.md")
+	readmeData, err := os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatalf("README.md not restored: %v", err)
+	}
+	if string(readmeData) != "# readme" {
+		t.Fatalf("README.md content mismatch: got %q", readmeData)
+	}
+
+	// 6. Assert guide.txt was restored.
+	guidePath := filepath.Join(destDir, volDirBase, "docs", "guide.txt")
+	guideData, err := os.ReadFile(guidePath)
+	if err != nil {
+		t.Fatalf("docs/guide.txt not restored: %v", err)
+	}
+	if string(guideData) != "guide content" {
+		t.Fatalf("guide.txt content mismatch: got %q", guideData)
+	}
+
+	// 7. Assert vi.Partitions does not contain a root-files pseudo-entry — all
+	//    partition entries should be actual subdirectory partitions (docs, partA).
+	for _, p := range vi.Partitions {
+		if p.Path == volDirBase {
+			t.Fatalf("vi.Partitions must not contain root-files pseudo-entry (path=%q)", p.Path)
+		}
+	}
+	if len(vi.Partitions) != len(pkg.Partitions) {
+		t.Fatalf("Partitions count mismatch: pkg=%d vi=%d", len(pkg.Partitions), len(vi.Partitions))
+	}
+}
+
 func TestPackageVolumeToStore(t *testing.T) {
 	ctx := context.Background()
 	storePath := filepath.Join(t.TempDir(), "oci")
@@ -738,6 +913,19 @@ func TestClientFetchVolume_RequireEmptyDestination(t *testing.T) {
 	})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+}
+
+func TestClientFetchVolume_RequireEmptyDestination_EmptyDir(t *testing.T) {
+	// An empty but existing dir must also be rejected when RequireEmptyDestination=true.
+	dest := t.TempDir()
+	client := NewClient()
+	_, err := client.FetchVolume(context.Background(), dest, "./repo", "v1.0.0", FetchOptions{
+		Concurrency:             1,
+		RequireEmptyDestination: true,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict for empty-but-existing dest, got %v", err)
 	}
 }
 

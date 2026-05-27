@@ -409,7 +409,7 @@ var (
 
 추가 정책:
 - `PackageOptions.RequireConfigBlob=true`이면 `configblob.json` 자동 생성을 허용하지 않고, 호출자가 config blob을 명시적으로 제공해야 한다.
-- `FetchOptions.RequireEmptyDestination=true`이면 `destRoot`가 비어 있지 않을 때 `ErrConflict`를 반환한다. 또한 staging 디렉터리(`destRoot` 옆 `.staging-*`)에 먼저 추출한 뒤 성공 시 원자적 rename으로 `destRoot`를 채우므로, 중간 실패가 발생해도 `destRoot`는 untouched 또는 완전히 채워진 상태 중 하나임이 보장된다.
+- `FetchOptions.RequireEmptyDestination=true`이면 `destRoot`가 이미 존재하면(비어 있어도) `ErrConflict`를 반환한다. 또한 staging 디렉터리(`destRoot` 옆 `.staging-*`)에 먼저 추출한 뒤 성공 시 원자적 rename으로 `destRoot`를 채우므로, 중간 실패가 발생해도 `destRoot`는 untouched 또는 완전히 채워진 상태 중 하나임이 보장된다.
 
 ### 등록 / Catalog API
 

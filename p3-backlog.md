@@ -19,6 +19,7 @@ Acceptable while dataset sizes remain small (development / integration use).
 **Intended design when picked up**  
 - Replace `TarGzDir` with a streaming variant that writes directly to an
   `io.Writer` (pipe or temp file).
+- Short-term first step: write the tar to a temp file rather than a memory buffer, then stream from the temp file.
 - Thread the writer through `pushIfNeeded` so ORAS receives an `io.Reader`
   rather than a fully-materialized `[]byte`.
 - Consider content-addressable chunked push (ORAS streaming copy) to avoid
@@ -34,8 +35,9 @@ and extract from it. There is no code path that pulls layers directly from a
 remote registry (e.g., Harbor, GHCR) into a local directory.
 
 **Accepted trade-off**  
-The current two-step workflow (remote pull → local OCI store → extract) is
-functional for existing callers.
+The current two-step workflow (remote pull → local OCI store → extract) relies
+on external tools such as `oras copy` or similar; it is not a sori internal API.
+This is functional for existing callers.
 
 **Intended design when picked up**  
 - Add `Client.FetchVolumeFromRemote(ctx, destRoot, remoteRepo, tag string,
@@ -57,21 +59,26 @@ state that is indistinguishable from a complete extraction. Individual
 per-directory.
 
 **Current mitigation**  
-`RequireEmptyDestination=true` + `fetchVolWithStaging`:
+`RequireEmptyDestination=true` + `fetchVolWithStaging` (see also "Implemented mitigation" below).
+
+**Implemented mitigation**  
+The current implementation provides the following guarantee when
+`RequireEmptyDestination=true`:
 
 ```
-ensureEmptyDir(destRoot)           // fail fast if non-empty
+ensureEmptyDir(destRoot)           // fail fast if destRoot already exists (even if empty)
 stagingDir = MkdirTemp(parent, …)  // sibling of destRoot, same filesystem
 FetchVolSeq/Parallel → stagingDir  // all extraction to staging
 os.Rename(stagingDir, destRoot)    // atomic directory swap on success
 os.RemoveAll(stagingDir)           // deferred cleanup on failure
 ```
 
-This guarantees `destRoot` is either untouched or fully populated when
-`RequireEmptyDestination=true`. Legacy callers that pass `false` still get
-direct extraction.
+`destRoot` is either untouched (on failure) or fully populated (on success).
+`ensureEmptyDir` now rejects `destRoot` even if it is empty but already exists,
+preventing accidental overwrites. Legacy callers that pass
+`RequireEmptyDestination=false` still get direct extraction without staging.
 
-**Known gaps / next steps**
+**P3 remaining**
 
 1. **Validation before commit** — after staging is fully populated but before
    rename, run a lightweight integrity check (e.g., verify every partition

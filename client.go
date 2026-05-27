@@ -129,17 +129,13 @@ func (c *Client) FetchVolume(ctx context.Context, destRoot, repo, tag string, op
 }
 
 func ensureEmptyDir(path string) error {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return transportError("FetchVolume", "read destination directory", err)
+	if _, err := os.Stat(path); err == nil {
+		return conflictError("FetchVolume", "destination already exists; it must not exist when RequireEmptyDestination is true", nil)
+	} else if os.IsNotExist(err) {
+		return nil
+	} else {
+		return transportError("FetchVolume", "stat destination directory", err)
 	}
-	if len(entries) > 0 {
-		return conflictError("FetchVolume", "destination directory is not empty", nil)
-	}
-	return nil
 }
 
 // PublishVolume publishes an already-built VolumeIndex through the client path.
