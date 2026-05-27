@@ -5,6 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -45,5 +48,250 @@ func TestUntarGzDir_SymlinkEscapeTypedError(t *testing.T) {
 	err := UntarGzDir(bytes.NewReader(buf.Bytes()), t.TempDir())
 	if !errors.Is(err, ErrValidation) {
 		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
+
+func TestTarGzDir_RoundTrip(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write a.txt: %v", err)
+	}
+	subdir := filepath.Join(src, "sub")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "b.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("write b.txt: %v", err)
+	}
+
+	data, err := TarGzDir(src, "mydir")
+	if err != nil {
+		t.Fatalf("TarGzDir: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("expected non-empty archive")
+	}
+
+	dest := t.TempDir()
+	if err := UntarGzDir(bytes.NewReader(data), dest); err != nil {
+		t.Fatalf("UntarGzDir: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dest, "mydir", "a.txt"))
+	if err != nil {
+		t.Fatalf("read a.txt: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("a.txt content mismatch: got %q", got)
+	}
+
+	got, err = os.ReadFile(filepath.Join(dest, "mydir", "sub", "b.txt"))
+	if err != nil {
+		t.Fatalf("read b.txt: %v", err)
+	}
+	if string(got) != "world" {
+		t.Fatalf("b.txt content mismatch: got %q", got)
+	}
+}
+
+func TestTarGzDir_Deterministic(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "z.txt"), []byte("z"), 0o644); err != nil {
+		t.Fatalf("write z.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("write a.txt: %v", err)
+	}
+
+	data1, err := TarGzDir(src, "p")
+	if err != nil {
+		t.Fatalf("first TarGzDir: %v", err)
+	}
+	data2, err := TarGzDir(src, "p")
+	if err != nil {
+		t.Fatalf("second TarGzDir: %v", err)
+	}
+	if !bytes.Equal(data1, data2) {
+		t.Fatal("TarGzDir output is not deterministic")
+	}
+}
+
+func TestTarGzDir_NonExistentDir(t *testing.T) {
+	_, err := TarGzDir(filepath.Join(t.TempDir(), "nonexistent"), "p")
+	if err == nil {
+		t.Fatal("expected error for non-existent source dir")
+	}
+}
+
+func TestTarGzDirFiles_BasicRoundTrip(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "file1.txt"), []byte("content1"), 0o644); err != nil {
+		t.Fatalf("write file1: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "file2.txt"), []byte("content2"), 0o644); err != nil {
+		t.Fatalf("write file2: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(src, "subdir"), 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+
+	data, err := TarGzDirFiles(src, "prefix", nil)
+	if err != nil {
+		t.Fatalf("TarGzDirFiles: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("expected non-empty archive")
+	}
+
+	dest := t.TempDir()
+	if err := UntarGzDir(bytes.NewReader(data), dest); err != nil {
+		t.Fatalf("UntarGzDir: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dest, "prefix", "file1.txt"))
+	if err != nil {
+		t.Fatalf("read file1: %v", err)
+	}
+	if string(got) != "content1" {
+		t.Fatalf("file1 content mismatch: got %q", got)
+	}
+
+	if _, err := os.Stat(filepath.Join(dest, "prefix", "subdir")); !os.IsNotExist(err) {
+		t.Fatal("subdirectory should not be included in TarGzDirFiles output")
+	}
+}
+
+func TestTarGzDirFiles_SkipNames(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "keep.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write keep.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "skip.txt"), []byte("skip"), 0o644); err != nil {
+		t.Fatalf("write skip.txt: %v", err)
+	}
+
+	data, err := TarGzDirFiles(src, "p", map[string]struct{}{"skip.txt": {}})
+	if err != nil {
+		t.Fatalf("TarGzDirFiles: %v", err)
+	}
+
+	dest := t.TempDir()
+	if err := UntarGzDir(bytes.NewReader(data), dest); err != nil {
+		t.Fatalf("UntarGzDir: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dest, "p", "skip.txt")); !os.IsNotExist(err) {
+		t.Fatal("skip.txt should have been excluded")
+	}
+	if _, err := os.Stat(filepath.Join(dest, "p", "keep.txt")); err != nil {
+		t.Fatalf("keep.txt should exist: %v", err)
+	}
+}
+
+func TestTarGzDirFiles_AllSkipped_ReturnsNil(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "skip.txt"), []byte("skip"), 0o644); err != nil {
+		t.Fatalf("write skip.txt: %v", err)
+	}
+
+	data, err := TarGzDirFiles(src, "p", map[string]struct{}{"skip.txt": {}})
+	if err != nil {
+		t.Fatalf("TarGzDirFiles: %v", err)
+	}
+	if data != nil {
+		t.Fatalf("expected nil for no-file archive, got %d bytes", len(data))
+	}
+}
+
+func TestTarGzDirFiles_EmptyDir_ReturnsNil(t *testing.T) {
+	data, err := TarGzDirFiles(t.TempDir(), "p", nil)
+	if err != nil {
+		t.Fatalf("TarGzDirFiles: %v", err)
+	}
+	if data != nil {
+		t.Fatalf("expected nil for empty dir, got %d bytes", len(data))
+	}
+}
+
+func TestTarGzDirFiles_NonExistentDir(t *testing.T) {
+	_, err := TarGzDirFiles(filepath.Join(t.TempDir(), "nonexistent"), "p", nil)
+	if err == nil {
+		t.Fatal("expected error for non-existent directory")
+	}
+	if !errors.Is(err, ErrTransport) {
+		t.Fatalf("expected ErrTransport, got %v", err)
+	}
+}
+
+func TestError_ErrorString_AllBranches(t *testing.T) {
+	wrapped := fmt.Errorf("cause")
+	cases := []struct {
+		e    *Error
+		want string
+	}{
+		{nil, "<nil>"},
+		{&Error{Op: "op", Message: "msg", Err: wrapped}, "op: msg: cause"},
+		{&Error{Op: "op", Message: "msg"}, "op: msg"},
+		{&Error{Op: "op", Err: wrapped}, "op: cause"},
+		{&Error{Op: "op"}, "op"},
+	}
+	for _, c := range cases {
+		got := c.e.Error()
+		if got != c.want {
+			t.Errorf("Error() = %q, want %q", got, c.want)
+		}
+	}
+}
+
+func TestError_Unwrap(t *testing.T) {
+	cause := fmt.Errorf("cause")
+	e := &Error{Err: cause}
+	if e.Unwrap() != cause {
+		t.Fatalf("Unwrap: expected %v, got %v", cause, e.Unwrap())
+	}
+
+	var nilErr *Error
+	if nilErr.Unwrap() != nil {
+		t.Fatal("nil Error.Unwrap() must return nil")
+	}
+}
+
+func TestError_Is_NonError(t *testing.T) {
+	e := &Error{Kind: KindTransport, Op: "op"}
+	if errors.Is(e, fmt.Errorf("other")) {
+		t.Fatal("Is() must return false for non-*Error target")
+	}
+}
+
+func TestTransportError_IsErrTransport(t *testing.T) {
+	err := transportError("op", "msg", nil)
+	if !errors.Is(err, ErrTransport) {
+		t.Fatalf("expected ErrTransport, got %v", err)
+	}
+}
+
+func TestSecureJoinArchivePath_AbsoluteEntry(t *testing.T) {
+	_, err := SecureJoinArchivePath(t.TempDir(), "/abs/path")
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation for absolute path, got %v", err)
+	}
+}
+
+func TestSecureJoinArchivePath_EmptyEntry(t *testing.T) {
+	_, err := SecureJoinArchivePath(t.TempDir(), ".")
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation for '.' entry, got %v", err)
+	}
+}
+
+func TestSecureJoinArchivePath_ValidEntry(t *testing.T) {
+	dest := t.TempDir()
+	got, err := SecureJoinArchivePath(dest, "sub/file.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := filepath.Join(dest, "sub", "file.txt")
+	if got != expected {
+		t.Fatalf("got %q, want %q", got, expected)
 	}
 }

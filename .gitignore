@@ -1,0 +1,13 @@
+# Build artifacts
+bin/
+reports/
+
+# Test fixtures generated at runtime
+test-vol.tar.gz
+test-vol/volume-index.json
+testRoot/
+repo/
+
+# IDE and tooling
+.codex
+.claude/
