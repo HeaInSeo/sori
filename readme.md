@@ -202,6 +202,10 @@ func (vi *VolumeIndex) SaveToFile(rootPath string) error
 func (vi *VolumeIndex) PublishVolume(ctx, volPath, volName string, configBlob []byte) (*VolumeIndex, error)
 ```
 
+**파티션 모델**: `GenerateVolumeIndex`는 `rootPath` 바로 아래의 1단계 서브디렉터리만 파티션으로 등록한다. 중첩 디렉터리는 상위 파티션의 레이어에 포함된다. `rootPath` 바로 아래의 일반 파일(예: `README.md`)은 별도 root-files 레이어로 패키징되어 fetch 시 복원된다.
+
+**fetch 복원 보장**: `FetchVolSeq` / `FetchVolParallel` 완료 후 `configblob.json`과 `volume-index.json`이 `destRoot` 하위에 원자적으로 기록된다. DisplayName과 CreatedAt은 OCI manifest annotation에서 복원된다.
+
 `PublishVolume`은 각 레이어 descriptor에 `"org.example.partitionPath"` 어노테이션을 설정한다.  
 이 어노테이션이 없으면 `FetchVolSeq` / `FetchVolParallel` 시 오류가 발생하므로 직접 descriptor를 만들 때 반드시 포함해야 한다.
 
@@ -405,7 +409,7 @@ var (
 
 추가 정책:
 - `PackageOptions.RequireConfigBlob=true`이면 `configblob.json` 자동 생성을 허용하지 않고, 호출자가 config blob을 명시적으로 제공해야 한다.
-- `FetchOptions.RequireEmptyDestination=true`이면 복원 대상 디렉터리가 비어 있지 않을 때 `ErrConflict`를 반환한다.
+- `FetchOptions.RequireEmptyDestination=true`이면 `destRoot`가 비어 있지 않을 때 `ErrConflict`를 반환한다. 또한 staging 디렉터리(`destRoot` 옆 `.staging-*`)에 먼저 추출한 뒤 성공 시 원자적 rename으로 `destRoot`를 채우므로, 중간 실패가 발생해도 `destRoot`는 untouched 또는 완전히 채워진 상태 중 하나임이 보장된다.
 
 ### 등록 / Catalog API
 
@@ -452,9 +456,11 @@ func (c *DataCatalog) List(stableRef string) ([]RegisteredDataDefinition, error)
 ### tar.gz 유틸리티
 
 ```go
-func TarGzDir(fsDir, prefixPath string) ([]byte, error)   // 결정론적 tar.gz 생성
-func UntarGzDir(gzipStream io.Reader, dest string) error   // tar.gz 해제
+func TarGzDir(fsDir, prefixPath string) ([]byte, error)   // 디렉터리 전체 결정론적 tar.gz 생성
+func UntarGzDir(gzipStream io.Reader, dest string) error   // tar.gz 해제 (path traversal 방어 포함)
 ```
+
+`archiveutil.TarGzDirFiles(fsDir, prefixPath string, skipNames map[string]struct{})` — root-level 일반 파일만 tar.gz로 묶는다(서브디렉터리 제외). `PublishVolume`이 내부적으로 root-files 레이어 생성에 사용한다.
 
 ## API 안정도
 
@@ -487,6 +493,16 @@ root 권한이 없는 환경에서는 `TestLoadConfig` / `TestInitConfig`가 자
 - referrer 조회(list referrers) API는 미구현. 현재는 push까지만 제공한다.
 - `toolprofile` / `security` referrer push는 payload 구조를 호출자가 직접 구성해야 한다. payload 스펙은 NodeVault의 `docs/OBSERVED_PROFILE_SPEC.md`, `docs/SECURITY_SCAN_SPEC.md` 참조.
 - 과거 stub였던 `local-registry.go`, `pipeline-index.go`, `oci-crud.go`는 제거했다. 판단 배경은 [docs/stub-status.md](docs/stub-status.md) 참조.
+
+### P3 backlog (연기된 항목)
+
+상세 설계는 [p3-backlog.md](p3-backlog.md) 참조.
+
+| 항목 | 현재 상태 | 해결 방향 |
+|------|-----------|-----------|
+| **Streaming tar/push** | 레이어 전체를 메모리에 올림. 대용량 데이터셋에서 OOM 위험 | `io.Writer` 기반 스트리밍 파이프라인으로 교체 |
+| **Remote registry fetch** | local OCI store에서만 추출 가능. 원격 레지스트리 직접 fetch 경로 없음 | `Client.FetchVolumeFromRemote` 추가 |
+| **Staging 고도화** | `RequireEmptyDestination=true` + rename으로 fresh fetch는 원자적. 업데이트(덮어쓰기) 및 commit 전 무결성 검증은 미구현 | validate-before-commit, 3-phase overwrite 설계 필요 |
 
 ## 라이선스
 
