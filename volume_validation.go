@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/seoyhaein/sori/archiveutil"
+	"github.com/HeaInSeo/sori/archiveutil"
 )
 
 func loadMetadataJSON(path string) ([]byte, error) {
@@ -29,51 +29,31 @@ func loadMetadataJSON(path string) ([]byte, error) {
 	return data, nil
 }
 
+// GenerateVolumeIndex builds a VolumeIndex from the top-level subdirectories of
+// rootPath. Only immediate child directories become partitions; nested directories
+// are included in their parent partition's layer. Root-level regular files are
+// NOT listed as partitions — they are handled as a separate layer during publish.
 func GenerateVolumeIndex(rootPath, displayName string) (*VolumeIndex, error) {
 	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
 	rootBase := filepath.Base(rootPath)
+
+	entries, err := os.ReadDir(rootPath)
+	if err != nil {
+		return nil, transportError("GenerateVolumeIndex", fmt.Sprintf("read root dir %s", rootPath), err)
+	}
+
 	var parts []Partition
-	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return transportError("GenerateVolumeIndex", fmt.Sprintf("access %s", path), err)
+	for _, d := range entries {
+		if !d.IsDir() {
+			continue
 		}
-		if path == rootPath || !d.IsDir() {
-			return nil
-		}
-
-		entries, readErr := os.ReadDir(path)
-		if readErr != nil {
-			return transportError("GenerateVolumeIndex", fmt.Sprintf("read dir %s", path), readErr)
-		}
-		hasMarker := false
-		for _, e := range entries {
-			if e.Name() == "no_deep_scan" && !e.IsDir() {
-				hasMarker = true
-				break
-			}
-		}
-
-		rel, relErr := filepath.Rel(rootPath, path)
-		if relErr != nil {
-			return transportError("GenerateVolumeIndex", fmt.Sprintf("get rel path for %s", path), relErr)
-		}
-		slashRel := filepath.ToSlash(rel)
-		fullPath := fmt.Sprintf("%s/%s", rootBase, slashRel)
 		parts = append(parts, Partition{
 			Name:        d.Name(),
-			Path:        fullPath,
+			Path:        rootBase + "/" + d.Name(),
 			ManifestRef: "",
 			CreatedAt:   now,
 			Compression: "",
 		})
-
-		if hasMarker {
-			return fs.SkipDir
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	return &VolumeIndex{
@@ -90,7 +70,7 @@ func (vi *VolumeIndex) SaveToFile(rootPath string) error {
 	if err != nil {
 		return transportError("VolumeIndex.SaveToFile", "marshal volume index", err)
 	}
-	if err := os.WriteFile(outFile, data, 0o644); err != nil {
+	if err := writeFileAtomic(outFile, data, 0o644); err != nil {
 		return transportError("VolumeIndex.SaveToFile", fmt.Sprintf("write file %s", outFile), err)
 	}
 	return nil
@@ -128,10 +108,10 @@ func ValidateVolumeDir(volDir string) ([]byte, error) {
 	cfgPath := filepath.Join(volDir, ConfigBlobJson)
 	raw, err := loadMetadataJSON(cfgPath)
 	if err != nil {
-		if os.IsNotExist(errors.Unwrap(err)) || strings.Contains(err.Error(), "no such file") {
+		if errors.Is(err, ErrNotFound) {
 			Log.Infof("ValidateVolumeDir: %q not found; creating a new empty configblob.json", cfgPath)
 			raw = []byte("{}")
-			if writeErr := os.WriteFile(cfgPath, raw, fs.FileMode(0644)); writeErr != nil {
+			if writeErr := writeFileAtomic(cfgPath, raw, 0o644); writeErr != nil {
 				return nil, transportError("ValidateVolumeDir", fmt.Sprintf("create %q", cfgPath), writeErr)
 			}
 		} else {
@@ -151,7 +131,7 @@ func writeVolumeIndex(destRoot string, vi *VolumeIndex) error {
 	if err != nil {
 		return transportError("writeVolumeIndex", "marshal VolumeIndex", err)
 	}
-	if err := os.WriteFile(indexPath, indexBytes, 0o644); err != nil {
+	if err := writeFileAtomic(indexPath, indexBytes, 0o644); err != nil {
 		return transportError("writeVolumeIndex", fmt.Sprintf("write %s", indexPath), err)
 	}
 	return nil

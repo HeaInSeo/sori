@@ -1,4 +1,4 @@
-module github.com/seoyhaein/sori
+module github.com/HeaInSeo/sori
 
 go 1.24.0
 

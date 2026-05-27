@@ -1,6 +1,10 @@
 package nodevault
 
-import "github.com/seoyhaein/sori"
+import (
+	"time"
+
+	"github.com/HeaInSeo/sori"
+)
 
 func DataSpecFromArtifactMetadata(meta *sori.ArtifactMetadata) *DataSpec {
 	if meta == nil {
@@ -56,7 +60,7 @@ func RegisteredDataDefinitionFromArtifactMetadata(meta *sori.ArtifactMetadata, r
 		StorageURI:      storageURI,
 		StableRef:       meta.Identity.StableRef,
 		Display:         display,
-		RegisteredAt:    0,
+		RegisteredAt:    time.Now().Unix(),
 		LifecyclePhase:  "Active",
 		IntegrityHealth: "Healthy",
 	}

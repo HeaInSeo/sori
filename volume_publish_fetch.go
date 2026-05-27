@@ -13,24 +13,37 @@ import (
 	"sync"
 	"time"
 
+	"github.com/HeaInSeo/sori/archiveutil"
+	"github.com/HeaInSeo/sori/registryutil"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/seoyhaein/sori/archiveutil"
-	"github.com/seoyhaein/sori/registryutil"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/oci"
 	"oras.land/oras-go/v2/registry/remote"
 )
 
+const (
+	annotationPartitionPath     = "org.example.partitionPath"
+	annotationVolumeDisplayName = "org.example.volumeDisplayName"
+)
+
+// rootFileSkipNames lists files that must not appear in the root-files layer
+// because they are handled via other mechanisms (config descriptor, fetch-side
+// reconstruction).
+var rootFileSkipNames = map[string]struct{}{
+	ConfigBlobJson:  {},
+	VolumeIndexJson: {},
+}
+
 // Deprecated: prefer Client.PackageVolume, Client.PackageVolumeWithOptions, or
 // PackageVolumeToStore so new code stays on the preferred client-based core
 // path.
 func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
-	return NewClient().PublishVolume(ctx, vi, volPath, volName, configBlob)
+	return vi.publishVolumeToStore(ctx, NewClient().localStorePath, volPath, volName, configBlob, time.Now)
 }
 
-func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
+func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volPath, volName string, configBlob []byte, now func() time.Time) (*VolumeIndex, error) {
 	store, err := oci.New(storePath)
 	if err != nil {
 		return nil, transportError("VolumeIndex.publishVolumeToStore", "init OCI store", err)
@@ -68,7 +81,7 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 	}
 
 	rootBase := filepath.Base(volPath)
-	layers := make([]ocispec.Descriptor, 0, len(vi.Partitions))
+	layers := make([]ocispec.Descriptor, 0, len(vi.Partitions)+1)
 
 	if len(vi.Partitions) == 0 {
 		layerData, err := archiveutil.TarGzDir(volPath, rootBase)
@@ -80,7 +93,7 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 			Digest:    digest.FromBytes(layerData),
 			Size:      int64(len(layerData)),
 			Annotations: map[string]string{
-				"org.example.partitionPath": rootBase,
+				annotationPartitionPath: rootBase,
 			},
 		}
 		pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
@@ -92,9 +105,47 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 		}
 		layers = append(layers, desc)
 	} else {
+		// Push root-level files (e.g., README.md) as a separate layer so they
+		// are not silently lost when only partition subdirectories are tarred.
+		rootFileData, err := archiveutil.TarGzDirFiles(volPath, rootBase, rootFileSkipNames)
+		if err != nil {
+			return nil, transportError("VolumeIndex.publishVolumeToStore", "tar.gz root files", err)
+		}
+		if rootFileData != nil {
+			desc := ocispec.Descriptor{
+				MediaType: ocispec.MediaTypeImageLayerGzip,
+				Digest:    digest.FromBytes(rootFileData),
+				Size:      int64(len(rootFileData)),
+				Annotations: map[string]string{
+					annotationPartitionPath: rootBase,
+				},
+			}
+			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(rootFileData))
+			if err != nil {
+				return nil, transportError("VolumeIndex.publishVolumeToStore", "push root files layer", err)
+			}
+			if pushedPtr != nil && *pushedPtr {
+				anyPushed = true
+			}
+			layers = append(layers, desc)
+		}
+
 		for i := range vi.Partitions {
 			part := &vi.Partitions[i]
-			fsPath := filepath.Join(volPath, strings.TrimPrefix(part.Path, rootBase+"/"))
+			if filepath.IsAbs(part.Path) {
+				return nil, validationError("VolumeIndex.publishVolumeToStore",
+					fmt.Sprintf("partition path must be relative: %q", part.Path), nil)
+			}
+			if !strings.HasPrefix(part.Path, rootBase+"/") {
+				return nil, validationError("VolumeIndex.publishVolumeToStore",
+					fmt.Sprintf("partition path %q does not start with rootBase %q", part.Path, rootBase), nil)
+			}
+			rel := strings.TrimPrefix(part.Path, rootBase+"/")
+			if rel == "" || strings.HasPrefix(filepath.Clean(rel), "..") {
+				return nil, validationError("VolumeIndex.publishVolumeToStore",
+					fmt.Sprintf("partition path %q escapes volume root", part.Path), nil)
+			}
+			fsPath := filepath.Join(volPath, rel)
 			layerData, err := archiveutil.TarGzDir(fsPath, part.Path)
 			if err != nil {
 				return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz %q", fsPath), err)
@@ -104,7 +155,7 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 				Digest:    digest.FromBytes(layerData),
 				Size:      int64(len(layerData)),
 				Annotations: map[string]string{
-					"org.example.partitionPath": part.Path,
+					annotationPartitionPath: part.Path,
 				},
 			}
 			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
@@ -134,7 +185,8 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 			ConfigDescriptor: &configDesc,
 			Layers:           layers,
 			ManifestAnnotations: map[string]string{
-				ocispec.AnnotationCreated: time.Now().UTC().Format(time.RFC3339),
+				ocispec.AnnotationCreated:   now().UTC().Format(time.RFC3339),
+				annotationVolumeDisplayName: vi.DisplayName,
 			},
 		},
 	)
@@ -208,9 +260,14 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 	}
 
 	vi := &VolumeIndex{
-		VolumeRef:  manifestDesc.Digest.String(),
-		Partitions: make([]Partition, len(manifest.Layers)),
+		VolumeRef:   manifestDesc.Digest.String(),
+		DisplayName: manifest.Annotations[annotationVolumeDisplayName],
+		Partitions:  make([]Partition, len(manifest.Layers)),
 	}
+	if ts := manifest.Annotations[ocispec.AnnotationCreated]; ts != "" {
+		vi.CreatedAt = ts
+	}
+
 	seen := make(map[string]struct{})
 
 	for i, layerDesc := range manifest.Layers {
@@ -218,7 +275,7 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 		if err != nil {
 			return nil, transportError("FetchVolSeq", fmt.Sprintf("fetch layer %s", layerDesc.Digest), err)
 		}
-		partPath := layerDesc.Annotations["org.example.partitionPath"]
+		partPath := layerDesc.Annotations[annotationPartitionPath]
 		if partPath == "" {
 			layerRC.Close()
 			return nil, integrityError("FetchVolSeq", fmt.Sprintf("missing partitionPath annotation for layer %s", layerDesc.Digest), nil)
@@ -241,6 +298,10 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 			return nil, transportError("FetchVolSeq", fmt.Sprintf("close layer reader %s", layerDesc.Digest), err)
 		}
 		vi.Partitions[i] = Partition{Name: partPath, Path: partPath, ManifestRef: layerDesc.Digest.String()}
+	}
+
+	if err := restoreConfigBlob(ctx, store, manifest, destRoot); err != nil {
+		return nil, err
 	}
 
 	if err := writeVolumeIndex(destRoot, vi); err != nil {
@@ -273,8 +334,12 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 
 	n := len(manifest.Layers)
 	vi := &VolumeIndex{
-		VolumeRef:  manifestDesc.Digest.String(),
-		Partitions: make([]Partition, n),
+		VolumeRef:   manifestDesc.Digest.String(),
+		DisplayName: manifest.Annotations[annotationVolumeDisplayName],
+		Partitions:  make([]Partition, n),
+	}
+	if ts := manifest.Annotations[ocispec.AnnotationCreated]; ts != "" {
+		vi.CreatedAt = ts
 	}
 
 	seen := make(map[string]struct{}, n)
@@ -286,7 +351,7 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 	metas := make([]layerMeta, 0, n)
 
 	for i, layer := range manifest.Layers {
-		partPath := layer.Annotations["org.example.partitionPath"]
+		partPath := layer.Annotations[annotationPartitionPath]
 		if partPath == "" {
 			return nil, integrityError("FetchVolParallel", fmt.Sprintf("missing partitionPath annotation for layer %s", layer.Digest), nil)
 		}
@@ -396,10 +461,101 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 	if firstErr != nil {
 		return nil, firstErr
 	}
+
+	if err := restoreConfigBlob(ctx, store, manifest, destRoot); err != nil {
+		return nil, err
+	}
+
 	if err := writeVolumeIndex(destRoot, vi); err != nil {
 		return nil, err
 	}
 	return vi, nil
+}
+
+// fetchVolWithStaging extracts layers to a temporary staging directory and
+// atomically renames it to destRoot only on full success.
+//
+// This guarantees destRoot is either untouched (on failure) or fully populated
+// (on success), preventing the partial-extraction state that direct extraction
+// leaves behind when a layer download or unpack fails midway.
+//
+// Precondition: destRoot must be absent or empty (call ensureEmptyDir first).
+func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
+	parent := filepath.Dir(destRoot)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return nil, transportError("fetchVolWithStaging", "create parent directory", err)
+	}
+	base := filepath.Base(destRoot)
+	stagingDir, err := os.MkdirTemp(parent, ".staging-"+base+"-*")
+	if err != nil {
+		return nil, transportError("fetchVolWithStaging", "create staging directory", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			os.RemoveAll(stagingDir)
+		}
+	}()
+
+	var vi *VolumeIndex
+	if concurrency <= 1 {
+		vi, err = FetchVolSeq(ctx, stagingDir, repo, tag)
+	} else {
+		vi, err = FetchVolParallel(ctx, stagingDir, repo, tag, concurrency)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Remove empty destRoot if present so Rename can succeed cross-platform.
+	if _, statErr := os.Stat(destRoot); statErr == nil {
+		if err := os.Remove(destRoot); err != nil {
+			return nil, transportError("fetchVolWithStaging", "remove empty destination for rename", err)
+		}
+	}
+
+	if err := os.Rename(stagingDir, destRoot); err != nil {
+		return nil, transportError("fetchVolWithStaging", "commit staging to destination", err)
+	}
+	cleanup = false
+	return vi, nil
+}
+
+// restoreConfigBlob fetches the OCI config blob from the manifest and writes it
+// as configblob.json under destRoot/<rootBase>/. This restores the original
+// configblob.json that was used as the config descriptor during publish.
+func restoreConfigBlob(ctx context.Context, fetcher content.Fetcher, manifest ocispec.Manifest, destRoot string) error {
+	if manifest.Config.MediaType != ocispec.MediaTypeImageConfig {
+		return nil
+	}
+	// Derive rootBase from the first layer's partitionPath annotation.
+	var rootBase string
+	for _, layer := range manifest.Layers {
+		if p := layer.Annotations[annotationPartitionPath]; p != "" {
+			rootBase = strings.SplitN(p, "/", 2)[0]
+			break
+		}
+	}
+	if rootBase == "" {
+		return nil
+	}
+
+	configRC, err := fetcher.Fetch(ctx, manifest.Config)
+	if err != nil {
+		return transportError("restoreConfigBlob", "fetch config blob", err)
+	}
+	defer configRC.Close()
+
+	data, err := io.ReadAll(configRC)
+	if err != nil {
+		return transportError("restoreConfigBlob", "read config blob", err)
+	}
+
+	configPath := filepath.Join(destRoot, rootBase, ConfigBlobJson)
+	if err := writeFileAtomic(configPath, data, 0o644); err != nil {
+		return transportError("restoreConfigBlob", "write configblob.json", err)
+	}
+	return nil
 }
 
 func pushDataSpecManifest(ctx context.Context, target content.Pusher, subjectDesc ocispec.Descriptor, spec *DataSpec) (*ReferrerPushResult, error) {
@@ -408,7 +564,7 @@ func pushDataSpecManifest(ctx context.Context, target content.Pusher, subjectDes
 		return nil, transportError("pushDataSpecManifest", "marshal data spec", err)
 	}
 
-	configDesc, err := oras.PushBytes(ctx, target, DataSpecMediaType, specBytes)
+	configDesc, err := oras.PushBytes(ctx, target, MediaTypeDataSpec, specBytes)
 	if err != nil {
 		return nil, transportError("pushDataSpecManifest", "push data spec blob", err)
 	}
@@ -431,6 +587,6 @@ func pushDataSpecManifest(ctx context.Context, target content.Pusher, subjectDes
 		SubjectDigest:  subjectDesc.Digest.String(),
 		ManifestDigest: manifestDesc.Digest.String(),
 		ConfigDigest:   configDesc.Digest.String(),
-		ArtifactType:   DataSpecMediaType,
+		ArtifactType:   MediaTypeDataSpec,
 	}, nil
 }

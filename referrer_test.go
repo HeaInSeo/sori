@@ -12,7 +12,7 @@ import (
 	orasoras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
 
-	"github.com/seoyhaein/sori"
+	"github.com/HeaInSeo/sori"
 )
 
 // newTestOCIStore creates a temporary OCI layout store for tests.

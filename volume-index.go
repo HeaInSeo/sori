@@ -5,9 +5,10 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/HeaInSeo/sori/registryutil"
 	"github.com/opencontainers/go-digest"
-	"github.com/seoyhaein/sori/registryutil"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 )
@@ -124,10 +125,10 @@ func PackageVolume(ctx context.Context, req PackageRequest) (*PackageResult, err
 // PackageVolumeToStore packages a dataset into the given local OCI store using
 // the preferred core packaging contract.
 func PackageVolumeToStore(ctx context.Context, localStorePath string, req PackageRequest) (*PackageResult, error) {
-	return packageVolumeToStoreWithOptions(ctx, localStorePath, req, PackageOptions{ConfigBlob: req.ConfigBlob})
+	return packageVolumeToStoreWithOptions(ctx, localStorePath, req, PackageOptions{ConfigBlob: req.ConfigBlob}, time.Now)
 }
 
-func packageVolumeToStoreWithOptions(ctx context.Context, localStorePath string, req PackageRequest, opts PackageOptions) (*PackageResult, error) {
+func packageVolumeToStoreWithOptions(ctx context.Context, localStorePath string, req PackageRequest, opts PackageOptions, now func() time.Time) (*PackageResult, error) {
 	if strings.TrimSpace(localStorePath) == "" {
 		return nil, validationError("PackageVolumeToStore", "local store path is required", nil)
 	}
@@ -166,7 +167,7 @@ func packageVolumeToStoreWithOptions(ctx context.Context, localStorePath string,
 		return nil, transportError("PackageVolumeToStore", "generate volume index", err)
 	}
 
-	published, err := vi.publishVolumeToStore(ctx, localStorePath, req.SourceDir, req.Tag, configBlob)
+	published, err := vi.publishVolumeToStore(ctx, localStorePath, req.SourceDir, req.Tag, configBlob, now)
 	if err != nil {
 		return nil, err
 	}

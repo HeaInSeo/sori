@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/seoyhaein/sori/registryutil"
+	"github.com/HeaInSeo/sori/registryutil"
 )
 
 type registryIntegrationConfig struct {

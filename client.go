@@ -78,7 +78,7 @@ func (c *Client) PackageVolume(ctx context.Context, req PackageRequest) (*Packag
 // core path with explicit core packaging options.
 func (c *Client) PackageVolumeWithOptions(ctx context.Context, req PackageRequest, opts PackageOptions) (*PackageResult, error) {
 	req.ConfigBlob = opts.ConfigBlob
-	return packageVolumeToStoreWithOptions(ctx, c.localStorePath, req, opts)
+	return packageVolumeToStoreWithOptions(ctx, c.localStorePath, req, opts, c.now)
 }
 
 // PushPackagedVolume pushes a packaged dataset using the preferred client-based
@@ -111,11 +111,16 @@ func (c *Client) FetchVolumeParallel(ctx context.Context, destRoot, repo, tag st
 
 // FetchVolume fetches a packaged dataset using the preferred client-based core
 // path and core fetch options.
+//
+// When RequireEmptyDestination is true, extraction uses a staging directory so
+// that destRoot is either left untouched (on failure) or fully populated (on
+// success), preventing partial-extraction states.
 func (c *Client) FetchVolume(ctx context.Context, destRoot, repo, tag string, opts FetchOptions) (*VolumeIndex, error) {
 	if opts.RequireEmptyDestination {
 		if err := ensureEmptyDir(destRoot); err != nil {
 			return nil, err
 		}
+		return fetchVolWithStaging(ctx, destRoot, repo, tag, opts.Concurrency)
 	}
 	if opts.Concurrency <= 1 {
 		return FetchVolSeq(ctx, destRoot, repo, tag)
@@ -142,7 +147,7 @@ func ensureEmptyDir(path string) error {
 // This method exists for callers that still operate at the VolumeIndex level,
 // but the preferred core path for new code is PackageVolumeWithOptions.
 func (c *Client) PublishVolume(ctx context.Context, vi *VolumeIndex, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
-	return vi.publishVolumeToStore(ctx, c.localStorePath, volPath, volName, configBlob)
+	return vi.publishVolumeToStore(ctx, c.localStorePath, volPath, volName, configBlob, c.now)
 }
 
 // PublishVolumeFromDir is a convenience wrapper over the preferred client

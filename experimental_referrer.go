@@ -8,14 +8,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
-	"github.com/seoyhaein/sori/registryutil"
+	"github.com/HeaInSeo/sori/registryutil"
 
 	godigest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	orasoras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
+	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry/remote/auth"
 )
 
@@ -197,6 +199,12 @@ func isExistError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Primary: use the sentinel from oras-go for both local store and remote.
+	if errors.Is(err, errdef.ErrAlreadyExists) {
+		return true
+	}
+	// Fallback: remote registries may surface HTTP 409 through an unwrapped
+	// error path; guard against that with string matching.
 	s := err.Error()
 	for _, needle := range []string{"already exists", "conflict", "409"} {
 		if strings.Contains(s, needle) {

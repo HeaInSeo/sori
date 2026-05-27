@@ -59,10 +59,6 @@ var (
 	ErrTransport  = &Error{Kind: KindTransport}
 )
 
-func notFoundError(op, message string, err error) error {
-	return &Error{Kind: KindNotFound, Op: op, Message: message, Err: err}
-}
-
 func validationError(op, message string, err error) error {
 	return &Error{Kind: KindValidation, Op: op, Message: message, Err: err}
 }

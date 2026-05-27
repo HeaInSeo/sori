@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/opencontainers/go-digest"
-	"github.com/seoyhaein/sori/catalogutil"
+	"github.com/HeaInSeo/sori/catalogutil"
 )
 
 const registeredDataCatalogJSON = "registered-data.json"

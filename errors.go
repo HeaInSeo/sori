@@ -1,9 +1,6 @@
 package sori
 
-import (
-	"errors"
-	"fmt"
-)
+import "fmt"
 
 // ErrorKind classifies exported core errors returned by the root package.
 type ErrorKind string
@@ -98,12 +95,4 @@ func integrityError(op, message string, err error) error {
 
 func transportError(op, message string, err error) error {
 	return newError(KindTransport, op, message, err)
-}
-
-func authError(op, message string, err error) error {
-	return newError(KindAuth, op, message, err)
-}
-
-func isKind(err error, target error) bool {
-	return errors.Is(err, target)
 }

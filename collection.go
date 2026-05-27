@@ -22,9 +22,14 @@ func NewCollectionManager(rootDir string, initial ...VolumeEntry) (*CollectionMa
 	}
 	for i, entry := range coll.Volumes {
 		ref := entry.Index.VolumeRef
-		if ref != "" {
-			m.byRef[ref] = i
+		if ref == "" {
+			continue
 		}
+		if _, dup := m.byRef[ref]; dup {
+			return nil, validationError("NewCollectionManager",
+				fmt.Sprintf("duplicate VolumeRef %q in persisted collection", ref), nil)
+		}
+		m.byRef[ref] = i
 	}
 	return m, nil
 }
@@ -60,6 +65,10 @@ func NewVolumeCollection(initialEntries ...VolumeEntry) *VolumeCollection {
 }
 
 func (m *CollectionManager) AddOrUpdate(v VolumeEntry) error {
+	if v.Index.VolumeRef == "" {
+		return validationError("CollectionManager.AddOrUpdate", "VolumeRef must not be empty", nil)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -117,7 +126,12 @@ func (m *CollectionManager) GetSnapshot() VolumeCollection {
 			blobCopy[k] = v
 		}
 		out.Volumes[i] = VolumeEntry{
-			Index:      entry.Index,
+			Index: VolumeIndex{
+				VolumeRef:   entry.Index.VolumeRef,
+				DisplayName: entry.Index.DisplayName,
+				CreatedAt:   entry.Index.CreatedAt,
+				Partitions:  append([]Partition(nil), entry.Index.Partitions...),
+			},
 			ConfigBlob: blobCopy,
 		}
 	}
@@ -132,7 +146,20 @@ func (m *CollectionManager) Get(ref string) (VolumeEntry, bool) {
 	if !ok {
 		return VolumeEntry{}, false
 	}
-	return m.coll.Volumes[idx], true
+	entry := m.coll.Volumes[idx]
+	cb := make(ConfigBlob, len(entry.ConfigBlob))
+	for k, v := range entry.ConfigBlob {
+		cb[k] = v
+	}
+	return VolumeEntry{
+		Index: VolumeIndex{
+			VolumeRef:   entry.Index.VolumeRef,
+			DisplayName: entry.Index.DisplayName,
+			CreatedAt:   entry.Index.CreatedAt,
+			Partitions:  append([]Partition(nil), entry.Index.Partitions...),
+		},
+		ConfigBlob: cb,
+	}, true
 }
 
 func (m *CollectionManager) Flush() error {
@@ -224,7 +251,7 @@ func saveCollection(rootDir string, coll VolumeCollection) error {
 	if err != nil {
 		return transportError("saveCollection", "marshal collection", err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := writeFileAtomic(path, data, 0o644); err != nil {
 		return transportError("saveCollection", fmt.Sprintf("write collection file %q", path), err)
 	}
 	return nil

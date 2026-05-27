@@ -6,6 +6,44 @@ import (
 	"path/filepath"
 )
 
+// writeFileAtomic writes data to path atomically using a tmpfile+rename pattern.
+// Sync is called before Close so data reaches stable storage before rename.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+
+	if err := os.Chmod(tmpName, perm); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+
+	return nil
+}
+
 func LoadOrInit[T any](rootDir, fileName string, zero T) (*T, error) {
 	path := filepath.Join(rootDir, fileName)
 	data, err := os.ReadFile(path)
@@ -32,7 +70,7 @@ func Save(rootDir, fileName string, value any) error {
 	if err != nil {
 		return transportError("Save", "marshal catalog "+path, err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := writeFileAtomic(path, data, 0o644); err != nil {
 		return transportError("Save", "write catalog "+path, err)
 	}
 	return nil

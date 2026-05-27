@@ -3,7 +3,7 @@ package nodevault
 import (
 	"testing"
 
-	"github.com/seoyhaein/sori"
+	"github.com/HeaInSeo/sori"
 )
 
 func TestDataSpecFromArtifactMetadata(t *testing.T) {

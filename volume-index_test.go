@@ -121,7 +121,7 @@ func TestPushLocalToRemote_Harbor(t *testing.T) {
 	localTag := "test.v1.0.0"
 	remoteRepo := "harbor.local/demo-project/testrepo"
 	user := "admin"
-	pass := "Harbor12345"
+	pass := os.Getenv("SORI_HARBOR_PASSWORD")
 	repo := "./repo"
 
 	// 5) 실제 푸시 호출
@@ -421,6 +421,46 @@ func TestValidateVolumeDir_CreateConfigBlob(t *testing.T) {
 	}
 }
 
+func TestValidateVolumeDir_CreateConfigBlob_NoTempSurvivorOnFailure(t *testing.T) {
+	// Verify that writeFileAtomic cleans up the temp file when the write fails.
+	// We make the directory read-only so os.CreateTemp returns an error before
+	// any partial file is written.
+	if os.Getuid() == 0 {
+		t.Skip("cannot test read-only directory as root")
+	}
+	tmp := t.TempDir()
+	dataFile := filepath.Join(tmp, "data.txt")
+	if err := os.WriteFile(dataFile, []byte("content"), 0644); err != nil {
+		t.Fatalf("setup data file: %v", err)
+	}
+	if err := os.Chmod(tmp, 0o555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(tmp, 0o755) })
+
+	_, err := ValidateVolumeDir(tmp)
+	if err == nil {
+		t.Fatal("expected error when configblob creation fails in read-only dir, got nil")
+	}
+
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		t.Fatalf("restore chmod: %v", err)
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			t.Errorf("stale temp file found after failure: %s", e.Name())
+		}
+	}
+	// configblob.json must not have been created
+	if _, statErr := os.Stat(filepath.Join(tmp, ConfigBlobJson)); statErr == nil {
+		t.Error("configblob.json should not exist after failed write")
+	}
+}
+
 func TestValidateVolumeDir_LoadConfigBlob(t *testing.T) {
 	tmp := t.TempDir()
 	// non-hidden 파일 추가
@@ -488,6 +528,9 @@ func TestOciService01(t *testing.T) {
 	}
 
 	newvi, err := vi.PublishVolume(context.Background(), volDir, "test.v1.0.0", configblob)
+	if err != nil {
+		t.Fatalf("PublishVolume failed: %v", err)
+	}
 	if newvi == nil {
 		t.Fatalf("PublishVolume returned nil VolumeIndex")
 	}
@@ -822,7 +865,7 @@ func TestPushDataSpecManifest(t *testing.T) {
 	if manifest.Config.Digest.String() != result.ConfigDigest {
 		t.Fatalf("config digest mismatch: got %q want %q", manifest.Config.Digest, result.ConfigDigest)
 	}
-	if manifest.Config.MediaType != DataSpecMediaType {
+	if manifest.Config.MediaType != MediaTypeDataSpec {
 		t.Fatalf("unexpected config media type: %q", manifest.Config.MediaType)
 	}
 }

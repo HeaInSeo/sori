@@ -7,8 +7,6 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-const DataSpecMediaType = "application/vnd.nodevault.dataspec.v1+json"
-
 // ReferrerPushResult reports the manifest uploaded by the experimental
 // referrer helpers.
 //
@@ -86,6 +84,9 @@ type DataProvenance struct {
 // path. This helper remains available for callers that still need the current
 // DataSpec shape.
 func BuildDataSpec(pkg *PackageResult, push *PushResult, req PackageRequest) (*DataSpec, error) {
+	if pkg == nil {
+		return nil, validationError("BuildDataSpec", "package result is required", nil)
+	}
 	meta, err := BuildArtifactMetadata(ArtifactMetadataInput{
 		Kind:        "dataset",
 		Name:        defaultString(req.Dataset, req.Tag),

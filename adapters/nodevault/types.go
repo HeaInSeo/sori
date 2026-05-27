@@ -1,8 +1,10 @@
 package nodevault
 
-import "github.com/seoyhaein/sori"
+import "github.com/HeaInSeo/sori"
 
-const DataSpecMediaType = "application/vnd.nodevault.dataspec.v1+json"
+// DataSpecMediaType is the canonical media type for DataSpec referrer artifacts.
+// It is re-exported from the root package for adapter callers.
+const DataSpecMediaType = sori.MediaTypeDataSpec
 
 type DataSpec struct {
 	Identity   DataIdentity   `json:"identity"`
