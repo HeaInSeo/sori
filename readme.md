@@ -21,6 +21,7 @@ OCI 이미지 형식으로 패키징하는 Go 라이브러리다.
 | [docs/registry-integration.md](docs/registry-integration.md) | registry 통합 테스트 골격 |
 | [docs/operations.md](docs/operations.md) | 운영 환경 체크리스트 |
 | [docs/stub-status.md](docs/stub-status.md) | 과거 stub 처리 내역 |
+| [docs/test-strategy.md](docs/test-strategy.md) | 테스트 범주 정의 · 패턴 · 다른 프로젝트 적용 가이드 |
 
 내부 하위 패키지:
 
