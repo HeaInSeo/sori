@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -146,6 +147,49 @@ func ensureDestinationAbsent(path string) error {
 	} else {
 		return transportError("FetchVolume", "stat destination directory", err)
 	}
+}
+
+// FetchVolumeFromRemote fetches a packaged dataset from a remote OCI registry
+// into destRoot.
+//
+// Staging is always used: content is extracted to a sibling staging directory
+// and renamed to destRoot only on full success, preventing partial-extraction
+// states.  By default destRoot must not exist.  Set AtomicOverwrite in opts to
+// replace an existing destRoot via the 3-phase backup-swap path.
+//
+// RequireEmptyDestination and AtomicOverwrite are mutually exclusive and return
+// ErrValidation if both are set.
+func (c *Client) FetchVolumeFromRemote(ctx context.Context, destRoot string, target RemoteTarget, tag string, opts FetchOptions) (*VolumeIndex, error) {
+	if strings.TrimSpace(tag) == "" {
+		return nil, validationError("FetchVolumeFromRemote", "tag is required", nil)
+	}
+	if strings.TrimSpace(target.Registry) == "" {
+		return nil, validationError("FetchVolumeFromRemote", "remote target registry is required", nil)
+	}
+	if strings.TrimSpace(target.Repository) == "" {
+		return nil, validationError("FetchVolumeFromRemote", "remote target repository is required", nil)
+	}
+	if opts.RequireEmptyDestination && opts.AtomicOverwrite {
+		return nil, validationError("FetchVolumeFromRemote", "RequireEmptyDestination and AtomicOverwrite are mutually exclusive", nil)
+	}
+
+	if c.httpClient != nil {
+		target.HTTPClient = c.httpClient
+	}
+
+	remoteRepo := strings.TrimRight(target.Registry, "/") + "/" + strings.TrimLeft(target.Repository, "/")
+	src, err := newRemoteRepository(remoteRepo, target)
+	if err != nil {
+		return nil, err
+	}
+
+	if opts.AtomicOverwrite {
+		return fetchVolWithAtomicOverwriteFrom(ctx, destRoot, src, tag, opts.Concurrency)
+	}
+	if err := ensureDestinationAbsent(destRoot); err != nil {
+		return nil, err
+	}
+	return fetchVolWithStagingFrom(ctx, destRoot, src, tag, opts.Concurrency)
 }
 
 // PublishVolume publishes an already-built VolumeIndex through the client path.

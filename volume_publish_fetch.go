@@ -712,20 +712,28 @@ func uniqueBackupPath(parent, prefix string) (string, error) {
 // fetchVolWithStaging extracts layers to a temporary staging directory and
 // atomically renames it to destRoot only on full success.
 //
-// This guarantees destRoot is either untouched (on failure) or fully populated
-// (on success), preventing the partial-extraction state that direct extraction
-// leaves behind when a layer download or unpack fails midway.
-//
 // Precondition: destRoot must not exist (call ensureDestinationAbsent first).
 func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
+	src, err := oci.New(repo)
+	if err != nil {
+		return nil, transportError("fetchVolWithStaging", "open OCI store", err)
+	}
+	return fetchVolWithStagingFrom(ctx, destRoot, src, tag, concurrency)
+}
+
+// fetchVolWithStagingFrom is the ReadOnlyTarget-based staging extraction path,
+// shared between local OCI store and remote fetch callers.
+//
+// Precondition: destRoot must not exist (call ensureDestinationAbsent first).
+func fetchVolWithStagingFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag string, concurrency int) (*VolumeIndex, error) {
 	parent := filepath.Dir(destRoot)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return nil, transportError("fetchVolWithStaging", "create parent directory", err)
+		return nil, transportError("fetchVolWithStagingFrom", "create parent directory", err)
 	}
 	base := filepath.Base(destRoot)
 	stagingDir, err := os.MkdirTemp(parent, ".staging-"+base+"-*")
 	if err != nil {
-		return nil, transportError("fetchVolWithStaging", "create staging directory", err)
+		return nil, transportError("fetchVolWithStagingFrom", "create staging directory", err)
 	}
 	cleanup := true
 	defer func() {
@@ -733,11 +741,6 @@ func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concur
 			os.RemoveAll(stagingDir)
 		}
 	}()
-
-	src, srcErr := oci.New(repo)
-	if srcErr != nil {
-		return nil, transportError("fetchVolWithStaging", "open OCI store", srcErr)
-	}
 
 	var vi *VolumeIndex
 	if concurrency <= 1 {
@@ -749,18 +752,29 @@ func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concur
 		return nil, err
 	}
 
-	if err := validateStagingDir("fetchVolWithStaging", stagingDir, vi); err != nil {
+	if err := validateStagingDir("fetchVolWithStagingFrom", stagingDir, vi); err != nil {
 		return nil, err
 	}
 
 	if err := os.Rename(stagingDir, destRoot); err != nil {
-		return nil, transportError("fetchVolWithStaging", "commit staging to destination", err)
+		return nil, transportError("fetchVolWithStagingFrom", "commit staging to destination", err)
 	}
 	cleanup = false
 	return vi, nil
 }
 
-// fetchVolWithAtomicOverwrite implements the 3-phase overwrite path:
+// fetchVolWithAtomicOverwrite implements the 3-phase overwrite path for a
+// local OCI store. See fetchVolWithAtomicOverwriteFrom for the full algorithm.
+func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
+	src, err := oci.New(repo)
+	if err != nil {
+		return nil, transportError("fetchVolWithAtomicOverwrite", "open OCI store", err)
+	}
+	return fetchVolWithAtomicOverwriteFrom(ctx, destRoot, src, tag, concurrency)
+}
+
+// fetchVolWithAtomicOverwriteFrom is the ReadOnlyTarget-based 3-phase overwrite
+// path, shared between local OCI store and remote fetch callers.
 //
 //	Phase 1 — extract to a staging sibling of destRoot
 //	Phase 2 — rename existing destRoot to a backup sibling (if destRoot is present)
@@ -770,15 +784,15 @@ func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concur
 // On Phase 3 failure a best-effort rollback renames the backup back to destRoot.
 // If that rollback also fails, destRoot may be absent; the error message includes
 // the staging and backup paths for manual recovery.
-func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
+func fetchVolWithAtomicOverwriteFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag string, concurrency int) (*VolumeIndex, error) {
 	parent := filepath.Dir(destRoot)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return nil, transportError("fetchVolWithAtomicOverwrite", "create parent directory", err)
+		return nil, transportError("fetchVolWithAtomicOverwriteFrom", "create parent directory", err)
 	}
 	base := filepath.Base(destRoot)
 	stagingDir, err := os.MkdirTemp(parent, ".staging-"+base+"-*")
 	if err != nil {
-		return nil, transportError("fetchVolWithAtomicOverwrite", "create staging directory", err)
+		return nil, transportError("fetchVolWithAtomicOverwriteFrom", "create staging directory", err)
 	}
 	cleanupStaging := true
 	defer func() {
@@ -788,11 +802,6 @@ func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string
 	}()
 
 	// Phase 1: extract to staging.
-	src, srcErr := oci.New(repo)
-	if srcErr != nil {
-		return nil, transportError("fetchVolWithAtomicOverwrite", "open OCI store", srcErr)
-	}
-
 	var vi *VolumeIndex
 	if concurrency <= 1 {
 		vi, err = fetchVolSeqFrom(ctx, stagingDir, src, tag)
@@ -802,7 +811,7 @@ func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string
 	if err != nil {
 		return nil, err
 	}
-	if err := validateStagingDir("fetchVolWithAtomicOverwrite", stagingDir, vi); err != nil {
+	if err := validateStagingDir("fetchVolWithAtomicOverwriteFrom", stagingDir, vi); err != nil {
 		return nil, err
 	}
 
@@ -811,13 +820,13 @@ func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string
 	if _, statErr := os.Stat(destRoot); statErr == nil {
 		bp, err := uniqueBackupPath(parent, ".backup-"+base+"-")
 		if err != nil {
-			return nil, transportError("fetchVolWithAtomicOverwrite", "reserve backup path", err)
+			return nil, transportError("fetchVolWithAtomicOverwriteFrom", "reserve backup path", err)
 		}
 		if testHookPhase2RenameErr != nil {
 			return nil, testHookPhase2RenameErr
 		}
 		if err := os.Rename(destRoot, bp); err != nil {
-			return nil, transportError("fetchVolWithAtomicOverwrite", "rename destRoot to backup", err)
+			return nil, transportError("fetchVolWithAtomicOverwriteFrom", "rename destRoot to backup", err)
 		}
 		backupPath = bp
 	}
@@ -830,12 +839,12 @@ func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string
 	if phase3Err != nil {
 		if backupPath != "" {
 			if rbErr := os.Rename(backupPath, destRoot); rbErr != nil {
-				return nil, transportError("fetchVolWithAtomicOverwrite",
+				return nil, transportError("fetchVolWithAtomicOverwriteFrom",
 					fmt.Sprintf("phase 3 failed and rollback also failed; staging=%s backup=%s", stagingDir, backupPath),
 					errors.Join(phase3Err, rbErr))
 			}
 		}
-		return nil, transportError("fetchVolWithAtomicOverwrite", "commit staging to destination", phase3Err)
+		return nil, transportError("fetchVolWithAtomicOverwriteFrom", "commit staging to destination", phase3Err)
 	}
 	cleanupStaging = false
 
@@ -846,7 +855,7 @@ func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string
 			cleanupErr = os.RemoveAll(backupPath)
 		}
 		if cleanupErr != nil {
-			Log.Warnf("fetchVolWithAtomicOverwrite: failed to remove backup %s: %v", backupPath, cleanupErr)
+			Log.Warnf("fetchVolWithAtomicOverwriteFrom: failed to remove backup %s: %v", backupPath, cleanupErr)
 		}
 	}
 	return vi, nil
