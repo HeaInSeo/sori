@@ -149,6 +149,15 @@ default; `AtomicOverwrite` opt-in supported.
 ## Open items
 
 - **P3-1 Steps 2–3**: true streaming push and chunked CAS are not yet designed.
-- **`FetchVolumeFresh` convenience helper**: a zero-config safe-fetch wrapper
-  (implicitly `RequireEmptyDestination=true`) has been proposed but not yet
-  added to the public API.
+
+## ✅ FetchVolumeFresh convenience helper (done)
+
+`Client.FetchVolumeFresh(ctx, destRoot, repo, tag string, concurrency int)` added
+as a zero-config safe-fetch wrapper: implicitly sets `RequireEmptyDestination:true`
+and delegates to `FetchVolume`.
+
+- `destRoot` must not exist; returns `ErrConflict` if it does.
+- On success `destRoot` is fully populated (staging rename).
+- On failure `destRoot` is left absent (staging is removed).
+- Tests: `RejectsExistingDestination`, `UsesStagingAndCommitsOnSuccess`,
+  `LeavesDestAbsentOnFailure`.

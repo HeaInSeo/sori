@@ -206,6 +206,7 @@ func (c *Client) PackageVolumeWithOptions(ctx context.Context, req PackageReques
 func (c *Client) PushPackagedVolume(ctx context.Context, pkg *PackageResult, target RemoteTarget) (*PushResult, error)
 func (c *Client) PushPackagedVolumeWithOptions(ctx context.Context, pkg *PackageResult, opts PushOptions) (*PushResult, error)
 func (c *Client) FetchVolume(ctx context.Context, destRoot, repo, tag string, opts FetchOptions) (*VolumeIndex, error)
+func (c *Client) FetchVolumeFresh(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error)
 func (c *Client) FetchVolumeSequential(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex, error)
 func (c *Client) FetchVolumeParallel(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error)
 func (c *Client) FetchVolumeFromRemote(ctx context.Context, destRoot string, target RemoteTarget, tag string, opts FetchOptions) (*VolumeIndex, error)
@@ -434,7 +435,8 @@ var (
 | 모드 | 설정 | 동작 |
 |------|------|------|
 | **AtomicOverwrite** | `FetchOptions{AtomicOverwrite: true}` | staging 추출 → 기존 `destRoot` 백업 → staging rename. 갱신 워크플로에 권장. |
-| **Safe fetch** | `FetchOptions{RequireEmptyDestination: true}` | `destRoot`가 없어야 시작. staging 추출 후 성공 시 rename. 최초 설치에 권장. |
+| **FetchVolumeFresh** | `Client.FetchVolumeFresh(...)` | `RequireEmptyDestination:true` 묵시적 wrapper. 최초 설치용 zero-config API. |
+| **Safe fetch** | `FetchOptions{RequireEmptyDestination: true}` | `destRoot`가 없어야 시작. staging 추출 후 성공 시 rename. |
 | **Remote fetch** | `Client.FetchVolumeFromRemote` | 기본값이 safe fetch. `AtomicOverwrite` opt-in 지원. |
 | **Legacy direct** | `FetchOptions{}` (기본) | `destRoot`에 직접 추출. 중간 실패 시 부분 상태 가능. 하위 호환용만. |
 

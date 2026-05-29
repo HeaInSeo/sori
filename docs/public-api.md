@@ -27,6 +27,8 @@
 - `(*Client).FetchVolume`
 - `(*Client).FetchVolumeSequential`
 - `(*Client).FetchVolumeParallel`
+- `(*Client).FetchVolumeFresh`
+- `(*Client).FetchVolumeFromRemote`
 - `(*Client).PublishVolume`
 - `(*Client).PublishVolumeFromDir`
 

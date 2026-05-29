@@ -989,3 +989,97 @@ func TestPublishVolume_TempFilesCleanedAfterWriteFailure(t *testing.T) {
 		t.Error("stale .sori-layer-* temp files remain after failed publish")
 	}
 }
+
+// ── FetchVolumeFresh ──────────────────────────────────────────────────────────
+
+// TestFetchVolumeFresh_RejectsExistingDestination verifies that FetchVolumeFresh
+// returns ErrConflict when destRoot already exists, without modifying it.
+func TestFetchVolumeFresh_RejectsExistingDestination(t *testing.T) {
+	ctx := context.Background()
+	validDesc, validData := buildValidTarGzLayer(t, "vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{validDesc, validData}}, "fresh.v1")
+
+	// Pre-create destRoot so FetchVolumeFresh must reject it.
+	destRoot := t.TempDir()
+
+	client := NewClient(WithLocalStorePath(storePath))
+	_, err := client.FetchVolumeFresh(ctx, destRoot, storePath, "fresh.v1", 1)
+	if err == nil {
+		t.Fatal("expected ErrConflict for existing destRoot, got nil")
+	}
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict, got %T: %v", err, err)
+	}
+}
+
+// TestFetchVolumeFresh_UsesStagingAndCommitsOnSuccess verifies that a successful
+// FetchVolumeFresh leaves destRoot fully populated and no staging sibling.
+func TestFetchVolumeFresh_UsesStagingAndCommitsOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	validDesc, validData := buildValidTarGzLayer(t, "vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{validDesc, validData}}, "fresh.v1")
+
+	destRoot := filepath.Join(tmp, "dest")
+
+	client := NewClient(WithLocalStorePath(storePath))
+	vi, err := client.FetchVolumeFresh(ctx, destRoot, storePath, "fresh.v1", 1)
+	if err != nil {
+		t.Fatalf("FetchVolumeFresh: %v", err)
+	}
+	if vi == nil {
+		t.Fatal("expected non-nil VolumeIndex")
+	}
+	if _, statErr := os.Stat(destRoot); statErr != nil {
+		t.Errorf("destRoot must exist after success: %v", statErr)
+	}
+	partDir := filepath.Join(destRoot, "vol", "part")
+	if info, statErr := os.Stat(partDir); statErr != nil || !info.IsDir() {
+		t.Errorf("partition directory %q must exist under destRoot", partDir)
+	}
+	// No staging sibling must survive.
+	entries, _ := os.ReadDir(tmp)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".staging-") {
+			t.Errorf("stale staging dir after successful FetchVolumeFresh: %s", e.Name())
+		}
+	}
+}
+
+// TestFetchVolumeFresh_LeavesDestAbsentOnFailure verifies that when layer
+// extraction fails, destRoot is left absent (never partially populated).
+func TestFetchVolumeFresh_LeavesDestAbsentOnFailure(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	corruptDesc, corruptData := buildCorruptLayer("vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{corruptDesc, corruptData}}, "fresh.v1")
+
+	destRoot := filepath.Join(tmp, "dest")
+
+	client := NewClient(WithLocalStorePath(storePath))
+	_, err := client.FetchVolumeFresh(ctx, destRoot, storePath, "fresh.v1", 1)
+	if err == nil {
+		t.Fatal("expected error for corrupt layer, got nil")
+	}
+	if _, statErr := os.Stat(destRoot); !os.IsNotExist(statErr) {
+		t.Error("destRoot must be absent after failed FetchVolumeFresh")
+	}
+	// No staging sibling must survive.
+	entries, _ := os.ReadDir(tmp)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".staging-") {
+			t.Errorf("stale staging dir after failed FetchVolumeFresh: %s", e.Name())
+		}
+	}
+}

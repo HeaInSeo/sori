@@ -110,6 +110,18 @@ func (c *Client) FetchVolumeParallel(ctx context.Context, destRoot, repo, tag st
 	return c.FetchVolume(ctx, destRoot, repo, tag, FetchOptions{Concurrency: concurrency})
 }
 
+// FetchVolumeFresh fetches a packaged dataset into destRoot using the staging
+// path: destRoot must not exist before the call.  On success destRoot is fully
+// populated; on failure it is left absent, never partial.
+//
+// It is a convenience wrapper over FetchVolume with RequireEmptyDestination:true.
+func (c *Client) FetchVolumeFresh(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
+	return c.FetchVolume(ctx, destRoot, repo, tag, FetchOptions{
+		Concurrency:             concurrency,
+		RequireEmptyDestination: true,
+	})
+}
+
 // FetchVolume fetches a packaged dataset using the preferred client-based core
 // path and core fetch options.
 //
