@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 )
 
-// writeFileAtomic writes data to path atomically using a tmpfile+rename pattern.
-// Sync is called before Close so data reaches stable storage before rename.
+// writeFileAtomic writes data to path using a temp-file + rename pattern.
+// Sync before Close flushes data to the OS page cache; this prevents a
+// zero-byte file after an abrupt process exit but does not guarantee full
+// crash consistency (no parent-directory fsync).
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")

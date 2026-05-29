@@ -15,7 +15,7 @@
       },
       "auth": {
         "username": "admin",
-        "password": "Harbor12345",
+        "password": "${SORI_REGISTRY_PASSWORD}",
         "token": ""
       }
     }

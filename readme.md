@@ -144,7 +144,7 @@ fmt.Println(registerResp.CASHash)
       "registry": "harbor.local",
       "repository": "project/repo",
       "tls": { "insecure": false, "ca_file": "" },
-      "auth": { "username": "admin", "password": "Harbor12345", "token": "" }
+      "auth": { "username": "admin", "password": "${SORI_REGISTRY_PASSWORD}", "token": "" }
     }
   ]
 }
@@ -462,6 +462,8 @@ func UntarGzDir(gzipStream io.Reader, dest string) error   // tar.gz 해제 (pat
 ```
 
 `archiveutil.TarGzDirFiles(fsDir, prefixPath string, skipNames map[string]struct{})` — root-level 일반 파일만 tar.gz로 묶는다(서브디렉터리 제외). `PublishVolume`이 내부적으로 root-files 레이어 생성에 사용한다.
+
+> **symlink 미지원**: `TarGzDir` / `TarGzDirFiles` 는 symlink를 만나면 `ErrValidation`을 반환한다. 패키징 대상 디렉터리에 symlink가 포함되어 있으면 사전에 제거하거나 실제 파일로 대체해야 한다.
 
 ## API 안정도
 

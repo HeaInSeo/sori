@@ -41,6 +41,9 @@ func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
 		if err != nil {
 			return nil, transportError("TarGzDir", "stat source path "+path, err)
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, validationError("TarGzDir", "symlinks are not supported: "+path, nil)
+		}
 		rel, err := filepath.Rel(fsDir, path)
 		if err != nil {
 			return nil, transportError("TarGzDir", "resolve relative path "+path, err)
@@ -134,6 +137,9 @@ func TarGzDirFiles(fsDir, prefixPath string, skipNames map[string]struct{}) ([]b
 		if err != nil {
 			return nil, transportError("TarGzDirFiles", "stat "+path, err)
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, validationError("TarGzDirFiles", "symlinks are not supported: "+path, nil)
+		}
 		tarName := filepath.ToSlash(filepath.Join(prefixPath, filepath.Base(path)))
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
@@ -199,42 +205,8 @@ func UntarGzDir(gzipStream io.Reader, dest string) error {
 		if err != nil {
 			return err
 		}
-		mode := hdr.FileInfo().Mode()
-
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, mode.Perm()); err != nil {
-				return transportError("UntarGzDir", "mkdir "+target, err)
-			}
-		case tar.TypeReg:
-			parentDir := filepath.Dir(target)
-			if err := os.MkdirAll(parentDir, 0o755); err != nil {
-				return transportError("UntarGzDir", "mkdir parent "+parentDir, err)
-			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
-			if err != nil {
-				return transportError("UntarGzDir", "open file "+target, err)
-			}
-			if _, err := io.Copy(f, tr); err != nil {
-				_ = f.Close()
-				return transportError("UntarGzDir", "copy file "+target, err)
-			}
-			if err := f.Close(); err != nil {
-				return transportError("UntarGzDir", "close file "+target, err)
-			}
-		case tar.TypeSymlink:
-			if !filepath.IsLocal(hdr.Linkname) {
-				return validationError("UntarGzDir", "symlink target escapes destination", nil)
-			}
-			parentDir := filepath.Dir(target)
-			if err := os.MkdirAll(parentDir, 0o755); err != nil {
-				return transportError("UntarGzDir", "mkdir parent for symlink "+parentDir, err)
-			}
-			if err := os.Symlink(hdr.Linkname, target); err != nil {
-				return transportError("UntarGzDir", "create symlink "+target, err)
-			}
-		default:
-			continue
+		if err := extractTarEntry("UntarGzDir", tr, hdr, target); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -257,4 +229,110 @@ func SecureJoinArchivePath(destRoot, entryName string) (string, error) {
 		return "", validationError("SecureJoinArchivePath", "archive entry escapes destination: "+entryName, nil)
 	}
 	return target, nil
+}
+
+// UntarGzDirUnderPrefix extracts a gzip-compressed tar into dest.
+// Every tar entry's path must begin with requiredPrefix+"/" or be exactly
+// requiredPrefix. Entries outside that prefix return ErrIntegrity.
+func UntarGzDirUnderPrefix(gzipStream io.Reader, dest, requiredPrefix string) error {
+	return untarGzDirFiltered(gzipStream, dest, requiredPrefix, false)
+}
+
+// UntarGzDirRootFilesOnly extracts a gzip-compressed tar into dest.
+// Only the directory entry for requiredPrefix itself, and regular files
+// directly under requiredPrefix (no subdirectories), are allowed.
+// Entries that go deeper return ErrIntegrity.
+func UntarGzDirRootFilesOnly(gzipStream io.Reader, dest, requiredPrefix string) error {
+	return untarGzDirFiltered(gzipStream, dest, requiredPrefix, true)
+}
+
+func untarGzDirFiltered(gzipStream io.Reader, dest, requiredPrefix string, rootFilesOnly bool) error {
+	destRoot, err := filepath.Abs(dest)
+	if err != nil {
+		return transportError("UntarGzDirFiltered", "resolve destination "+dest, err)
+	}
+	gz, err := gzip.NewReader(gzipStream)
+	if err != nil {
+		return integrityError("UntarGzDirFiltered", "create gzip reader", err)
+	}
+	defer gz.Close()
+
+	prefix := filepath.ToSlash(filepath.Clean(requiredPrefix))
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return integrityError("UntarGzDirFiltered", "read tar entry", err)
+		}
+
+		name := filepath.ToSlash(filepath.Clean(hdr.Name))
+
+		// Reject entries outside the required prefix.
+		if name != prefix && !strings.HasPrefix(name, prefix+"/") {
+			return integrityError("UntarGzDirFiltered",
+				"tar entry "+hdr.Name+" is outside required prefix "+requiredPrefix, nil)
+		}
+
+		// For root-files layers: reject entries more than one level deep.
+		if rootFilesOnly && name != prefix {
+			suffix := strings.TrimPrefix(name, prefix+"/")
+			if strings.Contains(suffix, "/") {
+				return integrityError("UntarGzDirFiltered",
+					"tar entry "+hdr.Name+" is deeper than one level under prefix "+requiredPrefix, nil)
+			}
+		}
+
+		target, err := SecureJoinArchivePath(destRoot, hdr.Name)
+		if err != nil {
+			return err
+		}
+		if err := extractTarEntry("UntarGzDirFiltered", tr, hdr, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// extractTarEntry writes a single tar entry to target on disk.
+// Unknown entry types are silently skipped (no error, no output).
+func extractTarEntry(caller string, tr *tar.Reader, hdr *tar.Header, target string) error {
+	mode := hdr.FileInfo().Mode()
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		if err := os.MkdirAll(target, mode.Perm()); err != nil {
+			return transportError(caller, "mkdir "+target, err)
+		}
+	case tar.TypeReg:
+		parentDir := filepath.Dir(target)
+		if err := os.MkdirAll(parentDir, 0o755); err != nil {
+			return transportError(caller, "mkdir parent "+parentDir, err)
+		}
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+		if err != nil {
+			return transportError(caller, "open file "+target, err)
+		}
+		if _, err := io.Copy(f, tr); err != nil {
+			_ = f.Close()
+			return transportError(caller, "copy file "+target, err)
+		}
+		if err := f.Close(); err != nil {
+			return transportError(caller, "close file "+target, err)
+		}
+	case tar.TypeSymlink:
+		if !filepath.IsLocal(hdr.Linkname) {
+			return validationError(caller, "symlink target escapes destination", nil)
+		}
+		parentDir := filepath.Dir(target)
+		if err := os.MkdirAll(parentDir, 0o755); err != nil {
+			return transportError(caller, "mkdir parent for symlink "+parentDir, err)
+		}
+		if err := os.Symlink(hdr.Linkname, target); err != nil {
+			return transportError(caller, "create symlink "+target, err)
+		}
+	}
+	return nil
 }
