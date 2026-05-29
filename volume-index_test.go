@@ -286,20 +286,15 @@ func TestMerge_NoVolumesAdded(t *testing.T) {
 }
 
 func TestExtractTarGz(t *testing.T) {
-	// 1) Build an in‑memory tar.gz with a dir, a file, and a symlink
+	// Build an in-memory tar.gz with a directory and a regular file.
+	// Symlinks are not supported in sori artifacts (rejected at both package and extract time).
 	buf := &bytes.Buffer{}
 	gw := gzip.NewWriter(buf)
 	tw := tar.NewWriter(gw)
 
-	// -- directory entry --
-	dirHdr := &tar.Header{
-		Name:     "dir/",
-		Typeflag: tar.TypeDir,
-		Mode:     0755,
-	}
+	dirHdr := &tar.Header{Name: "dir/", Typeflag: tar.TypeDir, Mode: 0755}
 	assert.NoError(t, tw.WriteHeader(dirHdr))
 
-	// -- regular file entry --
 	content := []byte("hello world")
 	fileHdr := &tar.Header{
 		Name:     "dir/file.txt",
@@ -311,43 +306,18 @@ func TestExtractTarGz(t *testing.T) {
 	_, err := tw.Write(content)
 	assert.NoError(t, err)
 
-	// -- symlink entry --
-	linkHdr := &tar.Header{
-		Name:     "link",
-		Typeflag: tar.TypeSymlink,
-		Linkname: "dir/file.txt",
-	}
-	assert.NoError(t, tw.WriteHeader(linkHdr))
-
-	// Close writers
 	assert.NoError(t, tw.Close())
 	assert.NoError(t, gw.Close())
 
-	// 2) Extract into a temp directory
 	dest := t.TempDir()
 	err = UntarGzDir(bytes.NewReader(buf.Bytes()), dest)
 	assert.NoError(t, err)
 
-	// 3) Verify directory was created
-	dirPath := filepath.Join(dest, "dir")
-	assert.DirExists(t, dirPath)
+	assert.DirExists(t, filepath.Join(dest, "dir"))
 
-	// 4) Verify file was created with the correct content
-	filePath := filepath.Join(dirPath, "file.txt")
-	assert.FileExists(t, filePath)
-	got, err := os.ReadFile(filePath)
+	got, err := os.ReadFile(filepath.Join(dest, "dir", "file.txt"))
 	assert.NoError(t, err)
 	assert.Equal(t, content, got)
-
-	// 5) Verify symlink was created and points correctly
-	linkPath := filepath.Join(dest, "link")
-	info, err := os.Lstat(linkPath)
-	assert.NoError(t, err)
-	assert.True(t, info.Mode()&os.ModeSymlink != 0, "expected a symlink")
-
-	target, err := os.Readlink(linkPath)
-	assert.NoError(t, err)
-	assert.Equal(t, "dir/file.txt", target)
 }
 
 // TODO 여기서 부터 검증해 나가자.

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -277,12 +278,22 @@ func untarGzDirFiltered(gzipStream io.Reader, dest, requiredPrefix string, rootF
 				"tar entry "+hdr.Name+" is outside required prefix "+requiredPrefix, nil)
 		}
 
-		// For root-files layers: reject entries more than one level deep.
+		// The prefix entry itself must be a directory (partition root or volume root).
+		if name == prefix && hdr.Typeflag != tar.TypeDir {
+			return integrityError("UntarGzDirFiltered",
+				"prefix entry must be a directory, got type "+fmt.Sprintf("%d", hdr.Typeflag)+" for "+hdr.Name, nil)
+		}
+
+		// For root-files layers: only regular files directly under prefix are allowed.
 		if rootFilesOnly && name != prefix {
 			suffix := strings.TrimPrefix(name, prefix+"/")
 			if strings.Contains(suffix, "/") {
 				return integrityError("UntarGzDirFiltered",
 					"tar entry "+hdr.Name+" is deeper than one level under prefix "+requiredPrefix, nil)
+			}
+			if hdr.Typeflag != tar.TypeReg {
+				return integrityError("UntarGzDirFiltered",
+					"root-files layer entry must be a regular file: "+hdr.Name, nil)
 			}
 		}
 
@@ -298,7 +309,9 @@ func untarGzDirFiltered(gzipStream io.Reader, dest, requiredPrefix string, rootF
 }
 
 // extractTarEntry writes a single tar entry to target on disk.
-// Unknown entry types are silently skipped (no error, no output).
+// Only directory and regular file entries are accepted; symlinks and all other
+// types return ErrIntegrity so that package-time and extract-time policies are
+// consistent (sori never generates symlinks or special files in artifacts).
 func extractTarEntry(caller string, tr *tar.Reader, hdr *tar.Header, target string) error {
 	mode := hdr.FileInfo().Mode()
 	switch hdr.Typeflag {
@@ -323,16 +336,9 @@ func extractTarEntry(caller string, tr *tar.Reader, hdr *tar.Header, target stri
 			return transportError(caller, "close file "+target, err)
 		}
 	case tar.TypeSymlink:
-		if !filepath.IsLocal(hdr.Linkname) {
-			return validationError(caller, "symlink target escapes destination", nil)
-		}
-		parentDir := filepath.Dir(target)
-		if err := os.MkdirAll(parentDir, 0o755); err != nil {
-			return transportError(caller, "mkdir parent for symlink "+parentDir, err)
-		}
-		if err := os.Symlink(hdr.Linkname, target); err != nil {
-			return transportError(caller, "create symlink "+target, err)
-		}
+		return integrityError(caller, "symlinks are not supported in archive entries: "+hdr.Name, nil)
+	default:
+		return integrityError(caller, fmt.Sprintf("unsupported tar entry type %d for %s", hdr.Typeflag, hdr.Name), nil)
 	}
 	return nil
 }

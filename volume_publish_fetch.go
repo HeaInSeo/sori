@@ -176,30 +176,34 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 	layers := make([]ocispec.Descriptor, 0, len(vi.Partitions)+1)
 
 	if len(vi.Partitions) == 0 {
-		layerData, err := archiveutil.TarGzDir(volPath, rootBase)
+		// Flat volume (no partitions): treat all root-level regular files as a
+		// root-files layer so that publish and fetch both produce Partitions:[].
+		flatData, err := archiveutil.TarGzDirFiles(volPath, rootBase, rootFileSkipNames)
 		if err != nil {
 			if errors.Is(err, archiveutil.ErrValidation) {
-				return nil, validationError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz fallback %q", volPath), err)
+				return nil, validationError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz flat volume %q", volPath), err)
 			}
-			return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz fallback %q", volPath), err)
+			return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz flat volume %q", volPath), err)
 		}
-		desc := ocispec.Descriptor{
-			MediaType: ocispec.MediaTypeImageLayerGzip,
-			Digest:    digest.FromBytes(layerData),
-			Size:      int64(len(layerData)),
-			Annotations: map[string]string{
-				annotationPartitionPath: rootBase,
-				annotationLayerKind:     layerKindPartition,
-			},
+		if flatData != nil {
+			desc := ocispec.Descriptor{
+				MediaType: ocispec.MediaTypeImageLayerGzip,
+				Digest:    digest.FromBytes(flatData),
+				Size:      int64(len(flatData)),
+				Annotations: map[string]string{
+					annotationPartitionPath: rootBase,
+					annotationLayerKind:     layerKindRootFiles,
+				},
+			}
+			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(flatData))
+			if err != nil {
+				return nil, transportError("VolumeIndex.publishVolumeToStore", "push flat volume layer", err)
+			}
+			if pushedPtr != nil && *pushedPtr {
+				anyPushed = true
+			}
+			layers = append(layers, desc)
 		}
-		pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
-		if err != nil {
-			return nil, transportError("VolumeIndex.publishVolumeToStore", "push fallback layer", err)
-		}
-		if pushedPtr != nil && *pushedPtr {
-			anyPushed = true
-		}
-		layers = append(layers, desc)
 	} else {
 		// Push root-level files (e.g., README.md) as a separate layer so they
 		// are not silently lost when only partition subdirectories are tarred.

@@ -330,6 +330,62 @@ func TestUntarGzDirRootFilesOnly_AcceptsTopLevelFile(t *testing.T) {
 	}
 }
 
+// ── flat volume roundtrip ─────────────────────────────────────────────────────
+
+// TestPublishFetchRoundTrip_FlatVolume verifies that a volume with no partitions
+// (only root-level regular files) round-trips with Partitions==[] on both sides.
+// Specifically:
+//   - sample.txt is restored after fetch
+//   - configblob.json is restored from the config descriptor (not as a layer entry)
+//   - published.Partitions == fetched.Partitions == []
+func TestPublishFetchRoundTrip_FlatVolume(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "sample.txt"), []byte("hello flat"), 0o644); err != nil {
+		t.Fatalf("write sample.txt: %v", err)
+	}
+	// configblob.json must not appear as a layer entry; it is handled via config descriptor.
+	if err := os.WriteFile(filepath.Join(src, "configblob.json"), []byte(`{"key":"val"}`), 0o644); err != nil {
+		t.Fatalf("write configblob.json: %v", err)
+	}
+
+	ctx := context.Background()
+	storePath := t.TempDir()
+	client := NewClient(WithLocalStorePath(storePath))
+
+	published, err := client.PublishVolumeFromDir(ctx, src, "flat-test", "flat.v1")
+	if err != nil {
+		t.Fatalf("PublishVolumeFromDir: %v", err)
+	}
+	if len(published.Partitions) != 0 {
+		t.Fatalf("published.Partitions should be empty, got %v", published.Partitions)
+	}
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	fetched, err := FetchVolSeq(ctx, dest, storePath, "flat.v1")
+	if err != nil {
+		t.Fatalf("FetchVolSeq: %v", err)
+	}
+	if len(fetched.Partitions) != 0 {
+		t.Fatalf("fetched.Partitions should be empty, got %v", fetched.Partitions)
+	}
+
+	// sample.txt must be restored.
+	volName := filepath.Base(src)
+	got, err := os.ReadFile(filepath.Join(dest, volName, "sample.txt"))
+	if err != nil {
+		t.Fatalf("sample.txt not restored: %v", err)
+	}
+	if string(got) != "hello flat" {
+		t.Fatalf("sample.txt content mismatch: got %q", got)
+	}
+
+	// configblob.json must be restored from the config descriptor.
+	cbPath := filepath.Join(dest, volName, "configblob.json")
+	if _, err := os.Stat(cbPath); err != nil {
+		t.Fatalf("configblob.json not restored: %v", err)
+	}
+}
+
 // ── sensitive literal check ───────────────────────────────────────────────────
 
 func TestNoHardcodedRegistryPassword(t *testing.T) {

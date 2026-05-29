@@ -25,7 +25,7 @@ func TestUntarGzDir_InvalidGzipTypedError(t *testing.T) {
 	}
 }
 
-func TestUntarGzDir_SymlinkEscapeTypedError(t *testing.T) {
+func TestUntarGzDir_SymlinkEntryRejected(t *testing.T) {
 	buf := &bytes.Buffer{}
 	gw := gzip.NewWriter(buf)
 	tw := tar.NewWriter(gw)
@@ -33,7 +33,7 @@ func TestUntarGzDir_SymlinkEscapeTypedError(t *testing.T) {
 	hdr := &tar.Header{
 		Name:     "link",
 		Typeflag: tar.TypeSymlink,
-		Linkname: "../evil",
+		Linkname: "target",
 	}
 	if err := tw.WriteHeader(hdr); err != nil {
 		t.Fatalf("WriteHeader: %v", err)
@@ -45,9 +45,10 @@ func TestUntarGzDir_SymlinkEscapeTypedError(t *testing.T) {
 		t.Fatalf("gzip close: %v", err)
 	}
 
+	// Symlinks are never allowed in sori artifacts (package and extract policy match).
 	err := UntarGzDir(bytes.NewReader(buf.Bytes()), t.TempDir())
-	if !errors.Is(err, ErrValidation) {
-		t.Fatalf("expected ErrValidation, got %v", err)
+	if !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("expected ErrIntegrity for symlink entry, got %v", err)
 	}
 }
 
@@ -293,5 +294,61 @@ func TestSecureJoinArchivePath_ValidEntry(t *testing.T) {
 	expected := filepath.Join(dest, "sub", "file.txt")
 	if got != expected {
 		t.Fatalf("got %q, want %q", got, expected)
+	}
+}
+
+func TestUntarGzDir_UnsupportedEntryTypeRejected(t *testing.T) {
+	buf := &bytes.Buffer{}
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+	// TypeFifo is an unsupported entry type.
+	if err := tw.WriteHeader(&tar.Header{Name: "fifo", Typeflag: tar.TypeFifo}); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	err := UntarGzDir(bytes.NewReader(buf.Bytes()), t.TempDir())
+	if !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("expected ErrIntegrity for unsupported entry type, got %v", err)
+	}
+}
+
+func TestUntarGzDirRootFilesOnly_RejectsTopLevelDirectory(t *testing.T) {
+	buf := &bytes.Buffer{}
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+	// vol/ is the prefix (allowed); vol/subdir/ is a directory under the prefix (not allowed).
+	_ = tw.WriteHeader(&tar.Header{Name: "vol/", Typeflag: tar.TypeDir, Mode: 0o755})
+	_ = tw.WriteHeader(&tar.Header{Name: "vol/subdir/", Typeflag: tar.TypeDir, Mode: 0o755})
+	_ = tw.Close()
+	_ = gw.Close()
+
+	err := UntarGzDirRootFilesOnly(bytes.NewReader(buf.Bytes()), t.TempDir(), "vol")
+	if !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("expected ErrIntegrity for top-level directory in root-files layer, got %v", err)
+	}
+}
+
+func TestUntarGzDirFiltered_PrefixEntryMustBeDirectory(t *testing.T) {
+	buf := &bytes.Buffer{}
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+	// "vol/docs" appears as a regular file instead of a directory — malformed artifact.
+	content := []byte("data")
+	_ = tw.WriteHeader(&tar.Header{
+		Name: "vol/docs", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content)),
+	})
+	_, _ = tw.Write(content)
+	_ = tw.Close()
+	_ = gw.Close()
+
+	err := UntarGzDirUnderPrefix(bytes.NewReader(buf.Bytes()), t.TempDir(), "vol/docs")
+	if !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("expected ErrIntegrity when prefix entry is a regular file, got %v", err)
 	}
 }
