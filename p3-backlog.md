@@ -8,21 +8,39 @@ when the item is picked up.
 
 ## P3-1: Streaming tar/push for large datasets
 
-**Current behaviour**
-`TarGzDir` and `TarGzDirFiles` accumulate the entire compressed archive in a
-`bytes.Buffer` before returning it. `publishVolumeToStore` holds all layer
-bytes in memory simultaneously. For multi-GB datasets this risks OOM.
+**Historical problem**
+The original publish path accumulated each compressed layer in a `bytes.Buffer`
+(`publishVolumeToStore` + public `TarGzDir` / `TarGzDirFiles` helpers), holding
+all layer bytes in memory simultaneously. For multi-GB datasets this risked OOM.
 
-**Accepted trade-off**
-Acceptable while dataset sizes remain small (development / integration use).
+**Current state — core publish path**
+`publishVolumeToStore` now uses `buildAndPushTempLayer` (commit `c540719`):
+each layer is written to a temp file, pushed, and the file is closed and removed
+before the next layer begins. At most one layer file is open at a time regardless
+of partition count. Memory pressure from layer content is eliminated on the core
+path.
 
-### ✅ Step 1 — temp-file-backed tar layer (done, commit `329ea8b`)
+**Remaining limitation — public helper API**
+`TarGzDir(fsDir, prefixPath string) ([]byte, error)` and
+`TarGzDirFiles(fsDir, prefixPath string, …) (bool, []byte, error)` still
+accumulate the compressed stream into a `[]byte` before returning. These are
+utility/test-facing helpers; they are not used by the core publish path.
+Large-dataset callers should use the `…To(w io.Writer, …)` streaming variants
+(`TarGzDirTo`, `TarGzDirFilesTo`) directly.
+
+**Deferred design**
+True streaming push (no temp file at all) and chunked CAS remain undesigned;
+see Step 2 and Step 3 below. These are Post-P3 RFC / P4 candidates.
+
+### ✅ Step 1 — temp-file-backed tar layer (done, commit `329ea8b` + `c540719`)
 
 - Each layer is written to a temp file (`os.CreateTemp`) instead of a
   `bytes.Buffer`.
 - Digest and size are computed in a single pass using
   `io.MultiWriter(tmp, hash, countWriter)`.
-- The temp file is seeked to 0 and passed to ORAS push; removed on cleanup.
+- The temp file is seeked to 0 and passed to ORAS push; removed immediately
+  after each layer push via `buildAndPushTempLayer` (commit `c540719`), so
+  at most one temp file is open at a time.
 - `TarGzDirTo(w io.Writer, …)` and `TarGzDirFilesTo(w io.Writer, …)` were
   extracted so callers can write directly to any `io.Writer`.
 
