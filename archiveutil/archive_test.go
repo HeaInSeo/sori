@@ -224,6 +224,120 @@ func TestTarGzDirFiles_NonExistentDir(t *testing.T) {
 	}
 }
 
+func TestTarGzDirTo_RoundTrip(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write hello.txt: %v", err)
+	}
+	subdir := filepath.Join(src, "sub")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "world.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("write world.txt: %v", err)
+	}
+
+	buf := &bytes.Buffer{}
+	if err := TarGzDirTo(buf, src, "mydir"); err != nil {
+		t.Fatalf("TarGzDirTo: %v", err)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("expected non-empty archive")
+	}
+
+	dest := t.TempDir()
+	if err := UntarGzDir(bytes.NewReader(buf.Bytes()), dest); err != nil {
+		t.Fatalf("UntarGzDir: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dest, "mydir", "hello.txt"))
+	if err != nil {
+		t.Fatalf("read hello.txt: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("hello.txt content mismatch: got %q", got)
+	}
+
+	got, err = os.ReadFile(filepath.Join(dest, "mydir", "sub", "world.txt"))
+	if err != nil {
+		t.Fatalf("read world.txt: %v", err)
+	}
+	if string(got) != "world" {
+		t.Fatalf("world.txt content mismatch: got %q", got)
+	}
+}
+
+func TestTarGzDirFilesTo_HasFilesTrue(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "alpha.txt"), []byte("alpha"), 0o644); err != nil {
+		t.Fatalf("write alpha.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "beta.txt"), []byte("beta"), 0o644); err != nil {
+		t.Fatalf("write beta.txt: %v", err)
+	}
+	// Subdir should not be included.
+	if err := os.MkdirAll(filepath.Join(src, "subdir"), 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+
+	buf := &bytes.Buffer{}
+	hasFiles, err := TarGzDirFilesTo(buf, src, "pfx", nil)
+	if err != nil {
+		t.Fatalf("TarGzDirFilesTo: %v", err)
+	}
+	if !hasFiles {
+		t.Fatal("expected hasFiles=true for non-empty dir")
+	}
+	if buf.Len() == 0 {
+		t.Fatal("expected non-empty archive bytes")
+	}
+
+	dest := t.TempDir()
+	if err := UntarGzDir(bytes.NewReader(buf.Bytes()), dest); err != nil {
+		t.Fatalf("UntarGzDir: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dest, "pfx", "alpha.txt"))
+	if err != nil {
+		t.Fatalf("read alpha.txt: %v", err)
+	}
+	if string(got) != "alpha" {
+		t.Fatalf("alpha.txt content mismatch: got %q", got)
+	}
+
+	got, err = os.ReadFile(filepath.Join(dest, "pfx", "beta.txt"))
+	if err != nil {
+		t.Fatalf("read beta.txt: %v", err)
+	}
+	if string(got) != "beta" {
+		t.Fatalf("beta.txt content mismatch: got %q", got)
+	}
+
+	if _, err := os.Stat(filepath.Join(dest, "pfx", "subdir")); !os.IsNotExist(err) {
+		t.Fatal("subdir should not be present in TarGzDirFilesTo output")
+	}
+}
+
+func TestTarGzDirFilesTo_HasFilesFalse(t *testing.T) {
+	src := t.TempDir()
+	// Only a subdir — no regular files.
+	if err := os.MkdirAll(filepath.Join(src, "subdir"), 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+
+	buf := &bytes.Buffer{}
+	hasFiles, err := TarGzDirFilesTo(buf, src, "pfx", nil)
+	if err != nil {
+		t.Fatalf("TarGzDirFilesTo: %v", err)
+	}
+	if hasFiles {
+		t.Fatal("expected hasFiles=false for dir with no regular files")
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("expected nothing written to w, got %d bytes", buf.Len())
+	}
+}
+
 func TestError_ErrorString_AllBranches(t *testing.T) {
 	wrapped := fmt.Errorf("cause")
 	cases := []struct {

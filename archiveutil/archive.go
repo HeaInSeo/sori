@@ -15,23 +15,24 @@ import (
 	"time"
 )
 
-func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
+// TarGzDirTo writes a gzip-compressed tar of fsDir into w.
+// prefixPath is used as the tar name prefix (same semantics as TarGzDir).
+func TarGzDirTo(w io.Writer, fsDir, prefixPath string) error {
 	var entries []string
 	if err := filepath.WalkDir(fsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return transportError("TarGzDir", "walk source directory", err)
+			return transportError("TarGzDirTo", "walk source directory", err)
 		}
 		entries = append(entries, path)
 		return nil
 	}); err != nil {
-		return nil, err
+		return err
 	}
 	sort.Strings(entries)
 
-	buf := &bytes.Buffer{}
-	gw, err := gzip.NewWriterLevel(buf, gzip.BestCompression)
+	gw, err := gzip.NewWriterLevel(w, gzip.BestCompression)
 	if err != nil {
-		return nil, transportError("TarGzDir", "create gzip writer", err)
+		return transportError("TarGzDirTo", "create gzip writer", err)
 	}
 	gw.ModTime = time.Unix(0, 0)
 	gw.OS = 0
@@ -40,14 +41,14 @@ func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
 	for _, path := range entries {
 		info, err := os.Lstat(path)
 		if err != nil {
-			return nil, transportError("TarGzDir", "stat source path "+path, err)
+			return transportError("TarGzDirTo", "stat source path "+path, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, validationError("TarGzDir", "symlinks are not supported: "+path, nil)
+			return validationError("TarGzDirTo", "symlinks are not supported: "+path, nil)
 		}
 		rel, err := filepath.Rel(fsDir, path)
 		if err != nil {
-			return nil, transportError("TarGzDir", "resolve relative path "+path, err)
+			return transportError("TarGzDirTo", "resolve relative path "+path, err)
 		}
 
 		var tarName string
@@ -59,7 +60,7 @@ func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
 
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
-			return nil, transportError("TarGzDir", "build tar header for "+path, err)
+			return transportError("TarGzDirTo", "build tar header for "+path, err)
 		}
 		hdr.Name = tarName
 		hdr.Uid = 0
@@ -69,43 +70,50 @@ func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
 		hdr.ModTime = time.Unix(0, 0)
 
 		if err := tw.WriteHeader(hdr); err != nil {
-			return nil, transportError("TarGzDir", "write tar header for "+path, err)
+			return transportError("TarGzDirTo", "write tar header for "+path, err)
 		}
 		if info.Mode().IsRegular() {
 			f, err := os.Open(path)
 			if err != nil {
-				return nil, transportError("TarGzDir", "open source file "+path, err)
+				return transportError("TarGzDirTo", "open source file "+path, err)
 			}
 			if _, err := io.Copy(tw, f); err != nil {
 				cErr := f.Close()
 				if cErr != nil {
-					return nil, transportError("TarGzDir", "copy source file "+path, errors.Join(err, cErr))
+					return transportError("TarGzDirTo", "copy source file "+path, errors.Join(err, cErr))
 				}
-				return nil, transportError("TarGzDir", "copy source file "+path, err)
+				return transportError("TarGzDirTo", "copy source file "+path, err)
 			}
 			if err := f.Close(); err != nil {
-				return nil, transportError("TarGzDir", "close source file "+path, err)
+				return transportError("TarGzDirTo", "close source file "+path, err)
 			}
 		}
 	}
 
 	if err := tw.Close(); err != nil {
-		return nil, transportError("TarGzDir", "close tar writer", err)
+		return transportError("TarGzDirTo", "close tar writer", err)
 	}
 	if err := gw.Close(); err != nil {
-		return nil, transportError("TarGzDir", "close gzip writer", err)
+		return transportError("TarGzDirTo", "close gzip writer", err)
+	}
+	return nil
+}
+
+func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if err := TarGzDirTo(buf, fsDir, prefixPath); err != nil {
+		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
-// TarGzDirFiles creates a gzip-compressed tar of only the regular files and
-// symlinks immediately inside fsDir (no subdirectory recursion). Files whose
-// base names match skipNames are excluded. Returns nil if there are no files
-// to include.
-func TarGzDirFiles(fsDir, prefixPath string, skipNames map[string]struct{}) ([]byte, error) {
+// TarGzDirFilesTo writes a gzip-compressed tar of only the regular files
+// immediately inside fsDir into w. Returns (hasFiles bool, err error).
+// hasFiles is false if there are no files to write (nothing was written to w).
+func TarGzDirFilesTo(w io.Writer, fsDir, prefixPath string, skipNames map[string]struct{}) (bool, error) {
 	entries, err := os.ReadDir(fsDir)
 	if err != nil {
-		return nil, transportError("TarGzDirFiles", "read directory "+fsDir, err)
+		return false, transportError("TarGzDirFilesTo", "read directory "+fsDir, err)
 	}
 
 	var filePaths []string
@@ -119,15 +127,14 @@ func TarGzDirFiles(fsDir, prefixPath string, skipNames map[string]struct{}) ([]b
 		filePaths = append(filePaths, filepath.Join(fsDir, e.Name()))
 	}
 	if len(filePaths) == 0 {
-		return nil, nil
+		return false, nil
 	}
 
 	sort.Strings(filePaths)
 
-	buf := &bytes.Buffer{}
-	gw, err := gzip.NewWriterLevel(buf, gzip.BestCompression)
+	gw, err := gzip.NewWriterLevel(w, gzip.BestCompression)
 	if err != nil {
-		return nil, transportError("TarGzDirFiles", "create gzip writer", err)
+		return false, transportError("TarGzDirFilesTo", "create gzip writer", err)
 	}
 	gw.ModTime = time.Unix(0, 0)
 	gw.OS = 0
@@ -136,15 +143,15 @@ func TarGzDirFiles(fsDir, prefixPath string, skipNames map[string]struct{}) ([]b
 	for _, path := range filePaths {
 		info, err := os.Lstat(path)
 		if err != nil {
-			return nil, transportError("TarGzDirFiles", "stat "+path, err)
+			return false, transportError("TarGzDirFilesTo", "stat "+path, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, validationError("TarGzDirFiles", "symlinks are not supported: "+path, nil)
+			return false, validationError("TarGzDirFilesTo", "symlinks are not supported: "+path, nil)
 		}
 		tarName := filepath.ToSlash(filepath.Join(prefixPath, filepath.Base(path)))
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
-			return nil, transportError("TarGzDirFiles", "build tar header for "+path, err)
+			return false, transportError("TarGzDirFilesTo", "build tar header for "+path, err)
 		}
 		hdr.Name = tarName
 		hdr.Uid = 0
@@ -153,30 +160,46 @@ func TarGzDirFiles(fsDir, prefixPath string, skipNames map[string]struct{}) ([]b
 		hdr.Gname = ""
 		hdr.ModTime = time.Unix(0, 0)
 		if err := tw.WriteHeader(hdr); err != nil {
-			return nil, transportError("TarGzDirFiles", "write tar header for "+path, err)
+			return false, transportError("TarGzDirFilesTo", "write tar header for "+path, err)
 		}
 		if info.Mode().IsRegular() {
 			f, err := os.Open(path)
 			if err != nil {
-				return nil, transportError("TarGzDirFiles", "open "+path, err)
+				return false, transportError("TarGzDirFilesTo", "open "+path, err)
 			}
 			if _, err := io.Copy(tw, f); err != nil {
 				cErr := f.Close()
 				if cErr != nil {
-					return nil, transportError("TarGzDirFiles", "copy "+path, errors.Join(err, cErr))
+					return false, transportError("TarGzDirFilesTo", "copy "+path, errors.Join(err, cErr))
 				}
-				return nil, transportError("TarGzDirFiles", "copy "+path, err)
+				return false, transportError("TarGzDirFilesTo", "copy "+path, err)
 			}
 			if err := f.Close(); err != nil {
-				return nil, transportError("TarGzDirFiles", "close "+path, err)
+				return false, transportError("TarGzDirFilesTo", "close "+path, err)
 			}
 		}
 	}
 	if err := tw.Close(); err != nil {
-		return nil, transportError("TarGzDirFiles", "close tar writer", err)
+		return false, transportError("TarGzDirFilesTo", "close tar writer", err)
 	}
 	if err := gw.Close(); err != nil {
-		return nil, transportError("TarGzDirFiles", "close gzip writer", err)
+		return false, transportError("TarGzDirFilesTo", "close gzip writer", err)
+	}
+	return true, nil
+}
+
+// TarGzDirFiles creates a gzip-compressed tar of only the regular files and
+// symlinks immediately inside fsDir (no subdirectory recursion). Files whose
+// base names match skipNames are excluded. Returns nil if there are no files
+// to include.
+func TarGzDirFiles(fsDir, prefixPath string, skipNames map[string]struct{}) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	hasFiles, err := TarGzDirFilesTo(buf, fsDir, prefixPath, skipNames)
+	if err != nil {
+		return nil, err
+	}
+	if !hasFiles {
+		return nil, nil
 	}
 	return buf.Bytes(), nil
 }

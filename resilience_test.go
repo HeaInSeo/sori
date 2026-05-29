@@ -280,6 +280,45 @@ func TestFetchWithStaging_Parallel_CorruptLayer_StagingCleaned(t *testing.T) {
 	}
 }
 
+// TestFetchVolSeq_StagingValidation_PartitionPresent is a regression test that
+// verifies staging validation does not reject a well-formed artifact: a volume
+// with one partition directory that is present in the extracted staging tree
+// must complete successfully and produce a populated destRoot.
+func TestFetchVolSeq_StagingValidation_PartitionPresent(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	validDesc, validData := buildValidTarGzLayer(t, "vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{validDesc, validData}}, "staging-valid.v1")
+
+	destRoot := filepath.Join(tmp, "dest")
+	client := NewClient(WithLocalStorePath(storePath))
+	vi, err := client.FetchVolume(ctx, destRoot, storePath, "staging-valid.v1", FetchOptions{
+		Concurrency:             1,
+		RequireEmptyDestination: true,
+	})
+	if err != nil {
+		t.Fatalf("expected success for valid artifact with staging validation, got: %v", err)
+	}
+	if vi == nil {
+		t.Fatal("expected non-nil VolumeIndex")
+	}
+
+	// destRoot must exist after a successful staged fetch.
+	if _, statErr := os.Stat(destRoot); statErr != nil {
+		t.Errorf("destRoot must exist after successful staged fetch: %v", statErr)
+	}
+
+	// The partition directory must exist under destRoot.
+	partDir := filepath.Join(destRoot, "vol", "part")
+	if info, statErr := os.Stat(partDir); statErr != nil || !info.IsDir() {
+		t.Errorf("partition directory %q must exist under destRoot", partDir)
+	}
+}
+
 // ── context cancellation ─────────────────────────────────────────────────────
 
 // TestFetchVolSeq_CancelledContext_NoDeadlock verifies that FetchVolSeq returns

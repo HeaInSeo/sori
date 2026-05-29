@@ -24,6 +24,13 @@ import (
 	"oras.land/oras-go/v2/registry/remote"
 )
 
+type countWriter struct{ n int64 }
+
+func (cw *countWriter) Write(p []byte) (int, error) {
+	cw.n += int64(len(p))
+	return len(p), nil
+}
+
 const (
 	annotationPartitionPath     = "org.example.partitionPath"
 	annotationVolumeDisplayName = "org.example.volumeDisplayName"
@@ -178,24 +185,37 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 	if len(vi.Partitions) == 0 {
 		// Flat volume (no partitions): treat all root-level regular files as a
 		// root-files layer so that publish and fetch both produce Partitions:[].
-		flatData, err := archiveutil.TarGzDirFiles(volPath, rootBase, rootFileSkipNames)
+		flatTmp, err := os.CreateTemp(storePath, ".sori-layer-*")
+		if err != nil {
+			return nil, transportError("VolumeIndex.publishVolumeToStore", "create temp file for flat volume layer", err)
+		}
+		defer os.Remove(flatTmp.Name())
+		defer flatTmp.Close()
+		flatH := digest.Canonical.Hash()
+		flatCW := &countWriter{}
+		flatMW := io.MultiWriter(flatTmp, flatH, flatCW)
+		flatHasFiles, err := archiveutil.TarGzDirFilesTo(flatMW, volPath, rootBase, rootFileSkipNames)
 		if err != nil {
 			if errors.Is(err, archiveutil.ErrValidation) {
 				return nil, validationError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz flat volume %q", volPath), err)
 			}
 			return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz flat volume %q", volPath), err)
 		}
-		if flatData != nil {
+		if flatHasFiles {
+			flatDigest := digest.NewDigest(digest.Canonical, flatH)
 			desc := ocispec.Descriptor{
 				MediaType: ocispec.MediaTypeImageLayerGzip,
-				Digest:    digest.FromBytes(flatData),
-				Size:      int64(len(flatData)),
+				Digest:    flatDigest,
+				Size:      flatCW.n,
 				Annotations: map[string]string{
 					annotationPartitionPath: rootBase,
 					annotationLayerKind:     layerKindRootFiles,
 				},
 			}
-			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(flatData))
+			if _, err := flatTmp.Seek(0, 0); err != nil {
+				return nil, transportError("VolumeIndex.publishVolumeToStore", "seek flat volume temp file", err)
+			}
+			pushedPtr, err := pushIfNeeded(desc, flatTmp)
 			if err != nil {
 				return nil, transportError("VolumeIndex.publishVolumeToStore", "push flat volume layer", err)
 			}
@@ -207,24 +227,37 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 	} else {
 		// Push root-level files (e.g., README.md) as a separate layer so they
 		// are not silently lost when only partition subdirectories are tarred.
-		rootFileData, err := archiveutil.TarGzDirFiles(volPath, rootBase, rootFileSkipNames)
+		rootTmp, err := os.CreateTemp(storePath, ".sori-layer-*")
+		if err != nil {
+			return nil, transportError("VolumeIndex.publishVolumeToStore", "create temp file for root files layer", err)
+		}
+		defer os.Remove(rootTmp.Name())
+		defer rootTmp.Close()
+		rootH := digest.Canonical.Hash()
+		rootCW := &countWriter{}
+		rootMW := io.MultiWriter(rootTmp, rootH, rootCW)
+		rootHasFiles, err := archiveutil.TarGzDirFilesTo(rootMW, volPath, rootBase, rootFileSkipNames)
 		if err != nil {
 			if errors.Is(err, archiveutil.ErrValidation) {
 				return nil, validationError("VolumeIndex.publishVolumeToStore", "tar.gz root files", err)
 			}
 			return nil, transportError("VolumeIndex.publishVolumeToStore", "tar.gz root files", err)
 		}
-		if rootFileData != nil {
+		if rootHasFiles {
+			rootDigest := digest.NewDigest(digest.Canonical, rootH)
 			desc := ocispec.Descriptor{
 				MediaType: ocispec.MediaTypeImageLayerGzip,
-				Digest:    digest.FromBytes(rootFileData),
-				Size:      int64(len(rootFileData)),
+				Digest:    rootDigest,
+				Size:      rootCW.n,
 				Annotations: map[string]string{
 					annotationPartitionPath: rootBase,
 					annotationLayerKind:     layerKindRootFiles,
 				},
 			}
-			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(rootFileData))
+			if _, err := rootTmp.Seek(0, 0); err != nil {
+				return nil, transportError("VolumeIndex.publishVolumeToStore", "seek root files temp file", err)
+			}
+			pushedPtr, err := pushIfNeeded(desc, rootTmp)
 			if err != nil {
 				return nil, transportError("VolumeIndex.publishVolumeToStore", "push root files layer", err)
 			}
@@ -250,23 +283,35 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 					fmt.Sprintf("partition path %q escapes volume root", part.Path), nil)
 			}
 			fsPath := filepath.Join(volPath, rel)
-			layerData, err := archiveutil.TarGzDir(fsPath, part.Path)
+			partTmp, err := os.CreateTemp(storePath, ".sori-layer-*")
 			if err != nil {
+				return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("create temp file for partition layer %q", part.Name), err)
+			}
+			defer os.Remove(partTmp.Name())
+			defer partTmp.Close()
+			partH := digest.Canonical.Hash()
+			partCW := &countWriter{}
+			partMW := io.MultiWriter(partTmp, partH, partCW)
+			if err := archiveutil.TarGzDirTo(partMW, fsPath, part.Path); err != nil {
 				if errors.Is(err, archiveutil.ErrValidation) {
 					return nil, validationError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz %q", fsPath), err)
 				}
 				return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz %q", fsPath), err)
 			}
+			partDigest := digest.NewDigest(digest.Canonical, partH)
 			desc := ocispec.Descriptor{
 				MediaType: ocispec.MediaTypeImageLayerGzip,
-				Digest:    digest.FromBytes(layerData),
-				Size:      int64(len(layerData)),
+				Digest:    partDigest,
+				Size:      partCW.n,
 				Annotations: map[string]string{
 					annotationPartitionPath: part.Path,
 					annotationLayerKind:     layerKindPartition,
 				},
 			}
-			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
+			if _, err := partTmp.Seek(0, 0); err != nil {
+				return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("seek temp file for partition layer %q", part.Name), err)
+			}
+			pushedPtr, err := pushIfNeeded(desc, partTmp)
 			if err != nil {
 				return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("push layer %s", part.Name), err)
 			}
@@ -599,7 +644,7 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 // (on success), preventing the partial-extraction state that direct extraction
 // leaves behind when a layer download or unpack fails midway.
 //
-// Precondition: destRoot must not exist (call ensureEmptyDir first).
+// Precondition: destRoot must not exist (call ensureDestinationAbsent first).
 func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
 	parent := filepath.Dir(destRoot)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -625,6 +670,37 @@ func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concur
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Validate staging contents before the atomic commit.
+	// Rule 1: each partition directory must exist in staging.
+	for _, p := range vi.Partitions {
+		partDir := filepath.Join(stagingDir, p.Path)
+		info, statErr := os.Stat(partDir)
+		if statErr != nil || !info.IsDir() {
+			return nil, integrityError("fetchVolWithStaging", "partition directory missing in staging: "+p.Path, nil)
+		}
+	}
+
+	// Rule 2: if configblob.json is present, it must be valid JSON.
+	// Derive rootBase from the first directory entry under stagingDir.
+	stagingEntries, readErr := os.ReadDir(stagingDir)
+	if readErr == nil {
+		var rootBase string
+		for _, e := range stagingEntries {
+			if e.IsDir() {
+				rootBase = e.Name()
+				break
+			}
+		}
+		if rootBase != "" {
+			configPath := filepath.Join(stagingDir, rootBase, ConfigBlobJson)
+			if data, readFileErr := os.ReadFile(configPath); readFileErr == nil {
+				if !json.Valid(data) {
+					return nil, integrityError("fetchVolWithStaging", "configblob.json is not valid JSON", nil)
+				}
+			}
+		}
 	}
 
 	if err := os.Rename(stagingDir, destRoot); err != nil {

@@ -117,7 +117,7 @@ func (c *Client) FetchVolumeParallel(ctx context.Context, destRoot, repo, tag st
 // success), preventing partial-extraction states.
 func (c *Client) FetchVolume(ctx context.Context, destRoot, repo, tag string, opts FetchOptions) (*VolumeIndex, error) {
 	if opts.RequireEmptyDestination {
-		if err := ensureEmptyDir(destRoot); err != nil {
+		if err := ensureDestinationAbsent(destRoot); err != nil {
 			return nil, err
 		}
 		return fetchVolWithStaging(ctx, destRoot, repo, tag, opts.Concurrency)
@@ -128,7 +128,7 @@ func (c *Client) FetchVolume(ctx context.Context, destRoot, repo, tag string, op
 	return FetchVolParallel(ctx, destRoot, repo, tag, opts.Concurrency)
 }
 
-func ensureEmptyDir(path string) error {
+func ensureDestinationAbsent(path string) error {
 	if _, err := os.Stat(path); err == nil {
 		return conflictError("FetchVolume", "destination already exists; it must not exist when RequireEmptyDestination is true", nil)
 	} else if os.IsNotExist(err) {
