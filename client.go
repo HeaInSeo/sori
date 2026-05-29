@@ -115,7 +115,17 @@ func (c *Client) FetchVolumeParallel(ctx context.Context, destRoot, repo, tag st
 // When RequireEmptyDestination is true, extraction uses a staging directory so
 // that destRoot is either left untouched (on failure) or fully populated (on
 // success), preventing partial-extraction states.
+//
+// When AtomicOverwrite is true, the 3-phase overwrite path is used: the new
+// content is extracted to a staging sibling, the existing destRoot is renamed
+// to a backup sibling, then staging is renamed to destRoot.
 func (c *Client) FetchVolume(ctx context.Context, destRoot, repo, tag string, opts FetchOptions) (*VolumeIndex, error) {
+	if opts.RequireEmptyDestination && opts.AtomicOverwrite {
+		return nil, validationError("FetchVolume", "RequireEmptyDestination and AtomicOverwrite are mutually exclusive", nil)
+	}
+	if opts.AtomicOverwrite {
+		return fetchVolWithAtomicOverwrite(ctx, destRoot, repo, tag, opts.Concurrency)
+	}
 	if opts.RequireEmptyDestination {
 		if err := ensureDestinationAbsent(destRoot); err != nil {
 			return nil, err

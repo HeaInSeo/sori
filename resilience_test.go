@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -609,6 +610,264 @@ func TestCollectionManager_ConcurrentRemove(t *testing.T) {
 	snap := cm.GetSnapshot()
 	if snap.Version < 0 {
 		t.Fatalf("corrupt version after concurrent removes: %d", snap.Version)
+	}
+}
+
+// ── AtomicOverwrite ──────────────────────────────────────────────────────────
+
+// TestFetchWithAtomicOverwrite_DestAbsent verifies that AtomicOverwrite succeeds
+// when destRoot does not exist.
+func TestFetchWithAtomicOverwrite_DestAbsent(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	validDesc, validData := buildValidTarGzLayer(t, "vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{validDesc, validData}}, "ao-absent.v1")
+
+	destRoot := filepath.Join(tmp, "dest")
+	client := NewClient(WithLocalStorePath(storePath))
+	vi, err := client.FetchVolume(ctx, destRoot, storePath, "ao-absent.v1", FetchOptions{
+		Concurrency:     1,
+		AtomicOverwrite: true,
+	})
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	if vi == nil {
+		t.Fatal("expected non-nil VolumeIndex")
+	}
+	if _, statErr := os.Stat(destRoot); statErr != nil {
+		t.Errorf("destRoot must exist after AtomicOverwrite: %v", statErr)
+	}
+}
+
+// TestFetchWithAtomicOverwrite_DestExists verifies that AtomicOverwrite succeeds
+// and replaces the existing destRoot, leaving no backup sibling.
+func TestFetchWithAtomicOverwrite_DestExists(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	validDesc, validData := buildValidTarGzLayer(t, "vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{validDesc, validData}}, "ao-exists.v1")
+
+	destRoot := filepath.Join(tmp, "dest")
+	sentinelPath := filepath.Join(destRoot, "sentinel.txt")
+	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(sentinelPath, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	client := NewClient(WithLocalStorePath(storePath))
+	_, err := client.FetchVolume(ctx, destRoot, storePath, "ao-exists.v1", FetchOptions{
+		Concurrency:     1,
+		AtomicOverwrite: true,
+	})
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	if _, statErr := os.Stat(sentinelPath); !os.IsNotExist(statErr) {
+		t.Error("sentinel must not exist after AtomicOverwrite replaced destRoot")
+	}
+	if _, statErr := os.Stat(destRoot); statErr != nil {
+		t.Errorf("destRoot must exist after AtomicOverwrite: %v", statErr)
+	}
+	entries, _ := os.ReadDir(tmp)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".backup-") {
+			t.Errorf("stale backup dir found: %s", e.Name())
+		}
+	}
+}
+
+// TestFetchWithAtomicOverwrite_MutualExclusion verifies that setting both
+// RequireEmptyDestination and AtomicOverwrite returns ErrValidation.
+func TestFetchWithAtomicOverwrite_MutualExclusion(t *testing.T) {
+	ctx := context.Background()
+	client := NewClient(WithLocalStorePath(t.TempDir()))
+	_, err := client.FetchVolume(ctx, t.TempDir(), t.TempDir(), "any.v1", FetchOptions{
+		RequireEmptyDestination: true,
+		AtomicOverwrite:         true,
+	})
+	if err == nil {
+		t.Fatal("expected ErrValidation for mutually exclusive options")
+	}
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %T: %v", err, err)
+	}
+}
+
+// TestFetchWithAtomicOverwrite_Phase1Failure_DestPreserved verifies that when
+// layer extraction fails (Phase 1), destRoot is untouched and no staging dir
+// survives.
+func TestFetchWithAtomicOverwrite_Phase1Failure_DestPreserved(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	corruptDesc, corruptData := buildCorruptLayer("vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{corruptDesc, corruptData}}, "ao-p1fail.v1")
+
+	destRoot := filepath.Join(tmp, "dest")
+	sentinelPath := filepath.Join(destRoot, "sentinel.txt")
+	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(sentinelPath, []byte("original"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	client := NewClient(WithLocalStorePath(storePath))
+	_, err := client.FetchVolume(ctx, destRoot, storePath, "ao-p1fail.v1", FetchOptions{
+		Concurrency:     1,
+		AtomicOverwrite: true,
+	})
+	if err == nil {
+		t.Fatal("expected error for corrupt layer")
+	}
+	data, readErr := os.ReadFile(sentinelPath)
+	if readErr != nil {
+		t.Fatalf("sentinel must exist after Phase 1 failure: %v", readErr)
+	}
+	if string(data) != "original" {
+		t.Errorf("sentinel content changed after Phase 1 failure: got %q", string(data))
+	}
+	entries, _ := os.ReadDir(tmp)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".staging-") {
+			t.Errorf("stale staging dir after Phase 1 failure: %s", e.Name())
+		}
+	}
+}
+
+// TestFetchWithAtomicOverwrite_Phase2Failure_DestPreserved verifies that when
+// the Phase 2 backup rename fails (injected), destRoot is untouched.
+func TestFetchWithAtomicOverwrite_Phase2Failure_DestPreserved(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	validDesc, validData := buildValidTarGzLayer(t, "vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{validDesc, validData}}, "ao-p2fail.v1")
+
+	destRoot := filepath.Join(tmp, "dest")
+	sentinelPath := filepath.Join(destRoot, "sentinel.txt")
+	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(sentinelPath, []byte("original"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	testHookPhase2RenameErr = errors.New("injected phase 2 failure")
+	t.Cleanup(func() { testHookPhase2RenameErr = nil })
+
+	client := NewClient(WithLocalStorePath(storePath))
+	_, err := client.FetchVolume(ctx, destRoot, storePath, "ao-p2fail.v1", FetchOptions{
+		Concurrency:     1,
+		AtomicOverwrite: true,
+	})
+	if err == nil {
+		t.Fatal("expected error from Phase 2 hook")
+	}
+	data, readErr := os.ReadFile(sentinelPath)
+	if readErr != nil {
+		t.Fatalf("sentinel must still exist: %v", readErr)
+	}
+	if string(data) != "original" {
+		t.Errorf("sentinel content changed after Phase 2 failure: got %q", string(data))
+	}
+}
+
+// TestFetchWithAtomicOverwrite_Phase3Failure_BackupRestored verifies that when
+// Phase 3 fails (injected), the backup is renamed back to destRoot and no
+// temporary siblings survive.
+func TestFetchWithAtomicOverwrite_Phase3Failure_BackupRestored(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	validDesc, validData := buildValidTarGzLayer(t, "vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{validDesc, validData}}, "ao-p3fail.v1")
+
+	destRoot := filepath.Join(tmp, "dest")
+	sentinelPath := filepath.Join(destRoot, "sentinel.txt")
+	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(sentinelPath, []byte("original"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	testHookPhase3RenameErr = errors.New("injected phase 3 failure")
+	t.Cleanup(func() { testHookPhase3RenameErr = nil })
+
+	client := NewClient(WithLocalStorePath(storePath))
+	_, err := client.FetchVolume(ctx, destRoot, storePath, "ao-p3fail.v1", FetchOptions{
+		Concurrency:     1,
+		AtomicOverwrite: true,
+	})
+	if err == nil {
+		t.Fatal("expected error from Phase 3 hook")
+	}
+	data, readErr := os.ReadFile(sentinelPath)
+	if readErr != nil {
+		t.Fatalf("sentinel must be restored after rollback: %v", readErr)
+	}
+	if string(data) != "original" {
+		t.Errorf("sentinel content incorrect after rollback: got %q", string(data))
+	}
+	entries, _ := os.ReadDir(tmp)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".staging-") || strings.HasPrefix(e.Name(), ".backup-") {
+			t.Errorf("stale temp dir after rollback: %s", e.Name())
+		}
+	}
+}
+
+// TestFetchWithAtomicOverwrite_CleanupFailure_ReturnsSuccess verifies that a
+// backup cleanup failure is logged but does not propagate as a function error.
+func TestFetchWithAtomicOverwrite_CleanupFailure_ReturnsSuccess(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	validDesc, validData := buildValidTarGzLayer(t, "vol/part")
+	storePath := buildOCIStore(t, []struct {
+		desc ocispec.Descriptor
+		data []byte
+	}{{validDesc, validData}}, "ao-cleanup.v1")
+
+	destRoot := filepath.Join(tmp, "dest")
+	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	testHookBackupCleanupErr = errors.New("injected cleanup failure")
+	t.Cleanup(func() { testHookBackupCleanupErr = nil })
+
+	client := NewClient(WithLocalStorePath(storePath))
+	_, err := client.FetchVolume(ctx, destRoot, storePath, "ao-cleanup.v1", FetchOptions{
+		Concurrency:     1,
+		AtomicOverwrite: true,
+	})
+	if err != nil {
+		t.Fatalf("cleanup failure must not cause function error, got: %v", err)
+	}
+	if _, statErr := os.Stat(destRoot); statErr != nil {
+		t.Errorf("destRoot must exist after successful AtomicOverwrite: %v", statErr)
 	}
 }
 

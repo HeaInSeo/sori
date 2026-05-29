@@ -21,6 +21,19 @@ type PushOptions struct {
 type FetchOptions struct {
 	Concurrency             int
 	RequireEmptyDestination bool
+	// AtomicOverwrite enables the 3-phase overwrite path:
+	//   Phase 1 — extract to a staging sibling of destRoot
+	//   Phase 2 — rename existing destRoot to a backup sibling (if present)
+	//   Phase 3 — rename staging to destRoot (atomic commit)
+	//   Cleanup — remove backup (best-effort; warning logged on failure)
+	//
+	// On Phase 3 failure a best-effort rollback renames the backup back to
+	// destRoot.  If that rollback also fails, destRoot may be absent; the
+	// error message includes the staging and backup paths for manual recovery.
+	//
+	// AtomicOverwrite and RequireEmptyDestination are mutually exclusive;
+	// setting both returns ErrValidation.
+	AtomicOverwrite bool
 }
 
 // ReferrerOptions controls the experimental referrer helpers.

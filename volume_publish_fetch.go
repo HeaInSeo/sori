@@ -637,6 +637,68 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 	return vi, nil
 }
 
+// testHookPhase2RenameErr, if non-nil, replaces the Phase 2 os.Rename call in
+// fetchVolWithAtomicOverwrite.  Used only by tests.
+var testHookPhase2RenameErr error
+
+// testHookPhase3RenameErr, if non-nil, replaces the Phase 3 os.Rename call in
+// fetchVolWithAtomicOverwrite.  Used only by tests.
+var testHookPhase3RenameErr error
+
+// testHookBackupCleanupErr, if non-nil, replaces the cleanup os.RemoveAll call
+// in fetchVolWithAtomicOverwrite.  Used only by tests.
+var testHookBackupCleanupErr error
+
+// validateStagingDir checks that a freshly-extracted staging directory is
+// internally consistent before it is committed as the new destRoot.
+func validateStagingDir(caller, stagingDir string, vi *VolumeIndex) error {
+	for _, p := range vi.Partitions {
+		partDir := filepath.Join(stagingDir, p.Path)
+		info, statErr := os.Stat(partDir)
+		if statErr != nil || !info.IsDir() {
+			return integrityError(caller, "partition directory missing in staging: "+p.Path, nil)
+		}
+	}
+	stagingEntries, readErr := os.ReadDir(stagingDir)
+	if readErr == nil {
+		var rootBase string
+		for _, e := range stagingEntries {
+			if e.IsDir() {
+				rootBase = e.Name()
+				break
+			}
+		}
+		if rootBase != "" {
+			configPath := filepath.Join(stagingDir, rootBase, ConfigBlobJson)
+			if data, readFileErr := os.ReadFile(configPath); readFileErr == nil {
+				if !json.Valid(data) {
+					return integrityError(caller, "configblob.json is not valid JSON", nil)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// uniqueBackupPath returns a path under parent that is guaranteed not to exist.
+// It creates a temporary file to obtain an OS-assigned unique name, removes the
+// file immediately, and returns the path — ready to receive an os.Rename.
+func uniqueBackupPath(parent, prefix string) (string, error) {
+	f, err := os.CreateTemp(parent, prefix)
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := os.Remove(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 // fetchVolWithStaging extracts layers to a temporary staging directory and
 // atomically renames it to destRoot only on full success.
 //
@@ -672,41 +734,101 @@ func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concur
 		return nil, err
 	}
 
-	// Validate staging contents before the atomic commit.
-	// Rule 1: each partition directory must exist in staging.
-	for _, p := range vi.Partitions {
-		partDir := filepath.Join(stagingDir, p.Path)
-		info, statErr := os.Stat(partDir)
-		if statErr != nil || !info.IsDir() {
-			return nil, integrityError("fetchVolWithStaging", "partition directory missing in staging: "+p.Path, nil)
-		}
-	}
-
-	// Rule 2: if configblob.json is present, it must be valid JSON.
-	// Derive rootBase from the first directory entry under stagingDir.
-	stagingEntries, readErr := os.ReadDir(stagingDir)
-	if readErr == nil {
-		var rootBase string
-		for _, e := range stagingEntries {
-			if e.IsDir() {
-				rootBase = e.Name()
-				break
-			}
-		}
-		if rootBase != "" {
-			configPath := filepath.Join(stagingDir, rootBase, ConfigBlobJson)
-			if data, readFileErr := os.ReadFile(configPath); readFileErr == nil {
-				if !json.Valid(data) {
-					return nil, integrityError("fetchVolWithStaging", "configblob.json is not valid JSON", nil)
-				}
-			}
-		}
+	if err := validateStagingDir("fetchVolWithStaging", stagingDir, vi); err != nil {
+		return nil, err
 	}
 
 	if err := os.Rename(stagingDir, destRoot); err != nil {
 		return nil, transportError("fetchVolWithStaging", "commit staging to destination", err)
 	}
 	cleanup = false
+	return vi, nil
+}
+
+// fetchVolWithAtomicOverwrite implements the 3-phase overwrite path:
+//
+//	Phase 1 — extract to a staging sibling of destRoot
+//	Phase 2 — rename existing destRoot to a backup sibling (if destRoot is present)
+//	Phase 3 — rename staging to destRoot (atomic commit)
+//	Cleanup — remove backup (best-effort; warning logged on failure)
+//
+// On Phase 3 failure a best-effort rollback renames the backup back to destRoot.
+// If that rollback also fails, destRoot may be absent; the error message includes
+// the staging and backup paths for manual recovery.
+func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
+	parent := filepath.Dir(destRoot)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return nil, transportError("fetchVolWithAtomicOverwrite", "create parent directory", err)
+	}
+	base := filepath.Base(destRoot)
+	stagingDir, err := os.MkdirTemp(parent, ".staging-"+base+"-*")
+	if err != nil {
+		return nil, transportError("fetchVolWithAtomicOverwrite", "create staging directory", err)
+	}
+	cleanupStaging := true
+	defer func() {
+		if cleanupStaging {
+			os.RemoveAll(stagingDir)
+		}
+	}()
+
+	// Phase 1: extract to staging.
+	var vi *VolumeIndex
+	if concurrency <= 1 {
+		vi, err = FetchVolSeq(ctx, stagingDir, repo, tag)
+	} else {
+		vi, err = FetchVolParallel(ctx, stagingDir, repo, tag, concurrency)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStagingDir("fetchVolWithAtomicOverwrite", stagingDir, vi); err != nil {
+		return nil, err
+	}
+
+	// Phase 2: back up existing destRoot if present.
+	var backupPath string
+	if _, statErr := os.Stat(destRoot); statErr == nil {
+		bp, err := uniqueBackupPath(parent, ".backup-"+base+"-")
+		if err != nil {
+			return nil, transportError("fetchVolWithAtomicOverwrite", "reserve backup path", err)
+		}
+		if testHookPhase2RenameErr != nil {
+			return nil, testHookPhase2RenameErr
+		}
+		if err := os.Rename(destRoot, bp); err != nil {
+			return nil, transportError("fetchVolWithAtomicOverwrite", "rename destRoot to backup", err)
+		}
+		backupPath = bp
+	}
+
+	// Phase 3: atomic commit — rename staging to destRoot.
+	phase3Err := testHookPhase3RenameErr
+	if phase3Err == nil {
+		phase3Err = os.Rename(stagingDir, destRoot)
+	}
+	if phase3Err != nil {
+		if backupPath != "" {
+			if rbErr := os.Rename(backupPath, destRoot); rbErr != nil {
+				return nil, transportError("fetchVolWithAtomicOverwrite",
+					fmt.Sprintf("phase 3 failed and rollback also failed; staging=%s backup=%s", stagingDir, backupPath),
+					errors.Join(phase3Err, rbErr))
+			}
+		}
+		return nil, transportError("fetchVolWithAtomicOverwrite", "commit staging to destination", phase3Err)
+	}
+	cleanupStaging = false
+
+	// Cleanup: remove backup (best-effort).
+	if backupPath != "" {
+		cleanupErr := testHookBackupCleanupErr
+		if cleanupErr == nil {
+			cleanupErr = os.RemoveAll(backupPath)
+		}
+		if cleanupErr != nil {
+			Log.Warnf("fetchVolWithAtomicOverwrite: failed to remove backup %s: %v", backupPath, cleanupErr)
+		}
+	}
 	return vi, nil
 }
 
