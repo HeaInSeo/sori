@@ -389,30 +389,34 @@ func pushLocalTagToRepository(ctx context.Context, localRepoPath, tag string, re
 	}, nil
 }
 
+// FetchVolSeq fetches a packaged dataset from a local OCI store sequentially.
 func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex, error) {
-	store, err := oci.New(repo)
+	src, err := oci.New(repo)
 	if err != nil {
 		return nil, transportError("FetchVolSeq", "open OCI store", err)
 	}
+	return fetchVolSeqFrom(ctx, destRoot, src, tag)
+}
 
-	ref := fmt.Sprintf("%s:%s", repo, tag)
-	manifestDesc, err := store.Resolve(ctx, tag)
+// fetchVolSeqFrom fetches sequentially from any ReadOnlyTarget.
+func fetchVolSeqFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag string) (*VolumeIndex, error) {
+	manifestDesc, err := src.Resolve(ctx, tag)
 	if err != nil {
-		return nil, notFoundError("FetchVolSeq", fmt.Sprintf("resolve reference %q", ref), err)
+		return nil, notFoundError("fetchVolSeqFrom", fmt.Sprintf("resolve tag %q", tag), err)
 	}
 
-	rc, err := store.Fetch(ctx, manifestDesc)
+	rc, err := src.Fetch(ctx, manifestDesc)
 	if err != nil {
-		return nil, transportError("FetchVolSeq", "fetch manifest", err)
+		return nil, transportError("fetchVolSeqFrom", "fetch manifest", err)
 	}
 	defer rc.Close()
 
 	var manifest ocispec.Manifest
 	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
-		return nil, integrityError("FetchVolSeq", "decode manifest", err)
+		return nil, integrityError("fetchVolSeqFrom", "decode manifest", err)
 	}
 
-	validLayers, err := validateManifestLayers("FetchVolSeq", manifest)
+	validLayers, err := validateManifestLayers("fetchVolSeqFrom", manifest)
 	if err != nil {
 		return nil, err
 	}
@@ -427,13 +431,13 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 	}
 
 	for _, vl := range validLayers {
-		layerRC, err := store.Fetch(ctx, vl.desc)
+		layerRC, err := src.Fetch(ctx, vl.desc)
 		if err != nil {
-			return nil, transportError("FetchVolSeq", fmt.Sprintf("fetch layer %s", vl.desc.Digest), err)
+			return nil, transportError("fetchVolSeqFrom", fmt.Sprintf("fetch layer %s", vl.desc.Digest), err)
 		}
 		if err := os.MkdirAll(destRoot, 0o755); err != nil {
 			_ = layerRC.Close()
-			return nil, transportError("FetchVolSeq", fmt.Sprintf("create destination root %s", destRoot), err)
+			return nil, transportError("fetchVolSeqFrom", fmt.Sprintf("create destination root %s", destRoot), err)
 		}
 
 		var extractErr error
@@ -444,18 +448,18 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 		}
 		if extractErr != nil {
 			_ = layerRC.Close()
-			return nil, integrityError("FetchVolSeq", fmt.Sprintf("extract layer %s", vl.desc.Digest), extractErr)
+			return nil, integrityError("fetchVolSeqFrom", fmt.Sprintf("extract layer %s", vl.desc.Digest), extractErr)
 		}
 
 		if err := layerRC.Close(); err != nil {
-			return nil, transportError("FetchVolSeq", fmt.Sprintf("close layer reader %s", vl.desc.Digest), err)
+			return nil, transportError("fetchVolSeqFrom", fmt.Sprintf("close layer reader %s", vl.desc.Digest), err)
 		}
 		if !vl.isRootFiles {
 			vi.Partitions = append(vi.Partitions, Partition{Name: vl.partPath, Path: vl.partPath, ManifestRef: vl.desc.Digest.String()})
 		}
 	}
 
-	if err := restoreConfigBlob(ctx, store, manifest, destRoot); err != nil {
+	if err := restoreConfigBlob(ctx, src, manifest, destRoot); err != nil {
 		return nil, err
 	}
 
@@ -465,29 +469,35 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 	return vi, nil
 }
 
+// FetchVolParallel fetches a packaged dataset from a local OCI store with
+// parallel layer extraction.
 func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
-	store, err := oci.New(repo)
+	src, err := oci.New(repo)
 	if err != nil {
 		return nil, transportError("FetchVolParallel", "open OCI store", err)
 	}
+	return fetchVolParallelFrom(ctx, destRoot, src, tag, concurrency)
+}
 
-	manifestDesc, err := store.Resolve(ctx, tag)
+// fetchVolParallelFrom fetches with parallel layer extraction from any ReadOnlyTarget.
+func fetchVolParallelFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag string, concurrency int) (*VolumeIndex, error) {
+	manifestDesc, err := src.Resolve(ctx, tag)
 	if err != nil {
-		return nil, notFoundError("FetchVolParallel", fmt.Sprintf("resolve reference %s:%s", repo, tag), err)
+		return nil, notFoundError("fetchVolParallelFrom", fmt.Sprintf("resolve tag %q", tag), err)
 	}
 
-	rc, err := store.Fetch(ctx, manifestDesc)
+	rc, err := src.Fetch(ctx, manifestDesc)
 	if err != nil {
-		return nil, transportError("FetchVolParallel", "fetch manifest", err)
+		return nil, transportError("fetchVolParallelFrom", "fetch manifest", err)
 	}
 	defer rc.Close()
 
 	var manifest ocispec.Manifest
 	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
-		return nil, integrityError("FetchVolParallel", "decode manifest", err)
+		return nil, integrityError("fetchVolParallelFrom", "decode manifest", err)
 	}
 
-	validLayers, err := validateManifestLayers("FetchVolParallel", manifest)
+	validLayers, err := validateManifestLayers("fetchVolParallelFrom", manifest)
 	if err != nil {
 		return nil, err
 	}
@@ -545,15 +555,15 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 			default:
 			}
 
-			layerRC, err := store.Fetch(ctx, meta.vl.desc)
+			layerRC, err := src.Fetch(ctx, meta.vl.desc)
 			if err != nil {
-				results <- jobResult{idx: meta.idx, err: transportError("FetchVolParallel", fmt.Sprintf("fetch layer %s", meta.vl.desc.Digest), err)}
+				results <- jobResult{idx: meta.idx, err: transportError("fetchVolParallelFrom", fmt.Sprintf("fetch layer %s", meta.vl.desc.Digest), err)}
 				cancel()
 				continue
 			}
 			if err := os.MkdirAll(destRoot, 0o755); err != nil {
 				_ = layerRC.Close()
-				results <- jobResult{idx: meta.idx, err: transportError("FetchVolParallel", fmt.Sprintf("mkdir %s", destRoot), err)}
+				results <- jobResult{idx: meta.idx, err: transportError("fetchVolParallelFrom", fmt.Sprintf("mkdir %s", destRoot), err)}
 				cancel()
 				continue
 			}
@@ -565,12 +575,12 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 			}
 			if extractErr != nil {
 				_ = layerRC.Close()
-				results <- jobResult{idx: meta.idx, err: integrityError("FetchVolParallel", fmt.Sprintf("extract layer %s", meta.vl.desc.Digest), extractErr)}
+				results <- jobResult{idx: meta.idx, err: integrityError("fetchVolParallelFrom", fmt.Sprintf("extract layer %s", meta.vl.desc.Digest), extractErr)}
 				cancel()
 				continue
 			}
 			if err := layerRC.Close(); err != nil {
-				results <- jobResult{idx: meta.idx, err: transportError("FetchVolParallel", fmt.Sprintf("close reader %s", meta.vl.desc.Digest), err)}
+				results <- jobResult{idx: meta.idx, err: transportError("fetchVolParallelFrom", fmt.Sprintf("close reader %s", meta.vl.desc.Digest), err)}
 				cancel()
 				continue
 			}
@@ -627,7 +637,7 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 		}
 	}
 
-	if err := restoreConfigBlob(ctx, store, manifest, destRoot); err != nil {
+	if err := restoreConfigBlob(ctx, src, manifest, destRoot); err != nil {
 		return nil, err
 	}
 
@@ -724,11 +734,16 @@ func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concur
 		}
 	}()
 
+	src, srcErr := oci.New(repo)
+	if srcErr != nil {
+		return nil, transportError("fetchVolWithStaging", "open OCI store", srcErr)
+	}
+
 	var vi *VolumeIndex
 	if concurrency <= 1 {
-		vi, err = FetchVolSeq(ctx, stagingDir, repo, tag)
+		vi, err = fetchVolSeqFrom(ctx, stagingDir, src, tag)
 	} else {
-		vi, err = FetchVolParallel(ctx, stagingDir, repo, tag, concurrency)
+		vi, err = fetchVolParallelFrom(ctx, stagingDir, src, tag, concurrency)
 	}
 	if err != nil {
 		return nil, err
@@ -773,11 +788,16 @@ func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string
 	}()
 
 	// Phase 1: extract to staging.
+	src, srcErr := oci.New(repo)
+	if srcErr != nil {
+		return nil, transportError("fetchVolWithAtomicOverwrite", "open OCI store", srcErr)
+	}
+
 	var vi *VolumeIndex
 	if concurrency <= 1 {
-		vi, err = FetchVolSeq(ctx, stagingDir, repo, tag)
+		vi, err = fetchVolSeqFrom(ctx, stagingDir, src, tag)
 	} else {
-		vi, err = FetchVolParallel(ctx, stagingDir, repo, tag, concurrency)
+		vi, err = fetchVolParallelFrom(ctx, stagingDir, src, tag, concurrency)
 	}
 	if err != nil {
 		return nil, err
