@@ -908,3 +908,84 @@ func TestCollectionManager_ConcurrentFlush(t *testing.T) {
 		t.Fatalf("collection file corrupted after concurrent flush: %v", err)
 	}
 }
+
+// ── temp-file cleanup ─────────────────────────────────────────────────────────
+
+// hasSoriLayerFiles returns true if any .sori-layer-* temp file exists in dir.
+func hasSoriLayerFiles(t *testing.T, dir string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir %q: %v", dir, err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".sori-layer-") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPublishVolume_TempFilesCleanedAfterSuccess verifies that no .sori-layer-*
+// temp files remain in the store after a successful PackageVolumeToStore call.
+// With the old defer-in-loop pattern, N partition temp files would all be open
+// until the function returned; this test confirms each is removed immediately.
+func TestPublishVolume_TempFilesCleanedAfterSuccess(t *testing.T) {
+	ctx := context.Background()
+	storePath := t.TempDir()
+
+	_, err := PackageVolumeToStore(ctx, storePath, PackageRequest{
+		SourceDir:   "./test-vol",
+		DisplayName: "cleanup-test",
+		Tag:         "cleanup.v1",
+	})
+	if err != nil {
+		t.Fatalf("PackageVolumeToStore: %v", err)
+	}
+
+	if hasSoriLayerFiles(t, storePath) {
+		t.Error("stale .sori-layer-* temp files remain after successful publish")
+	}
+}
+
+// TestPublishVolume_TempFilesCleanedAfterWriteFailure verifies that no
+// .sori-layer-* temp files leak when a partition write fails mid-publish.
+// The test creates a volume with two partitions: the first succeeds and the
+// second has a non-existent source directory, causing TarGzDirTo to fail.
+func TestPublishVolume_TempFilesCleanedAfterWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	storePath := t.TempDir()
+	volDir := t.TempDir()
+
+	// Build a two-partition volume layout: first partition is real, second is absent.
+	firstPart := filepath.Join(volDir, "volume", "part-ok")
+	if err := os.MkdirAll(firstPart, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(firstPart, "file.txt"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// part-missing intentionally not created so TarGzDirTo fails on it.
+
+	vi := &VolumeIndex{
+		DisplayName: "cleanup-fail-test",
+		Partitions: []Partition{
+			{Name: "part-ok", Path: "volume/part-ok"},
+			{Name: "part-missing", Path: "volume/part-missing"},
+		},
+	}
+	_, err := vi.publishVolumeToStore(
+		ctx, storePath,
+		filepath.Join(volDir, "volume"),
+		"cleanup-fail.v1",
+		[]byte("{}"),
+		func() time.Time { return time.Time{} },
+	)
+	if err == nil {
+		t.Fatal("expected error for missing partition dir, got nil")
+	}
+
+	if hasSoriLayerFiles(t, storePath) {
+		t.Error("stale .sori-layer-* temp files remain after failed publish")
+	}
+}

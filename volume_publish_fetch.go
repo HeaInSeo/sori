@@ -135,6 +135,66 @@ var rootFileSkipNames = map[string]struct{}{
 	VolumeIndexJson: {},
 }
 
+// buildLayerResult is returned by buildAndPushTempLayer.
+type buildLayerResult struct {
+	desc   ocispec.Descriptor
+	pushed bool
+	empty  bool // writeFn returned hasContent=false; desc is zero
+}
+
+// buildAndPushTempLayer builds one OCI layer: it creates a temp file in
+// storePath, pipes writes through a MultiWriter(file, sha256, countWriter),
+// calls writeFn, computes the descriptor, and calls pushFn.  The temp file is
+// closed and removed before returning regardless of success or failure, so
+// callers do not need to defer cleanup themselves.
+//
+// writeFn should return (false, nil) to signal "no content — skip push".
+func buildAndPushTempLayer(
+	caller string,
+	storePath string,
+	annotations map[string]string,
+	writeFn func(io.Writer) (hasContent bool, err error),
+	pushFn func(ocispec.Descriptor, io.Reader) (*bool, error),
+) (buildLayerResult, error) {
+	tmp, err := os.CreateTemp(storePath, ".sori-layer-*")
+	if err != nil {
+		return buildLayerResult{}, transportError(caller, "create temp layer file", err)
+	}
+	name := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+	}()
+
+	h := digest.Canonical.Hash()
+	cw := &countWriter{}
+	hasContent, err := writeFn(io.MultiWriter(tmp, h, cw))
+	if err != nil {
+		return buildLayerResult{}, err
+	}
+	if !hasContent {
+		return buildLayerResult{empty: true}, nil
+	}
+
+	desc := ocispec.Descriptor{
+		MediaType:   ocispec.MediaTypeImageLayerGzip,
+		Digest:      digest.NewDigest(digest.Canonical, h),
+		Size:        cw.n,
+		Annotations: annotations,
+	}
+	if _, err := tmp.Seek(0, 0); err != nil {
+		return buildLayerResult{}, transportError(caller, "seek temp layer file", err)
+	}
+	pushedPtr, err := pushFn(desc, tmp)
+	if err != nil {
+		return buildLayerResult{}, err
+	}
+	return buildLayerResult{
+		desc:   desc,
+		pushed: pushedPtr != nil && *pushedPtr,
+	}, nil
+}
+
 // Deprecated: prefer Client.PackageVolume, Client.PackageVolumeWithOptions, or
 // PackageVolumeToStore so new code stays on the preferred client-based core
 // path.
@@ -182,89 +242,65 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 	rootBase := filepath.Base(volPath)
 	layers := make([]ocispec.Descriptor, 0, len(vi.Partitions)+1)
 
+	const publishCaller = "VolumeIndex.publishVolumeToStore"
+
 	if len(vi.Partitions) == 0 {
 		// Flat volume (no partitions): treat all root-level regular files as a
 		// root-files layer so that publish and fetch both produce Partitions:[].
-		flatTmp, err := os.CreateTemp(storePath, ".sori-layer-*")
+		res, err := buildAndPushTempLayer(publishCaller, storePath,
+			map[string]string{
+				annotationPartitionPath: rootBase,
+				annotationLayerKind:     layerKindRootFiles,
+			},
+			func(w io.Writer) (bool, error) {
+				hasFiles, err := archiveutil.TarGzDirFilesTo(w, volPath, rootBase, rootFileSkipNames)
+				if err != nil {
+					if errors.Is(err, archiveutil.ErrValidation) {
+						return false, validationError(publishCaller, fmt.Sprintf("tar.gz flat volume %q", volPath), err)
+					}
+					return false, transportError(publishCaller, fmt.Sprintf("tar.gz flat volume %q", volPath), err)
+				}
+				return hasFiles, nil
+			},
+			pushIfNeeded,
+		)
 		if err != nil {
-			return nil, transportError("VolumeIndex.publishVolumeToStore", "create temp file for flat volume layer", err)
+			return nil, err
 		}
-		defer os.Remove(flatTmp.Name())
-		defer flatTmp.Close()
-		flatH := digest.Canonical.Hash()
-		flatCW := &countWriter{}
-		flatMW := io.MultiWriter(flatTmp, flatH, flatCW)
-		flatHasFiles, err := archiveutil.TarGzDirFilesTo(flatMW, volPath, rootBase, rootFileSkipNames)
-		if err != nil {
-			if errors.Is(err, archiveutil.ErrValidation) {
-				return nil, validationError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz flat volume %q", volPath), err)
-			}
-			return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz flat volume %q", volPath), err)
-		}
-		if flatHasFiles {
-			flatDigest := digest.NewDigest(digest.Canonical, flatH)
-			desc := ocispec.Descriptor{
-				MediaType: ocispec.MediaTypeImageLayerGzip,
-				Digest:    flatDigest,
-				Size:      flatCW.n,
-				Annotations: map[string]string{
-					annotationPartitionPath: rootBase,
-					annotationLayerKind:     layerKindRootFiles,
-				},
-			}
-			if _, err := flatTmp.Seek(0, 0); err != nil {
-				return nil, transportError("VolumeIndex.publishVolumeToStore", "seek flat volume temp file", err)
-			}
-			pushedPtr, err := pushIfNeeded(desc, flatTmp)
-			if err != nil {
-				return nil, transportError("VolumeIndex.publishVolumeToStore", "push flat volume layer", err)
-			}
-			if pushedPtr != nil && *pushedPtr {
+		if !res.empty {
+			if res.pushed {
 				anyPushed = true
 			}
-			layers = append(layers, desc)
+			layers = append(layers, res.desc)
 		}
 	} else {
 		// Push root-level files (e.g., README.md) as a separate layer so they
 		// are not silently lost when only partition subdirectories are tarred.
-		rootTmp, err := os.CreateTemp(storePath, ".sori-layer-*")
+		res, err := buildAndPushTempLayer(publishCaller, storePath,
+			map[string]string{
+				annotationPartitionPath: rootBase,
+				annotationLayerKind:     layerKindRootFiles,
+			},
+			func(w io.Writer) (bool, error) {
+				hasFiles, err := archiveutil.TarGzDirFilesTo(w, volPath, rootBase, rootFileSkipNames)
+				if err != nil {
+					if errors.Is(err, archiveutil.ErrValidation) {
+						return false, validationError(publishCaller, "tar.gz root files", err)
+					}
+					return false, transportError(publishCaller, "tar.gz root files", err)
+				}
+				return hasFiles, nil
+			},
+			pushIfNeeded,
+		)
 		if err != nil {
-			return nil, transportError("VolumeIndex.publishVolumeToStore", "create temp file for root files layer", err)
+			return nil, err
 		}
-		defer os.Remove(rootTmp.Name())
-		defer rootTmp.Close()
-		rootH := digest.Canonical.Hash()
-		rootCW := &countWriter{}
-		rootMW := io.MultiWriter(rootTmp, rootH, rootCW)
-		rootHasFiles, err := archiveutil.TarGzDirFilesTo(rootMW, volPath, rootBase, rootFileSkipNames)
-		if err != nil {
-			if errors.Is(err, archiveutil.ErrValidation) {
-				return nil, validationError("VolumeIndex.publishVolumeToStore", "tar.gz root files", err)
-			}
-			return nil, transportError("VolumeIndex.publishVolumeToStore", "tar.gz root files", err)
-		}
-		if rootHasFiles {
-			rootDigest := digest.NewDigest(digest.Canonical, rootH)
-			desc := ocispec.Descriptor{
-				MediaType: ocispec.MediaTypeImageLayerGzip,
-				Digest:    rootDigest,
-				Size:      rootCW.n,
-				Annotations: map[string]string{
-					annotationPartitionPath: rootBase,
-					annotationLayerKind:     layerKindRootFiles,
-				},
-			}
-			if _, err := rootTmp.Seek(0, 0); err != nil {
-				return nil, transportError("VolumeIndex.publishVolumeToStore", "seek root files temp file", err)
-			}
-			pushedPtr, err := pushIfNeeded(desc, rootTmp)
-			if err != nil {
-				return nil, transportError("VolumeIndex.publishVolumeToStore", "push root files layer", err)
-			}
-			if pushedPtr != nil && *pushedPtr {
+		if !res.empty {
+			if res.pushed {
 				anyPushed = true
 			}
-			layers = append(layers, desc)
+			layers = append(layers, res.desc)
 		}
 
 		for i := range vi.Partitions {
@@ -283,43 +319,31 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 					fmt.Sprintf("partition path %q escapes volume root", part.Path), nil)
 			}
 			fsPath := filepath.Join(volPath, rel)
-			partTmp, err := os.CreateTemp(storePath, ".sori-layer-*")
-			if err != nil {
-				return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("create temp file for partition layer %q", part.Name), err)
-			}
-			defer os.Remove(partTmp.Name())
-			defer partTmp.Close()
-			partH := digest.Canonical.Hash()
-			partCW := &countWriter{}
-			partMW := io.MultiWriter(partTmp, partH, partCW)
-			if err := archiveutil.TarGzDirTo(partMW, fsPath, part.Path); err != nil {
-				if errors.Is(err, archiveutil.ErrValidation) {
-					return nil, validationError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz %q", fsPath), err)
-				}
-				return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("tar.gz %q", fsPath), err)
-			}
-			partDigest := digest.NewDigest(digest.Canonical, partH)
-			desc := ocispec.Descriptor{
-				MediaType: ocispec.MediaTypeImageLayerGzip,
-				Digest:    partDigest,
-				Size:      partCW.n,
-				Annotations: map[string]string{
-					annotationPartitionPath: part.Path,
+			partPath := part.Path
+			res, err := buildAndPushTempLayer(publishCaller, storePath,
+				map[string]string{
+					annotationPartitionPath: partPath,
 					annotationLayerKind:     layerKindPartition,
 				},
-			}
-			if _, err := partTmp.Seek(0, 0); err != nil {
-				return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("seek temp file for partition layer %q", part.Name), err)
-			}
-			pushedPtr, err := pushIfNeeded(desc, partTmp)
+				func(w io.Writer) (bool, error) {
+					if err := archiveutil.TarGzDirTo(w, fsPath, partPath); err != nil {
+						if errors.Is(err, archiveutil.ErrValidation) {
+							return false, validationError(publishCaller, fmt.Sprintf("tar.gz %q", fsPath), err)
+						}
+						return false, transportError(publishCaller, fmt.Sprintf("tar.gz %q", fsPath), err)
+					}
+					return true, nil
+				},
+				pushIfNeeded,
+			)
 			if err != nil {
-				return nil, transportError("VolumeIndex.publishVolumeToStore", fmt.Sprintf("push layer %s", part.Name), err)
+				return nil, err
 			}
-			if pushedPtr != nil && *pushedPtr {
+			if res.pushed {
 				anyPushed = true
 			}
-			part.ManifestRef = desc.Digest.String()
-			layers = append(layers, desc)
+			part.ManifestRef = res.desc.Digest.String()
+			layers = append(layers, res.desc)
 		}
 	}
 
