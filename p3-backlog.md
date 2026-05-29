@@ -16,142 +16,139 @@ bytes in memory simultaneously. For multi-GB datasets this risks OOM.
 **Accepted trade-off**
 Acceptable while dataset sizes remain small (development / integration use).
 
-**Intended design when picked up**
+### ✅ Step 1 — temp-file-backed tar layer (done, commit `329ea8b`)
 
-Step 1 — temp-file-backed tar layer (recommended first step):
-- Write the tar.gz to a temp file instead of a `bytes.Buffer`.
-- Compute digest and size while writing (using `io.TeeReader` + `digest.Canonical.Hash()`).
-- Re-open the temp file as an `io.Reader` and pass it to ORAS push.
-- This requires two passes over the data (write + push) but avoids OOM and is
-  straightforward to implement.
+- Each layer is written to a temp file (`os.CreateTemp`) instead of a
+  `bytes.Buffer`.
+- Digest and size are computed in a single pass using
+  `io.MultiWriter(tmp, hash, countWriter)`.
+- The temp file is seeked to 0 and passed to ORAS push; removed on cleanup.
+- `TarGzDirTo(w io.Writer, …)` and `TarGzDirFilesTo(w io.Writer, …)` were
+  extracted so callers can write directly to any `io.Writer`.
 
-Step 2 — true streaming ingest (future):
+### ⏳ Step 2 — true streaming ingest (future)
+
 - Push the tar.gz stream directly without materializing it to disk.
 - Requires computing digest on-the-fly while ORAS reads the stream.
 - Check whether the ORAS `Store.Push` API accepts a digest-preflight or
   streaming push mode before committing to this approach.
 
-Step 3 — chunked CAS / content-addressable split (separate design):
+### ⏳ Step 3 — chunked CAS / content-addressable split (separate design)
+
 - Splitting layers into content-addressable chunks is a distinct artifact
-  format change. It should be designed and tracked separately, not bundled
+  format change. Should be designed and tracked separately, not bundled
   into the streaming fix.
 
 ---
 
-## P3-2: Remote registry fetch API
+## ✅ P3-2: Remote registry fetch API (done)
 
-**Current behaviour**
-`FetchVolSeq` and `FetchVolParallel` open a **local** OCI store (`oci.New`)
-and extract from it. There is no code path that pulls layers directly from a
-remote registry (e.g., Harbor, GHCR) into a local directory.
+### P3-2A — ReadOnlyTarget internal refactor (commit `96a6fa4`)
 
-**Accepted trade-off**
-The current two-step workflow (remote pull → local OCI store → extract) relies
-on external tools such as `oras copy` or similar; it is not a sori internal API.
-This is functional for existing callers.
+- Extracted `fetchVolSeqFrom` and `fetchVolParallelFrom` accepting
+  `oras.ReadOnlyTarget`; `FetchVolSeq` / `FetchVolParallel` are now thin
+  wrappers that open `oci.New(repo)` and delegate.
+- `fetchVolWithStaging` and `fetchVolWithAtomicOverwrite` likewise open the
+  store once and call the internal `…From` variants.
+- No public API change; all existing tests pass.
 
-**Intended design when picked up**
-- Add `Client.FetchVolumeFromRemote(ctx, destRoot, remoteRepo, tag string,
-  target RemoteTarget, opts FetchOptions)`.
-- Internally open a `remote.Repository` via `registryutil.NewRepository`,
-  resolve the manifest, and stream each layer directly to the staging
-  directory (integrating with the staging design below).
-- Reuse the existing `fetchVolWithStaging` commit/cleanup logic.
-- **Remote fetch must always use the staging pipeline** (staging → validation
-  → rename commit). Direct extraction into destRoot is not acceptable for
-  remote artifacts because we cannot trust their content before extraction.
-- Verify each layer's digest and size against the manifest descriptor before
-  passing the data to `untarGzDirFiltered`.
-- Auth/TLS/retry configuration is shared with the existing
-  `registryutil.RemoteConfig` / `RemoteTarget` types.
+### P3-2B — `Client.FetchVolumeFromRemote` (commit `b9753fa`)
+
+- Added `fetchVolWithStagingFrom` and `fetchVolWithAtomicOverwriteFrom`
+  accepting `oras.ReadOnlyTarget`, shared by both local and remote callers.
+- `Client.FetchVolumeFromRemote(ctx, destRoot, target RemoteTarget, tag string,
+  opts FetchOptions)` creates a `remote.Repository` via
+  `registryutil.NewRepository`, injects `c.httpClient` if set, and routes to
+  the staged or atomic-overwrite path.
+- Remote fetch always uses the staging pipeline; direct extraction into
+  `destRoot` is not offered.
+- `RequireEmptyDestination` and `AtomicOverwrite` are mutually exclusive
+  (`ErrValidation`).
+- Tests (`remote_fetch_test.go`): full round-trip via `httptest` mock OCI
+  registry, tag-not-found → `ErrNotFound`, corrupt manifest → `ErrIntegrity`,
+  four input-validation cases → `ErrValidation`.
 
 ---
 
-## P3-3: Staging directory design for fetch integrity
+## ✅ P3-3: Staging directory design for fetch integrity (done)
 
-**Problem**
-`FetchVolSeq` and `FetchVolParallel` extract layers directly into `destRoot`.
-If any layer download or unpack fails midway, `destRoot` is left in a partial
-state that is indistinguishable from a complete extraction. Individual
-`writeFileAtomic` calls cannot prevent this because they operate per-file, not
-per-directory.
+### Problem (original)
 
-**Current mitigation**
-`RequireEmptyDestination=true` + `fetchVolWithStaging` (see also "Implemented mitigation" below).
+`FetchVolSeq` and `FetchVolParallel` extracted layers directly into `destRoot`.
+A mid-fetch failure left `destRoot` in a partial, indistinguishable state.
 
-**Implemented mitigation**
-The current implementation provides the following guarantee when
-`RequireEmptyDestination=true`:
+### What was implemented
+
+**Staging path** (`RequireEmptyDestination=true`, commit `329ea8b`):
 
 ```
-ensureDestinationAbsent(destRoot)    // fail if destRoot already exists (even if empty)
+ensureDestinationAbsent(destRoot)    // fail if destRoot already exists
 stagingDir = MkdirTemp(parent, …)   // sibling of destRoot, same filesystem
-FetchVolSeq/Parallel → stagingDir   // all extraction to staging
-os.Rename(stagingDir, destRoot)     // atomic directory commit on success
+fetchVolSeqFrom / fetchVolParallelFrom → stagingDir
+validateStagingDir(…)               // partition dirs present + configblob.json valid JSON
+os.Rename(stagingDir, destRoot)     // atomic commit on success
 os.RemoveAll(stagingDir)            // deferred cleanup on failure
 ```
 
-`destRoot` is either untouched (on failure) or fully populated (on success).
-`ensureDestinationAbsent` rejects `destRoot` even if it is empty but already
-exists, preventing accidental overwrites.
+**`validateStagingDir`** (extracted helper): checks that every partition
+directory listed in `vi.Partitions` exists under staging, and that
+`configblob.json` (if present) is valid JSON.
 
-Note: the helper is currently named `ensureEmptyDir` in the source; it should
-be renamed to `ensureDestinationAbsent` to match its actual semantics.
+**`ensureDestinationAbsent`**: renamed from `ensureEmptyDir` to match actual
+semantics — rejects `destRoot` even if it is empty.
 
-Legacy callers that pass `RequireEmptyDestination=false` still get direct
-extraction without staging.
+**AtomicOverwrite path** (`FetchOptions.AtomicOverwrite=true`, commit
+`b6b9fd6`):
 
-**P3 remaining**
+```
+Phase 1 — extract to staging sibling
+Phase 2 — os.Rename(destRoot, backupPath)   // backup existing dest
+Phase 3 — os.Rename(stagingDir, destRoot)   // atomic commit
+Cleanup — os.RemoveAll(backupPath)           // best-effort
+```
 
-1. **Validation before commit** — after staging is fully populated but before
-   rename, run a lightweight integrity check (e.g., verify every partition
-   directory listed in `volume-index.json` actually exists in staging, and
-   that `configblob.json` parses as valid JSON). Reject and clean up if any
-   check fails.
+- `backupPath` obtained via `uniqueBackupPath` (temp-file trick for guaranteed
+  absent path; no pre-created directory that would block `os.Rename`).
+- Phase 3 failure triggers best-effort rollback; if rollback also fails the
+  error message includes both `stagingDir` and `backupPath` for manual
+  recovery.
+- `AtomicOverwrite` and `RequireEmptyDestination` are mutually exclusive
+  (`ErrValidation`).
+- Package-level test hooks (`testHookPhase2RenameErr`, `testHookPhase3RenameErr`,
+  `testHookBackupCleanupErr`) enable targeted failure injection in tests.
 
-2. **Overwrite / update case** — `RequireEmptyDestination=false` with an
-   existing `destRoot` still does direct extraction. The correct design is a
-   three-phase approach: extract to staging, rename current destRoot to a
-   `.backup-*` sibling, rename staging to destRoot, remove backup. This
-   requires careful error handling to avoid leaving the backup orphaned.
-
-3. **Cross-filesystem fetch** — `os.Rename` is only atomic within a single
-   filesystem. If `parent(destRoot)` and the temp-dir root are on different
-   filesystems (e.g., bind mounts in containers), `MkdirTemp` must be called
-   in the same mount as `destRoot`. Current code already passes
-   `filepath.Dir(destRoot)` as the temp parent, so this is satisfied as long
-   as callers do not place `destRoot` on a separate mount from its parent.
-
-4. **Short-term policy** — until items 1–3 are addressed, the recommended
-   caller contract is: always pass `RequireEmptyDestination=true` and let
-   `destRoot` be a path that does not yet exist. This gives the strongest
-   atomicity guarantee with the current implementation.
+**Cross-filesystem note**: `MkdirTemp` is called with `filepath.Dir(destRoot)`
+as the parent, ensuring staging is always on the same filesystem as `destRoot`
+so that `os.Rename` remains atomic.
 
 ---
 
 ## Fetch safety policy
 
-The two fetch modes differ significantly in safety guarantees:
+Three fetch modes are available, in decreasing order of safety:
 
-**Safe fetch mode** (`RequireEmptyDestination=true`, recommended for all new code):
-- `destRoot` must not exist at all before fetch begins.
-- All extraction goes to a sibling staging directory.
-- On success: staging is committed to `destRoot` via `os.Rename` (atomic within filesystem).
-- On failure: staging directory is removed; `destRoot` is never touched.
-- Result: `destRoot` is either absent (failure) or fully populated (success).
+**AtomicOverwrite** (`FetchOptions{AtomicOverwrite: true}`) — recommended for
+update workflows:
+- Extracts to a staging sibling, backs up existing `destRoot`, commits
+  atomically.  `destRoot` is always fully populated or fully restored.
 
-**Legacy fetch mode** (`RequireEmptyDestination=false`):
-- Extracts directly into `destRoot`.
-- A mid-fetch failure leaves `destRoot` in a partial state.
-- Intended only for compatibility with existing callers or controlled local
-  workflows where partial state is acceptable.
+**Safe fetch** (`FetchOptions{RequireEmptyDestination: true}`) — recommended
+for fresh installs:
+- `destRoot` must not exist. Extracts to staging, commits on full success.
+  `destRoot` is either absent (failure) or fully populated (success).
 
-`FetchVolumeSequential` and `FetchVolumeParallel` default to
-`RequireEmptyDestination=false` for backward compatibility. New code should
-call `Client.FetchVolume(..., FetchOptions{RequireEmptyDestination: true})`
-directly, or use a dedicated safe-fetch helper once one is added:
+**Remote fetch** (`Client.FetchVolumeFromRemote`) — always uses safe fetch by
+default; `AtomicOverwrite` opt-in supported.
 
-```go
-// Proposed future helper — not yet implemented.
-func (c *Client) FetchVolumeFresh(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error)
-```
+**Legacy direct fetch** (`RequireEmptyDestination: false`, default):
+- Extracts directly into `destRoot`. A mid-fetch failure leaves a partial
+  state. Retained for backward compatibility with existing callers only.
+
+---
+
+## Open items
+
+- **P3-1 Steps 2–3**: true streaming push and chunked CAS are not yet designed.
+- **`FetchVolumeFresh` convenience helper**: a zero-config safe-fetch wrapper
+  (implicitly `RequireEmptyDestination=true`) has been proposed but not yet
+  added to the public API.

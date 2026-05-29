@@ -125,9 +125,25 @@ registerResp, err := sori.RegisterPackagedData(ctx, cfg.Local.Path, sori.DataReg
 }, pkg, pushResult)
 if err != nil { ... }
 fmt.Println(registerResp.CASHash)
+
+// 10) Stable core API: 원격 레지스트리에서 직접 fetch (safe fetch 기본)
+vi, err := client.FetchVolumeFromRemote(ctx, "./dest-dir", sori.RemoteTarget{
+    Registry:   "harbor.local",
+    Repository: "project/repo",
+    PlainHTTP:  true,
+}, "grch38.v1.0.0", sori.FetchOptions{})
+if err != nil { ... }
+fmt.Println(vi.DisplayName)
+
+// AtomicOverwrite: 기존 destRoot를 백업 후 원자적 교체
+vi, err = client.FetchVolumeFromRemote(ctx, "./dest-dir", sori.RemoteTarget{
+    Registry:   "harbor.local",
+    Repository: "project/repo",
+}, "grch38.v1.1.0", sori.FetchOptions{AtomicOverwrite: true})
+if err != nil { ... }
 ```
 
-단계 `4~6`은 stable core 흐름이고, `7~9`는 experimental 계층이다.
+단계 `4~6`, `10`은 stable core 흐름이고, `7~9`는 experimental 계층이다.
 
 ## 설정 파일 (`sori-oci.json`)
 
@@ -173,8 +189,9 @@ type ClientOption func(*Client)
 type PackageOptions struct { ConfigBlob []byte }
 type PushOptions struct { Target RemoteTarget }
 type FetchOptions struct {
-    Concurrency int
+    Concurrency             int
     RequireEmptyDestination bool
+    AtomicOverwrite         bool  // 3-phase overwrite: staging → backup → rename
 }
 type ReferrerOptions struct { Target RemoteTarget }
 
@@ -191,6 +208,7 @@ func (c *Client) PushPackagedVolumeWithOptions(ctx context.Context, pkg *Package
 func (c *Client) FetchVolume(ctx context.Context, destRoot, repo, tag string, opts FetchOptions) (*VolumeIndex, error)
 func (c *Client) FetchVolumeSequential(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex, error)
 func (c *Client) FetchVolumeParallel(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error)
+func (c *Client) FetchVolumeFromRemote(ctx context.Context, destRoot string, target RemoteTarget, tag string, opts FetchOptions) (*VolumeIndex, error)
 func (c *Client) PublishVolume(ctx context.Context, vi *VolumeIndex, volPath, volName string, configBlob []byte) (*VolumeIndex, error)
 func (c *Client) PublishVolumeFromDir(ctx context.Context, volDir, displayName, tag string) (*PackageResult, error)
 ```
@@ -410,7 +428,17 @@ var (
 
 추가 정책:
 - `PackageOptions.RequireConfigBlob=true`이면 `configblob.json` 자동 생성을 허용하지 않고, 호출자가 config blob을 명시적으로 제공해야 한다.
-- `FetchOptions.RequireEmptyDestination=true`이면 `destRoot`가 이미 존재하면(비어 있어도) `ErrConflict`를 반환한다. 또한 staging 디렉터리(`destRoot` 옆 `.staging-*`)에 먼저 추출한 뒤 성공 시 원자적 rename으로 `destRoot`를 채우므로, 중간 실패가 발생해도 `destRoot`는 untouched 또는 완전히 채워진 상태 중 하나임이 보장된다.
+
+**Fetch 안전도 모드** (안전한 순서):
+
+| 모드 | 설정 | 동작 |
+|------|------|------|
+| **AtomicOverwrite** | `FetchOptions{AtomicOverwrite: true}` | staging 추출 → 기존 `destRoot` 백업 → staging rename. 갱신 워크플로에 권장. |
+| **Safe fetch** | `FetchOptions{RequireEmptyDestination: true}` | `destRoot`가 없어야 시작. staging 추출 후 성공 시 rename. 최초 설치에 권장. |
+| **Remote fetch** | `Client.FetchVolumeFromRemote` | 기본값이 safe fetch. `AtomicOverwrite` opt-in 지원. |
+| **Legacy direct** | `FetchOptions{}` (기본) | `destRoot`에 직접 추출. 중간 실패 시 부분 상태 가능. 하위 호환용만. |
+
+`RequireEmptyDestination`과 `AtomicOverwrite`를 동시에 설정하면 `ErrValidation`을 반환한다.
 
 ### 등록 / Catalog API
 
@@ -503,9 +531,9 @@ root 권한이 없는 환경에서는 `TestLoadConfig` / `TestInitConfig`가 자
 
 | 항목 | 현재 상태 | 해결 방향 |
 |------|-----------|-----------|
-| **Streaming tar/push** | 레이어 전체를 메모리에 올림. 대용량 데이터셋에서 OOM 위험 | `io.Writer` 기반 스트리밍 파이프라인으로 교체 |
-| **Remote registry fetch** | local OCI store에서만 추출 가능. 원격 레지스트리 직접 fetch 경로 없음 | `Client.FetchVolumeFromRemote` 추가 |
-| **Staging 고도화** | `RequireEmptyDestination=true` + rename으로 fresh fetch는 원자적. 업데이트(덮어쓰기) 및 commit 전 무결성 검증은 미구현 | validate-before-commit, 3-phase overwrite 설계 필요 |
+| **Streaming tar/push** | Step 1 완료: 레이어를 temp 파일에 기록(메모리 버퍼 제거). Step 2(진정한 스트리밍 push)·Step 3(chunked CAS)는 미설계 | ORAS `Store.Push` streaming 모드 검토 후 구현 |
+| ✅ **Remote registry fetch** | `Client.FetchVolumeFromRemote` 추가 완료 | — |
+| ✅ **Staging 고도화** | safe fetch(`RequireEmptyDestination`) + 3-phase `AtomicOverwrite` + `validateStagingDir` 모두 완료 | — |
 
 ## 라이선스
 
