@@ -241,6 +241,71 @@ func TestFetchVolumeFromRemote_CorruptManifest(t *testing.T) {
 	}
 }
 
+// TestFetchVolumeFromRemote_Unauthorized verifies that a 401 response from the
+// registry produces ErrAuth, not ErrNotFound or ErrTransport.
+func TestFetchVolumeFromRemote_Unauthorized(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/" || r.URL.Path == "/v2" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("WWW-Authenticate", `Basic realm="Registry Realm"`)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	destRoot := filepath.Join(tmp, "dest")
+	client := NewClient(WithLocalStorePath(t.TempDir()))
+	_, err := client.FetchVolumeFromRemote(ctx, destRoot, RemoteTarget{
+		Registry:   ts.Listener.Addr().String(),
+		Repository: "testrepo",
+		PlainHTTP:  true,
+	}, "v1", FetchOptions{})
+	if err == nil {
+		t.Fatal("expected error for 401 Unauthorized")
+	}
+	if !errors.Is(err, ErrAuth) {
+		t.Fatalf("expected ErrAuth, got %T: %v", err, err)
+	}
+}
+
+// TestFetchVolumeFromRemote_Forbidden verifies that a 403 response from the
+// registry produces ErrAuth.
+func TestFetchVolumeFromRemote_Forbidden(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/" || r.URL.Path == "/v2" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"errors":[{"code":"DENIED","message":"access denied"}]}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	destRoot := filepath.Join(tmp, "dest")
+	client := NewClient(WithLocalStorePath(t.TempDir()))
+	_, err := client.FetchVolumeFromRemote(ctx, destRoot, RemoteTarget{
+		Registry:   ts.Listener.Addr().String(),
+		Repository: "testrepo",
+		PlainHTTP:  true,
+	}, "v1", FetchOptions{})
+	if err == nil {
+		t.Fatal("expected error for 403 Forbidden")
+	}
+	if !errors.Is(err, ErrAuth) {
+		t.Fatalf("expected ErrAuth, got %T: %v", err, err)
+	}
+}
+
 // TestFetchVolumeFromRemote_ValidationErrors checks input validation.
 func TestFetchVolumeFromRemote_ValidationErrors(t *testing.T) {
 	ctx := context.Background()

@@ -410,6 +410,9 @@ func pushLocalTagToRepository(ctx context.Context, localRepoPath, tag string, re
 	}
 	pushedDesc, err := oras.Copy(ctx, srcStore, tag, repo, tag, oras.DefaultCopyOptions)
 	if err != nil {
+		if registryutil.IsAuthError(err) {
+			return nil, authError("pushLocalTagToRepository", "push to remote registry", err)
+		}
 		return nil, transportError("pushLocalTagToRepository", "push to remote registry", err)
 	}
 
@@ -436,11 +439,20 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 func fetchVolSeqFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag string) (*VolumeIndex, error) {
 	manifestDesc, err := src.Resolve(ctx, tag)
 	if err != nil {
-		return nil, notFoundError("fetchVolSeqFrom", fmt.Sprintf("resolve tag %q", tag), err)
+		if registryutil.IsAuthError(err) {
+			return nil, authError("fetchVolSeqFrom", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		if errors.Is(err, errdef.ErrNotFound) {
+			return nil, notFoundError("fetchVolSeqFrom", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		return nil, transportError("fetchVolSeqFrom", fmt.Sprintf("resolve tag %q", tag), err)
 	}
 
 	rc, err := src.Fetch(ctx, manifestDesc)
 	if err != nil {
+		if registryutil.IsAuthError(err) {
+			return nil, authError("fetchVolSeqFrom", "fetch manifest", err)
+		}
 		return nil, transportError("fetchVolSeqFrom", "fetch manifest", err)
 	}
 	defer rc.Close()
@@ -467,6 +479,9 @@ func fetchVolSeqFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarg
 	for _, vl := range validLayers {
 		layerRC, err := src.Fetch(ctx, vl.desc)
 		if err != nil {
+			if registryutil.IsAuthError(err) {
+				return nil, authError("fetchVolSeqFrom", fmt.Sprintf("fetch layer %s", vl.desc.Digest), err)
+			}
 			return nil, transportError("fetchVolSeqFrom", fmt.Sprintf("fetch layer %s", vl.desc.Digest), err)
 		}
 		if err := os.MkdirAll(destRoot, 0o755); err != nil {
@@ -517,11 +532,20 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 func fetchVolParallelFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag string, concurrency int) (*VolumeIndex, error) {
 	manifestDesc, err := src.Resolve(ctx, tag)
 	if err != nil {
-		return nil, notFoundError("fetchVolParallelFrom", fmt.Sprintf("resolve tag %q", tag), err)
+		if registryutil.IsAuthError(err) {
+			return nil, authError("fetchVolParallelFrom", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		if errors.Is(err, errdef.ErrNotFound) {
+			return nil, notFoundError("fetchVolParallelFrom", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		return nil, transportError("fetchVolParallelFrom", fmt.Sprintf("resolve tag %q", tag), err)
 	}
 
 	rc, err := src.Fetch(ctx, manifestDesc)
 	if err != nil {
+		if registryutil.IsAuthError(err) {
+			return nil, authError("fetchVolParallelFrom", "fetch manifest", err)
+		}
 		return nil, transportError("fetchVolParallelFrom", "fetch manifest", err)
 	}
 	defer rc.Close()
@@ -591,7 +615,13 @@ func fetchVolParallelFrom(ctx context.Context, destRoot string, src oras.ReadOnl
 
 			layerRC, err := src.Fetch(ctx, meta.vl.desc)
 			if err != nil {
-				results <- jobResult{idx: meta.idx, err: transportError("fetchVolParallelFrom", fmt.Sprintf("fetch layer %s", meta.vl.desc.Digest), err)}
+				var layerErr error
+				if registryutil.IsAuthError(err) {
+					layerErr = authError("fetchVolParallelFrom", fmt.Sprintf("fetch layer %s", meta.vl.desc.Digest), err)
+				} else {
+					layerErr = transportError("fetchVolParallelFrom", fmt.Sprintf("fetch layer %s", meta.vl.desc.Digest), err)
+				}
+				results <- jobResult{idx: meta.idx, err: layerErr}
 				cancel()
 				continue
 			}

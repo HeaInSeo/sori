@@ -96,3 +96,7 @@ func integrityError(op, message string, err error) error {
 func transportError(op, message string, err error) error {
 	return newError(KindTransport, op, message, err)
 }
+
+func authError(op, message string, err error) error {
+	return newError(KindAuth, op, message, err)
+}

@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/errcode"
 )
 
 func TestError_ErrorString_AllBranches(t *testing.T) {
@@ -80,5 +83,38 @@ func TestError_Unwrap_ChainedErrors(t *testing.T) {
 	outer := transportError("op", "msg", inner)
 	if !errors.Is(outer, inner) {
 		t.Fatalf("expected errors.Is to find inner via Unwrap chain, got %v", outer)
+	}
+}
+
+func TestAuthError_IsErrAuth(t *testing.T) {
+	err := authError("op", "msg", fmt.Errorf("cause"))
+	if !errors.Is(err, ErrAuth) {
+		t.Fatalf("expected ErrAuth, got %v", err)
+	}
+}
+
+func TestIsAuthError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"generic error", fmt.Errorf("generic"), false},
+		{"401 Unauthorized", &errcode.ErrorResponse{StatusCode: 401}, true},
+		{"403 Forbidden", &errcode.ErrorResponse{StatusCode: 403}, true},
+		{"404 Not Found", &errcode.ErrorResponse{StatusCode: 404}, false},
+		{"500 Internal Server Error", &errcode.ErrorResponse{StatusCode: 500}, false},
+		{"wrapped 401", fmt.Errorf("outer: %w", &errcode.ErrorResponse{StatusCode: 401}), true},
+		{"wrapped 403", fmt.Errorf("outer: %w", &errcode.ErrorResponse{StatusCode: 403}), true},
+		{"ErrBasicCredentialNotFound", auth.ErrBasicCredentialNotFound, true},
+		{"wrapped ErrBasicCredentialNotFound", fmt.Errorf("HEAD: %w", auth.ErrBasicCredentialNotFound), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsAuthError(c.err); got != c.want {
+				t.Fatalf("IsAuthError(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
 	}
 }
