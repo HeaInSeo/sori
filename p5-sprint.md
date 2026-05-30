@@ -24,11 +24,11 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 
 | # | Condition | Sprint | Status |
 |---|---|---|---|
-| B-1 | OQ-1 MaxChunkedLayers confirmed empirically | P5-7 | ⏳ |
+| B-1 | OQ-1 MaxChunkedLayers confirmed empirically | P5-7 | 🔄 test written; ECR run pending |
 | B-2 | All 12 functional test cases green | P5-5 | ✅ |
 | B-3 | Benchmark gate passes (all 7 fixtures) | P5-6 | 🔄 framework done; 1× scale run pending |
-| B-4 | Harbor + GHCR + Local OCI integration tests pass | P5-7 | ⏳ |
-| B-5 | dataset-metadata schema frozen | P5-1 | ⏳ |
+| B-4 | Harbor + GHCR + Local OCI integration tests pass | P5-7 | 🔄 tests written; manual runs pending |
+| B-5 | dataset-metadata schema frozen | P5-1 | ✅ (chunked/types.go DatasetMetadata struct) |
 | B-6 | Catalog projection contract documented | done (p5-rfc.md §10-4) | ✅ |
 | B-7 | Atomic publish order verified in test | P5-2 | ✅ |
 | B-8 | schemaVersion mismatch → ErrValidation | P5-4 | ✅ |
@@ -190,16 +190,16 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 
 ## P5-7: Registry Compatibility + Tag v0.6
 
-**Status**: 🔄 in-progress (2026-05-30)  
+**Status**: 🔄 in-progress — integration tests written; manual registry runs pending  
 **Target files**:
-- `chunked/integration_test.go` (new, `//go:build integration`)
+- `chunked/integration_test.go` (new, `//go:build integration`) ✓
 
 **Checklist**:
-- [ ] Local OCI layout: full round-trip (push+fetch+dedup) — **V1 blocker**
-- [ ] Harbor: push+fetch+dedup round-trip — **V1 blocker**
-- [ ] GHCR: push+fetch+dedup round-trip — **V1 blocker**
-- [ ] ECR: verify MaxChunkedLayers=900 sufficient (empirical, OQ-1 close-out)
-- [ ] `git tag v0.6.0-experimental`
+- [x] Local OCI layout: full round-trip (push+fetch+dedup) — `TestIntegration_LocalOCIRoundTrip`
+- [x] Harbor: integration test written (skips without credentials) — **V1 blocker: manual run required**
+- [x] GHCR: integration test written (skips without credentials) — **V1 blocker: manual run required**
+- [x] ECR: integration test written (skips without credentials) — OQ-1 empirical close-out pending
+- [ ] `git tag v0.6.0-experimental` — pending B-1/B-3/B-4 manual gate runs
 
 ---
 
