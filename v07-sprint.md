@@ -14,8 +14,8 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 | # | Condition | Sprint | Status |
 |---|---|---|---|
 | B-1 | M-12 post-fetch tree verification in chunked.Fetch | P7-1 | ✅ |
-| B-2 | PackageVolumeToStore dispatches to chunked.Publish on ArtifactFormatChunkedCAS | P7-2 | ⏳ |
-| B-3 | FetchVolSeq / FetchVolParallel auto-detect chunked-cas manifests | P7-2 | ⏳ |
+| B-2 | PackageVolumeToStore dispatches to chunked.Publish on ArtifactFormatChunkedCAS | P7-2 | ✅ |
+| B-3 | FetchVolSeq / FetchVolParallel auto-detect chunked-cas manifests | P7-2 | ✅ |
 | B-4 | ArtifactFormatChunkedCAS not marked experimental in comments | P7-3 | ⏳ |
 | B-5 | ECR MaxLayers empirical (OQ-1) | deferred | ⏳ AWS creds required |
 
@@ -61,7 +61,7 @@ type FetchOptions struct {
 
 ## P7-2: Dual-Path Integration (Main sori API)
 
-**Status**: ⏳ pending  
+**Status**: ✅ done (2026-05-30)  
 **Target files**:
 - `volume-index.go` — `packageVolumeToStoreWithOptions`: branch on `ArtifactFormatChunkedCAS`
 - `volume_publish_fetch.go` — `fetchVolSeqFrom` / `fetchVolParallelFrom`: manifest detect → dispatch
@@ -94,15 +94,20 @@ resolve tag → manifest → switch manifest.Config.MediaType:
 Import `"github.com/HeaInSeo/sori/chunked"` in `volume_publish_fetch.go`.
 
 **Checklist**:
-- [ ] `packageVolumeToStoreWithOptions`: `ArtifactFormatChunkedCAS` branch → `chunked.Publish`
-- [ ] Returns `PackageResult` with `VolumeRef = manifestDesc.Digest.String()`
-- [ ] `fetchVolSeqFrom`: manifest detect + chunked dispatch
-- [ ] `fetchVolParallelFrom`: manifest detect + chunked dispatch
-- [ ] Test: `PackageVolumeToStore` with `opts.Format=ArtifactFormatChunkedCAS` → chunked manifest (verify Config.MediaType)
-- [ ] Test: `FetchVolSeq` on chunked artifact → byte-identical files in destRoot
-- [ ] Test: `FetchVolParallel` on chunked artifact → byte-identical files in destRoot
-- [ ] Regression test: `FetchVolSeq` on legacy artifact still works
-- [ ] `go test ./...` green
+- [x] `packageVolumeToStoreWithOptions`: `ArtifactFormatChunkedCAS` branch → `chunked.Publish` (via `packageVolumeChunked`)
+- [x] Returns `PackageResult` with `VolumeRef = manifestDesc.Digest.String()`, Partitions = nil
+- [x] `FetchVolSeq`: `detectManifestMediaType` + chunked dispatch before legacy path
+- [x] `FetchVolParallel`: same dual-path pattern
+- [x] Test: `Client.PackageVolumeWithOptions` with `ArtifactFormatChunkedCAS` → no partitions, VolumeRef == ManifestDigest
+- [x] Test: `FetchVolSeq` on chunked artifact → byte-identical files in destRoot
+- [x] Test: `FetchVolParallel` on chunked artifact → byte-identical files in destRoot
+- [x] Test: `FetchVolSeq` on legacy artifact still works (TestDualPath_LegacyUnchanged)
+- [x] Test: `FetchVolSeq` result == `chunked.Fetch` result (TestDualPath_FetchVolSeq_EquivalentToDirectChunkedFetch)
+- [x] Test: `RequireConfigBlob` ErrValidation on chunked path
+- [x] `go test ./...` green
+
+Note: `fetchVolWithAtomicOverwrite` / `fetchVolWithStaging` legacy-only for now.
+Chunked + atomic overwrite is a future sprint item.
 
 ---
 

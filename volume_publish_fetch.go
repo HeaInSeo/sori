@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/HeaInSeo/sori/archiveutil"
+	"github.com/HeaInSeo/sori/chunked"
 	"github.com/HeaInSeo/sori/registryutil"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -48,6 +49,26 @@ type validatedLayer struct {
 	desc        ocispec.Descriptor
 	partPath    string
 	isRootFiles bool
+}
+
+// detectManifestMediaType resolves tag in src and returns the manifest descriptor
+// and Config.MediaType.  Used for dual-path detection (D-13) before entering either
+// the legacy or chunked CAS fetch path.
+func detectManifestMediaType(ctx context.Context, src oras.ReadOnlyTarget, tag string) (ocispec.Descriptor, string, error) {
+	desc, err := src.Resolve(ctx, tag)
+	if err != nil {
+		return ocispec.Descriptor{}, "", err
+	}
+	rc, err := src.Fetch(ctx, desc)
+	if err != nil {
+		return ocispec.Descriptor{}, "", err
+	}
+	defer rc.Close()
+	var m ocispec.Manifest
+	if err := json.NewDecoder(rc).Decode(&m); err != nil {
+		return ocispec.Descriptor{}, "", err
+	}
+	return desc, m.Config.MediaType, nil
 }
 
 // validateManifestLayers validates the layer annotations of a manifest.
@@ -427,10 +448,28 @@ func pushLocalTagToRepository(ctx context.Context, localRepoPath, tag string, re
 }
 
 // FetchVolSeq fetches a packaged dataset from a local OCI store sequentially.
+// Dual-path (D-13): detects chunked CAS vs legacy format from the manifest
+// Config.MediaType and dispatches accordingly.
 func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex, error) {
 	src, err := oci.New(repo)
 	if err != nil {
 		return nil, transportError("FetchVolSeq", "open OCI store", err)
+	}
+	manifestDesc, mediaType, err := detectManifestMediaType(ctx, src, tag)
+	if err != nil {
+		if registryutil.IsAuthError(err) {
+			return nil, authError("FetchVolSeq", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		if errors.Is(err, errdef.ErrNotFound) {
+			return nil, notFoundError("FetchVolSeq", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		return nil, transportError("FetchVolSeq", fmt.Sprintf("resolve tag %q", tag), err)
+	}
+	if mediaType == chunked.MediaTypeConfig {
+		if err := chunked.Fetch(ctx, repo, destRoot, tag, chunked.FetchOptions{}); err != nil {
+			return nil, err
+		}
+		return &VolumeIndex{VolumeRef: manifestDesc.Digest.String()}, nil
 	}
 	return fetchVolSeqFrom(ctx, destRoot, src, tag)
 }
@@ -524,10 +563,28 @@ func fetchVolSeqFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarg
 
 // FetchVolParallel fetches a packaged dataset from a local OCI store with
 // parallel layer extraction.
+// Dual-path (D-13): detects chunked CAS vs legacy format from the manifest
+// Config.MediaType; chunked artifacts use the chunked fetcher's own concurrency.
 func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
 	src, err := oci.New(repo)
 	if err != nil {
 		return nil, transportError("FetchVolParallel", "open OCI store", err)
+	}
+	manifestDesc, mediaType, err := detectManifestMediaType(ctx, src, tag)
+	if err != nil {
+		if registryutil.IsAuthError(err) {
+			return nil, authError("FetchVolParallel", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		if errors.Is(err, errdef.ErrNotFound) {
+			return nil, notFoundError("FetchVolParallel", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		return nil, transportError("FetchVolParallel", fmt.Sprintf("resolve tag %q", tag), err)
+	}
+	if mediaType == chunked.MediaTypeConfig {
+		if err := chunked.Fetch(ctx, repo, destRoot, tag, chunked.FetchOptions{}); err != nil {
+			return nil, err
+		}
+		return &VolumeIndex{VolumeRef: manifestDesc.Digest.String()}, nil
 	}
 	return fetchVolParallelFrom(ctx, destRoot, src, tag, concurrency)
 }

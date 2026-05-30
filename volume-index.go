@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/HeaInSeo/sori/chunked"
 	"github.com/HeaInSeo/sori/registryutil"
 	"github.com/opencontainers/go-digest"
 	"oras.land/oras-go/v2/registry/remote"
@@ -142,6 +143,23 @@ func packageVolumeToStoreWithOptions(ctx context.Context, localStorePath string,
 		return nil, validationError("PackageVolumeToStore", "tag is required", nil)
 	}
 
+	// Chunked CAS path: does not call ValidateVolumeDir (avoids mutating srcDir).
+	if opts.Format == ArtifactFormatChunkedCAS {
+		var configBlob []byte
+		if len(opts.ConfigBlob) > 0 {
+			configBlob = opts.ConfigBlob
+		} else if len(req.ConfigBlob) > 0 {
+			if err := validateJSONBytes(req.ConfigBlob); err != nil {
+				return nil, validationError("PackageVolumeToStore", "invalid config blob", err)
+			}
+			configBlob = append([]byte(nil), req.ConfigBlob...)
+		} else if opts.RequireConfigBlob {
+			return nil, validationError("PackageVolumeToStore", "config blob is required by options", nil)
+		}
+		return packageVolumeChunked(ctx, localStorePath, req, opts, configBlob, now)
+	}
+
+	// Legacy tar.gz path.
 	var configBlob []byte
 	if len(opts.ConfigBlob) > 0 {
 		req.ConfigBlob = opts.ConfigBlob
@@ -186,6 +204,42 @@ func packageVolumeToStoreWithOptions(ctx context.Context, localStorePath string,
 		CreatedAt:      published.CreatedAt,
 		Partitions:     append([]Partition(nil), published.Partitions...),
 		VolumeIndex:    *published,
+	}, nil
+}
+
+// packageVolumeChunked handles the ArtifactFormatChunkedCAS dispatch path.
+// Unlike the legacy path it does NOT call ValidateVolumeDir, so srcDir is never
+// modified as a side-effect of packaging.
+func packageVolumeChunked(ctx context.Context, storePath string, req PackageRequest, opts PackageOptions, configBlob []byte, now func() time.Time) (*PackageResult, error) {
+	publishOpts := chunked.PublishOptions{
+		ConfigBlob:      configBlob,
+		DatasetMetadata: opts.DatasetMetadata,
+		Progress:        opts.Progress,
+	}
+	manifestDesc, err := chunked.Publish(ctx, storePath, req.SourceDir, req.Tag, publishOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	totalSize, err := dirRegularFileSize(req.SourceDir)
+	if err != nil {
+		return nil, transportError("PackageVolumeToStore", "compute total size", err)
+	}
+
+	createdAt := now().UTC().Format(time.RFC3339)
+	vi := VolumeIndex{
+		VolumeRef:   manifestDesc.Digest.String(),
+		DisplayName: req.DisplayName,
+		CreatedAt:   createdAt,
+	}
+	return &PackageResult{
+		StableRef:      deriveStableRef(req),
+		LocalTag:       req.Tag,
+		ManifestDigest: manifestDesc.Digest.String(),
+		ConfigDigest:   digest.FromBytes(configBlob).String(),
+		TotalSize:      totalSize,
+		CreatedAt:      createdAt,
+		VolumeIndex:    vi,
 	}, nil
 }
 
