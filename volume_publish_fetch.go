@@ -455,7 +455,11 @@ func fetchVolSeqFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarg
 		}
 		return nil, transportError("fetchVolSeqFrom", "fetch manifest", err)
 	}
-	defer rc.Close()
+	defer func() {
+		if cErr := rc.Close(); cErr != nil {
+			Log.Warnf("fetchVolSeqFrom: close manifest reader: %v", cErr)
+		}
+	}()
 
 	var manifest ocispec.Manifest
 	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
@@ -548,7 +552,11 @@ func fetchVolParallelFrom(ctx context.Context, destRoot string, src oras.ReadOnl
 		}
 		return nil, transportError("fetchVolParallelFrom", "fetch manifest", err)
 	}
-	defer rc.Close()
+	defer func() {
+		if cErr := rc.Close(); cErr != nil {
+			Log.Warnf("fetchVolParallelFrom: close manifest reader: %v", cErr)
+		}
+	}()
 
 	var manifest ocispec.Manifest
 	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
@@ -952,7 +960,11 @@ func restoreConfigBlob(ctx context.Context, fetcher content.Fetcher, manifest oc
 	if err != nil {
 		return transportError("restoreConfigBlob", "fetch config blob", err)
 	}
-	defer configRC.Close()
+	defer func() {
+		if cErr := configRC.Close(); cErr != nil {
+			Log.Warnf("restoreConfigBlob: close config reader: %v", cErr)
+		}
+	}()
 
 	data, err := io.ReadAll(configRC)
 	if err != nil {
