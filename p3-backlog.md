@@ -6,7 +6,7 @@ when the item is picked up.
 
 ---
 
-## P3-1: Streaming tar/push for large datasets
+## P3-1: Large dataset publish-path hardening
 
 **Historical problem**
 The original publish path accumulated each compressed layer in a `bytes.Buffer`
@@ -177,7 +177,8 @@ default; `AtomicOverwrite` opt-in supported.
 
 ## Open items
 
-- **P3-1 Steps 2–3**: true streaming push and chunked CAS are not yet designed.
+- **P3-1 Step 2**: spooling/disk-safety cleanup — low priority, scope defined above.
+- **P3-1 Step 3**: chunked CAS — design captured in `p5-rfc.md`; implementation pending.
 
 ## ✅ FetchVolumeFresh convenience helper (done)
 
