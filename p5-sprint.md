@@ -24,7 +24,7 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 
 | # | Condition | Sprint | Status |
 |---|---|---|---|
-| B-1 | OQ-1 MaxChunkedLayers confirmed empirically | P5-7 | 🔄 test written; ECR run pending |
+| B-1 | OQ-1 MaxChunkedLayers confirmed empirically | P5-7 | ⏳ test written; ECR run deferred (no AWS creds) |
 | B-2 | All 12 functional test cases green | P5-5 | ✅ |
 | B-3 | Benchmark gate passes (all 7 fixtures) | P5-6 | ✅ all 7 fixtures green at 0.001× (k8s node); 1× scale run deferred |
 | B-4 | Harbor + GHCR + Local OCI integration tests pass | P5-7 | ✅ Harbor + LocalOCI green (k8s node); GHCR skipped (no token) |
@@ -200,7 +200,7 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 - [x] Harbor: `TestIntegration_Harbor` — ✅ passed on Harbor v2.14.3 at harbor.10.113.24.96.nip.io/sori-test
 - [x] GHCR: integration test written (skips without credentials) — GHCR_TOKEN not available
 - [x] ECR: integration test written (skips without credentials) — OQ-1 empirical close-out pending
-- [ ] `git tag v0.6.0-experimental` — pending B-1 (ECR) close-out
+- [x] `git tag v0.6.0-experimental` — tagged 2026-05-30
 
 ---
 
