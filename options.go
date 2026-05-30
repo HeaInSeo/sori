@@ -1,11 +1,53 @@
 package sori
 
+// ArtifactFormat selects the OCI artifact layout used during packaging.
+// The zero value is ArtifactFormatLegacy, preserving backward compatibility.
+type ArtifactFormat int
+
+const (
+	// ArtifactFormatLegacy packages each partition as a gzip-compressed tar
+	// layer.  This is the original sori format and is always supported on fetch.
+	ArtifactFormatLegacy ArtifactFormat = iota
+
+	// ArtifactFormatChunkedCAS packages files as fixed-size raw chunks with a
+	// chunk-index.json manifest.  Experimental: only clients that include the
+	// chunked CAS fetch code can fetch these artifacts.
+	ArtifactFormatChunkedCAS
+)
+
+// ChunkProgress carries per-event progress information emitted during a
+// chunked CAS push or fetch operation.
+type ChunkProgress struct {
+	// Event is one of: "ChunkSkipped", "ChunkUploaded", "ChunkFetched",
+	// "FileDone", "ArtifactDone".
+	Event      string
+	File       string
+	ChunkIndex int
+	Bytes      int64
+	DurationMs int64
+	Digest     string
+}
+
+// ProgressFunc is an optional callback receiving ChunkProgress events.
+// Pass nil to suppress the callback; chunk boundaries are still logged via
+// Log.Infof when Progress is nil.
+type ProgressFunc func(ChunkProgress)
+
 // PackageOptions controls the preferred core packaging path.
 //
 // This option surface is part of the stable core candidate contract.
 type PackageOptions struct {
 	ConfigBlob        []byte
 	RequireConfigBlob bool
+	// Format selects the artifact layout.  Defaults to ArtifactFormatLegacy.
+	// ArtifactFormatChunkedCAS is experimental.
+	Format ArtifactFormat
+	// DatasetMetadata is the serialised dataset-metadata.json to include as a
+	// dedicated OCI layer (mediaType application/vnd.sori.dataset.metadata.v1+json).
+	// Optional: fetch works without it; catalog exposure is degraded without it.
+	DatasetMetadata []byte
+	// Progress receives per-chunk progress events.  Pass nil to suppress.
+	Progress ProgressFunc
 }
 
 // PushOptions controls the preferred core push path.
