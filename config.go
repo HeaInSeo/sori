@@ -64,13 +64,11 @@ func (conf *Config) NewClient(opts ...ClientOption) *Client {
 // LoadConfig reads and validates the JSON configuration file used by the
 // preferred core client path.
 func LoadConfig(path string) (*Config, error) {
-	// TODO 통일적으로 config 읽는 코드는 이런식으로 표준을 정하자.
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, transportError("LoadConfig", "resolve path", err)
 	}
-	// (방어 코드) TODO 심볼릭 링크로 들어왔을대 읽지 않고 에러 리턴함. 방어적 코드. 이거 다른 코드에도 적용하자.
-	fi, err := os.Lstat(abs) // 심볼릭 링크를 따라가지 않고 메타정보 조회
+	fi, err := os.Lstat(abs) // Lstat so symlinks are rejected as non-regular files
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, notFoundError("LoadConfig", fmt.Sprintf("config file not found: %s", abs), err)
@@ -83,13 +81,11 @@ func LoadConfig(path string) (*Config, error) {
 
 	f, err := os.Open(abs)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) { // 또는 fs.ErrNotExist
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, notFoundError("LoadConfig", fmt.Sprintf("config file not found: %s", abs), err)
 		}
 		return nil, transportError("LoadConfig", "open config", err)
 	}
-
-	// TODO defer close 이렇게 하는 거 표준으로 정하자. 다른곳에서는 다소 다르게 하고 있는데.
 	defer func() {
 		if cErr := f.Close(); cErr != nil {
 			Log.Warnf("failed to close file %s: %v", abs, cErr)
@@ -129,16 +125,16 @@ func expandCredentials(remotes []RemoteStore) {
 	}
 }
 
-// EnsureDir sori-oci.json 에 있는 path 에 실제 디렉토리가 있는지, TODO 수정해줘야 함. 루트 권한의 폴더에 대해서는 에러 리턴함. 오류는 아님.
+// EnsureDir creates the local OCI store directory defined in the config if it
+// does not already exist.  Returns ErrTransport if the directory cannot be
+// created (e.g. insufficient permissions on the parent path).
 func (conf *Config) EnsureDir() error {
-	// 방어적 코드
 	if conf == nil {
 		return validationError("EnsureDir", "cannot ensure directory from a nil config", nil)
 	}
 	if conf.Local.Path == "" {
 		return validationError("EnsureDir", "local.path is empty", nil)
 	}
-	// 해당 디렉토리가 있으면 넘어감.
 	p := filepath.Clean(conf.Local.Path)
 	info, err := os.Stat(p)
 	if err == nil {
@@ -148,7 +144,6 @@ func (conf *Config) EnsureDir() error {
 		}
 		return validationError("EnsureDir", fmt.Sprintf("path '%s' already exists but is not a directory", p), nil)
 	}
-	// 해당 디렉토리가 없으면 만들어줌. /var/lib/sori/oci 여기를 디폴트로 잡아주긴 하는데 이건 루트 사용자만 만들 수 있다.
 	if errors.Is(err, os.ErrNotExist) {
 		if mkdirErr := os.MkdirAll(p, defaultDirPerm); mkdirErr != nil {
 			return transportError("EnsureDir", fmt.Sprintf("create directory '%s'", p), mkdirErr)
