@@ -1,5 +1,7 @@
 package sori
 
+import "github.com/HeaInSeo/sori/chunked"
+
 // ArtifactFormat selects the OCI artifact layout used during packaging.
 // The zero value is ArtifactFormatLegacy, preserving backward compatibility.
 type ArtifactFormat int
@@ -15,24 +17,6 @@ const (
 	ArtifactFormatChunkedCAS
 )
 
-// ChunkProgress carries per-event progress information emitted during a
-// chunked CAS push or fetch operation.
-type ChunkProgress struct {
-	// Event is one of: "ChunkSkipped", "ChunkUploaded", "ChunkFetched",
-	// "FileDone", "ArtifactDone".
-	Event      string
-	File       string
-	ChunkIndex int
-	Bytes      int64
-	DurationMs int64
-	Digest     string
-}
-
-// ProgressFunc is an optional callback receiving ChunkProgress events.
-// Pass nil to suppress the callback; chunk boundaries are still logged via
-// Log.Infof when Progress is nil.
-type ProgressFunc func(ChunkProgress)
-
 // PackageOptions controls the preferred core packaging path.
 //
 // This option surface is part of the stable core candidate contract.
@@ -47,7 +31,8 @@ type PackageOptions struct {
 	// Optional: fetch works without it; catalog exposure is degraded without it.
 	DatasetMetadata []byte
 	// Progress receives per-chunk progress events.  Pass nil to suppress.
-	Progress ProgressFunc
+	// Use chunked.ProgressFunc and chunked.ChunkProgress for the callback type.
+	Progress chunked.ProgressFunc
 }
 
 // PushOptions controls the preferred core push path.

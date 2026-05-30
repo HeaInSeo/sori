@@ -98,3 +98,20 @@ type CompatibleInput struct {
 	Organism        string   `json:"organism,omitempty"`
 	Reference       string   `json:"reference,omitempty"`
 }
+
+// ChunkProgress carries per-event progress information emitted during a
+// chunked CAS push or fetch operation (§7-6).
+type ChunkProgress struct {
+	// Event is one of: "ChunkSkipped", "ChunkUploaded", "ChunkFetched",
+	// "FileDone", "ArtifactDone".
+	Event      string
+	File       string
+	ChunkIndex int
+	Bytes      int64
+	DurationMs int64
+	Digest     string
+}
+
+// ProgressFunc is an optional callback receiving ChunkProgress events.
+// Pass nil to suppress; chunk boundaries are still logged via the sori logger.
+type ProgressFunc func(ChunkProgress)
