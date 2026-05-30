@@ -29,8 +29,8 @@ Large-dataset callers should use the `…To(w io.Writer, …)` streaming variant
 (`TarGzDirTo`, `TarGzDirFilesTo`) directly.
 
 **Deferred design**
-True streaming push (no temp file at all) and chunked CAS remain undesigned;
-see Step 2 and Step 3 below. These are Post-P3 RFC / P4 candidates.
+Disk-safety hardening (Step 2) and chunked CAS (Step 3) remain unimplemented.
+Step 3 is the high-value item for large genomics datasets; see p5-rfc.md.
 
 ### ✅ Step 1 — temp-file-backed tar layer (done, commit `329ea8b` + `c540719`)
 
@@ -44,18 +44,29 @@ see Step 2 and Step 3 below. These are Post-P3 RFC / P4 candidates.
 - `TarGzDirTo(w io.Writer, …)` and `TarGzDirFilesTo(w io.Writer, …)` were
   extracted so callers can write directly to any `io.Writer`.
 
-### ⏳ Step 2 — true streaming ingest (future)
+### ⏳ Step 2 — spooling and disk-safety improvement (future, low priority)
 
-- Push the tar.gz stream directly without materializing it to disk.
-- Requires computing digest on-the-fly while ORAS reads the stream.
-- Check whether the ORAS `Store.Push` API accepts a digest-preflight or
-  streaming push mode before committing to this approach.
+**Scope correction**: "true streaming push" is a misnomer.  ORAS
+`Store.Push` requires `Descriptor.Digest` and `Descriptor.Size` before the
+stream is read, so the full content must be produced before pushing regardless.
+A tar.gz stream cannot report its final size until the last byte is written.
 
-### ⏳ Step 3 — chunked CAS / content-addressable split (separate design)
+What Step 2 actually covers (if ever picked up):
 
-- Splitting layers into content-addressable chunks is a distinct artifact
-  format change. Should be designed and tracked separately, not bundled
-  into the streaming fix.
+- Disk preflight check: verify available space before starting a large layer.
+- Clearer error messages when temp write fails due to disk full.
+- Code boundary cleanup to make room for Step 3 integration.
+
+What Step 2 does **not** cover:
+
+- Eliminating the temp file (not possible without chunked CAS).
+- Solving disk spike for large datasets (that is Step 3's job).
+- Resumable upload (that is Step 3's job).
+
+### ⏳ Step 3 — chunked CAS (tracked in p5-rfc.md)
+
+File-aware fixed-size chunked CAS for large genomics datasets.
+Design decisions and test plan are in `p5-rfc.md`.
 
 ---
 
