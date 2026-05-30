@@ -49,6 +49,14 @@ const (
 // ErrPathValidation is returned when a path in chunk-index.json fails D-10 rules.
 var ErrPathValidation = errors.New("invalid chunk-index path")
 
+// ErrValidation is returned when a schema version, media type, or structural
+// validation check fails during fetch.
+var ErrValidation = errors.New("validation error")
+
+// ErrIntegrity is returned when a fetched chunk or file digest does not match
+// the value recorded in chunk-index.json.
+var ErrIntegrity = errors.New("chunk integrity failure")
+
 // ValidatePath checks whether p is a safe relative path per D-10.
 // Returns a wrapped ErrPathValidation on failure.
 func ValidatePath(p string) error {
