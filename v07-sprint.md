@@ -13,7 +13,7 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 
 | # | Condition | Sprint | Status |
 |---|---|---|---|
-| B-1 | M-12 post-fetch tree verification in chunked.Fetch | P7-1 | ⏳ |
+| B-1 | M-12 post-fetch tree verification in chunked.Fetch | P7-1 | ✅ |
 | B-2 | PackageVolumeToStore dispatches to chunked.Publish on ArtifactFormatChunkedCAS | P7-2 | ⏳ |
 | B-3 | FetchVolSeq / FetchVolParallel auto-detect chunked-cas manifests | P7-2 | ⏳ |
 | B-4 | ArtifactFormatChunkedCAS not marked experimental in comments | P7-3 | ⏳ |
@@ -29,7 +29,7 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 
 ## P7-1: M-12 Post-fetch Tree Verification
 
-**Status**: ⏳ pending  
+**Status**: ✅ done (2026-05-30)  
 **Target files**:
 - `chunked/fetch.go` — `FetchOptions.VerifyTree bool` + post-fetch re-walk
 - `chunked/fetch_test.go` — tree verify tests
@@ -48,13 +48,14 @@ type FetchOptions struct {
 ```
 
 **Checklist**:
-- [ ] `FetchOptions.VerifyTree bool` — zero value = false (backward compatible)
-- [ ] Post-fetch pass: after `g.Wait()`, walk idx.Files, re-open each file, sha256, compare to `idxFile.Digest`
-- [ ] Return `ErrIntegrity` wrapping file path on mismatch
-- [ ] Elapsed time recorded (report via ArtifactDone or separate event) for M-12 measurement
-- [ ] `go test ./chunked/...` green
-- [ ] Test: `VerifyTree=true`, clean round-trip → no error
-- [ ] Test: `VerifyTree=true`, corrupt file after fetch (os.WriteFile into destRoot) → ErrIntegrity
+- [x] `FetchOptions.VerifyTree bool` — zero value = false (backward compatible)
+- [x] Post-fetch pass: after `g.Wait()`, walk idx.Files, re-open each file, sha256, compare to `idxFile.Digest`
+- [x] Return `ErrIntegrity` wrapping file path on mismatch
+- [x] Elapsed time reported in ArtifactDone.DurationMs for M-12 measurement
+- [x] Exported `VerifyDestTree(destRoot string, files []ChunkIndexFile) (durationMs int64, err error)`
+- [x] `go test ./chunked/...` green
+- [x] Test: `VerifyTree=true`, clean round-trip → no error (TestFetch_VerifyTree_Clean)
+- [x] Test: corrupt file → ErrIntegrity (TestFetch_VerifyTree_Corrupt via VerifyDestTree)
 
 ---
 

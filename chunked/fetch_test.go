@@ -3,6 +3,9 @@ package chunked_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -145,6 +148,77 @@ func TestFetch_ProgressEvents(t *testing.T) {
 	if eventCounts["ArtifactDone"] != 1 {
 		t.Errorf("expected 1 ArtifactDone event, got %d", eventCounts["ArtifactDone"])
 	}
+}
+
+func TestFetch_VerifyTree_Clean(t *testing.T) {
+	storePath, cleanup := newTestStore(t)
+	defer cleanup()
+
+	srcDir := newTestSrcDir(t, map[string][]byte{
+		"a.txt": []byte("hello tree verify"),
+		"b.bin": bytes.Repeat([]byte{0xAB}, 256),
+	})
+
+	ctx := context.Background()
+	if _, err := chunked.Publish(ctx, storePath, srcDir, "vtclean:v1", chunked.PublishOptions{
+		ChunkSize: chunked.MinChunkSize,
+	}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	destDir := t.TempDir()
+	if err := chunked.Fetch(ctx, storePath, destDir, "vtclean:v1", chunked.FetchOptions{
+		VerifyTree: true,
+	}); err != nil {
+		t.Fatalf("Fetch with VerifyTree=true: %v", err)
+	}
+}
+
+func TestFetch_VerifyTree_Corrupt(t *testing.T) {
+	// Build a minimal ChunkIndexFile so VerifyDestTree can be called directly
+	// without going through a full OCI store round-trip.
+	destDir := t.TempDir()
+	content := []byte("original content for corruption test")
+	filePath := filepath.Join(destDir, "data.txt")
+	if err := os.WriteFile(filePath, content, 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// Compute the correct digest.
+	correctDigest := computeFileDigest(t, filePath)
+
+	files := []chunked.ChunkIndexFile{
+		{Path: "data.txt", Size: int64(len(content)), Digest: correctDigest},
+	}
+
+	// Clean state: VerifyDestTree should pass.
+	if _, err := chunked.VerifyDestTree(destDir, files); err != nil {
+		t.Fatalf("VerifyDestTree on clean file: %v", err)
+	}
+
+	// Corrupt the file.
+	if err := os.WriteFile(filePath, []byte("corrupted!"), 0o644); err != nil {
+		t.Fatalf("corrupt file: %v", err)
+	}
+
+	// VerifyDestTree must return ErrIntegrity.
+	_, err := chunked.VerifyDestTree(destDir, files)
+	if err == nil {
+		t.Fatal("expected ErrIntegrity after corruption, got nil")
+	}
+	if !errors.Is(err, chunked.ErrIntegrity) {
+		t.Errorf("expected ErrIntegrity, got: %v", err)
+	}
+}
+
+// computeFileDigest returns the sha256 digest string of a file's contents.
+func computeFileDigest(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file for digest: %v", err)
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(data))
 }
 
 func TestFetch_LegacyFormatRejected(t *testing.T) {

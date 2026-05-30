@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -23,6 +24,10 @@ const fetchConcurrency = 4
 type FetchOptions struct {
 	// Progress receives per-chunk progress events.  Pass nil to suppress.
 	Progress ProgressFunc
+	// VerifyTree re-walks destRoot after all files are reconstructed and
+	// re-verifies each file's sha256 against the chunk-index digest (M-12).
+	// Zero value = false.  The elapsed time is reported in ArtifactDone.DurationMs.
+	VerifyTree bool
 }
 
 // Fetcher holds resolved state for a single chunked CAS fetch operation.
@@ -134,6 +139,16 @@ func (f *Fetcher) fetch(ctx context.Context, destRoot, volName string) error {
 		return err
 	}
 
+	// Step 6b: post-fetch tree verification (M-12, optional).
+	var treeVerifyMs int64
+	if f.opts.VerifyTree {
+		var verifyErr error
+		treeVerifyMs, verifyErr = VerifyDestTree(destRoot, idx.Files)
+		if verifyErr != nil {
+			return verifyErr
+		}
+	}
+
 	// Step 7: write dataset-metadata (optional).
 	for _, layer := range manifest.Layers {
 		if layer.MediaType == MediaTypeDatasetMeta {
@@ -168,9 +183,35 @@ func (f *Fetcher) fetch(ctx context.Context, destRoot, volName string) error {
 		}
 	}
 
-	// Step 9: emit ArtifactDone.
-	f.emit(ChunkProgress{Event: "ArtifactDone"})
+	// Step 9: emit ArtifactDone (DurationMs = tree-verify elapsed time if VerifyTree was set).
+	f.emit(ChunkProgress{Event: "ArtifactDone", DurationMs: treeVerifyMs})
 	return nil
+}
+
+// VerifyDestTree re-reads each file in destRoot and verifies its whole-file sha256
+// against the expected digest in files.  Returns ErrIntegrity on the first mismatch.
+// durationMs is the elapsed wall-clock time for the full re-walk; use it for M-12 reporting.
+func VerifyDestTree(destRoot string, files []ChunkIndexFile) (durationMs int64, err error) {
+	start := time.Now()
+	for i := range files {
+		destPath := filepath.Join(destRoot, filepath.FromSlash(files[i].Path))
+		f, openErr := os.Open(destPath)
+		if openErr != nil {
+			return 0, fmt.Errorf("chunked.VerifyDestTree: open %s: %w", files[i].Path, openErr)
+		}
+		h := digest.Canonical.Hash()
+		_, copyErr := io.Copy(h, f)
+		f.Close()
+		if copyErr != nil {
+			return 0, fmt.Errorf("chunked.VerifyDestTree: hash %s: %w", files[i].Path, copyErr)
+		}
+		got := digest.NewDigest(digest.Canonical, h).String()
+		if got != files[i].Digest {
+			return 0, fmt.Errorf("chunked.VerifyDestTree: %s: digest mismatch got %s want %s: %w",
+				files[i].Path, got, files[i].Digest, ErrIntegrity)
+		}
+	}
+	return time.Since(start).Milliseconds(), nil
 }
 
 // reconstructFile writes a single file described by idxFile into destRoot.
