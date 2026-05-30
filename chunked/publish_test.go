@@ -277,6 +277,62 @@ func TestPublish_DeduplicatesChunks(t *testing.T) {
 	}
 }
 
+func TestPublish_ArtifactDoneEvent(t *testing.T) {
+	storePath, cleanup := newTestStore(t)
+	defer cleanup()
+
+	srcDir := newTestSrcDir(t, map[string][]byte{
+		"small.txt": []byte("artifact done test"),
+	})
+
+	ctx := context.Background()
+	var doneCount int
+	_, err := chunked.Publish(ctx, storePath, srcDir, "done:v1", chunked.PublishOptions{
+		ChunkSize: chunked.MinChunkSize,
+		Progress: func(cp chunked.ChunkProgress) {
+			if cp.Event == "ArtifactDone" {
+				doneCount++
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if doneCount != 1 {
+		t.Errorf("ArtifactDone event count = %d, want 1", doneCount)
+	}
+}
+
+func TestPublish_WorkerPoolConcurrency(t *testing.T) {
+	storePath, cleanup := newTestStore(t)
+	defer cleanup()
+
+	// 4 small files, each fits in one chunk at MinChunkSize.
+	srcDir := newTestSrcDir(t, map[string][]byte{
+		"f1.bin": []byte("file one data"),
+		"f2.bin": []byte("file two data"),
+		"f3.bin": []byte("file three data"),
+		"f4.bin": []byte("file four data"),
+	})
+
+	ctx := context.Background()
+	var uploadCount int
+	_, err := chunked.Publish(ctx, storePath, srcDir, "pool:v1", chunked.PublishOptions{
+		ChunkSize: chunked.MinChunkSize,
+		Progress: func(cp chunked.ChunkProgress) {
+			if cp.Event == "ChunkUploaded" {
+				uploadCount++
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if uploadCount != 4 {
+		t.Errorf("ChunkUploaded count = %d, want 4", uploadCount)
+	}
+}
+
 func TestPublish_MaxChunkedLayersExceeded(t *testing.T) {
 	// A dataset that would produce more chunks than the budget must fail before
 	// pushing any blobs.

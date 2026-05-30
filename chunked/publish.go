@@ -7,16 +7,23 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/sync/errgroup"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
 )
+
+// uploadConcurrency is the maximum number of concurrent processFile calls.
+const uploadConcurrency = 2
 
 // PublishOptions controls a chunked CAS publish operation.
 type PublishOptions struct {
@@ -106,13 +113,42 @@ func (p *Publisher) publish(ctx context.Context, srcDir, volName string) (ocispe
 
 	chunkLayers := make([]ocispec.Descriptor, 0, int(estimated))
 
-	for _, sf := range files {
-		idxFile, fileChunkDescs, err := p.processFile(ctx, caller, sf)
-		if err != nil {
-			return ocispec.Descriptor{}, err
-		}
-		idx.Files = append(idx.Files, idxFile)
-		chunkLayers = append(chunkLayers, fileChunkDescs...)
+	// Worker-pool: limit concurrent processFile calls to uploadConcurrency.
+	type fileResult struct {
+		index      int
+		idxFile    ChunkIndexFile
+		chunkDescs []ocispec.Descriptor
+	}
+
+	results := make([]fileResult, len(files))
+	var resultsMu sync.Mutex
+
+	g, gctx := errgroup.WithContext(ctx)
+	sem := make(chan struct{}, uploadConcurrency)
+
+	for i, sf := range files {
+		i, sf := i, sf // capture loop vars
+		sem <- struct{}{}
+		g.Go(func() error {
+			defer func() { <-sem }()
+			idxFile, fileChunkDescs, err := p.processFile(gctx, caller, sf)
+			if err != nil {
+				return err
+			}
+			resultsMu.Lock()
+			results[i] = fileResult{index: i, idxFile: idxFile, chunkDescs: fileChunkDescs}
+			resultsMu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	// Reassemble in original order (results slice is pre-indexed).
+	for _, r := range results {
+		idx.Files = append(idx.Files, r.idxFile)
+		chunkLayers = append(chunkLayers, r.chunkDescs...)
 	}
 
 	// Step 4: push chunk-index.json.
@@ -176,6 +212,7 @@ func (p *Publisher) publish(ctx context.Context, srcDir, volName string) (ocispe
 	if err := p.store.Tag(ctx, manifestDesc, volName); err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("%s: tag manifest %q: %w", caller, volName, err)
 	}
+	p.emit(ChunkProgress{Event: "ArtifactDone"})
 	return manifestDesc, nil
 }
 
@@ -338,12 +375,42 @@ func (p *Publisher) pushChunk(
 		return desc, entry, nil
 	}
 
-	// Pass 2: push via SectionReader (seeks back to offset 0 within the section).
-	sr2 := io.NewSectionReader(f, offset, chunkSize)
+	// Pass 2: push via SectionReader with 5xx exponential-backoff retry.
 	start := time.Now()
-	if err := p.store.Push(ctx, desc, sr2); err != nil {
+	const maxAttempts = 3
+	baseDelay := 500 * time.Millisecond
+	var pushErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ocispec.Descriptor{}, ChunkEntry{}, ctx.Err()
+		}
+		if attempt > 0 {
+			delay := time.Duration(float64(baseDelay) * float64(int(1)<<uint(attempt-1)))
+			if delay > 8*time.Second {
+				delay = 8 * time.Second
+			}
+			// ±10% jitter: multiply by a factor in [0.9, 1.1].
+			factor := 0.9 + rand.Float64()*0.2
+			jitter := time.Duration(float64(delay) * factor)
+			select {
+			case <-time.After(jitter):
+			case <-ctx.Done():
+				return ocispec.Descriptor{}, ChunkEntry{}, ctx.Err()
+			}
+		}
+		sr2 := io.NewSectionReader(f, offset, chunkSize)
+		pushErr = p.store.Push(ctx, desc, sr2)
+		if pushErr == nil {
+			break
+		}
+		// Only retry on 5xx-like errors; bail immediately on others.
+		if !strings.Contains(pushErr.Error(), "50") {
+			break
+		}
+	}
+	if pushErr != nil {
 		return ocispec.Descriptor{}, ChunkEntry{}, fmt.Errorf(
-			"%s: push chunk %d of %s: %w", caller, chunkIdx, filePath, err)
+			"%s: push chunk %d of %s after retries: %w", caller, chunkIdx, filePath, pushErr)
 	}
 	p.emit(ChunkProgress{
 		Event:      "ChunkUploaded",
