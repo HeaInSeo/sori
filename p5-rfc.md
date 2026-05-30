@@ -1,6 +1,6 @@
 # P5 RFC — Chunked CAS for Large Dataset Artifacts
 
-**Status**: Draft (v2 — post-review corrections applied)
+**Status**: Draft (v3 — production readiness requirements added)
 **Target**: sori v0.6 (experimental), v0.7+ (stable)
 **Problem driver**: Large genomics reference datasets (STAR index ~40 GB, hg38 reference ~60 GB+)
 
@@ -52,6 +52,8 @@ sets that change infrequently but are large, this is operationally expensive.
 | Fetch resume across interrupted fetches | Conflicts with the existing staging policy (staging is removed on failure). Deferred to V1.1. See D-6. |
 | Symlinks and special files | V1 handles regular files only. See D-10. |
 | CLI surface changes | sori is a library; CLI flags are the caller's concern. |
+| Registry GC automation | Chunk blob lifecycle management is a registry operator concern; sori emits no lifecycle annotations and does not trigger GC. |
+| Patient / sample sensitive data (HIPAA / GDPR scope) | sori is designed for public reference genomes only. Encrypting patient-derived or personally-identifiable genomic data requires an adapter layer with encryption-at-rest and access-control guarantees outside sori's scope. |
 
 ---
 
@@ -422,14 +424,19 @@ caller must retry from scratch (consistent with existing staging policy).
 
 ---
 
-## 7. Benchmark / Resource Gate
+## 7. Production Readiness / Operational Requirements
 
-P5 V1 implementation is not complete until it passes this gate.
+P5 V1 is not shippable until every subsection in this chapter is satisfied.
 Functional tests alone are insufficient.
 
-### 7-A. Metrics
+---
 
-Every benchmark run records all twelve metrics.
+### §7-1. Benchmark / Resource Gate
+
+Every benchmark run records all twelve metrics against all seven fixture
+datasets.  A build that violates any pass criterion is a blocking failure.
+
+#### Metrics
 
 | # | Metric | Unit |
 |---|---|---|
@@ -446,7 +453,7 @@ Every benchmark run records all twelve metrics.
 | M-11 | Peak disk usage during fetch | MiB |
 | M-12 | Reconstructed tree digest verification time | milliseconds |
 
-### 7-B. Fixture datasets
+#### Fixture datasets
 
 | Fixture | Description |
 |---|---|
@@ -462,9 +469,7 @@ Genomics fixtures are generated synthetically; no real biological data is
 required.  Content should reflect realistic compressibility profiles (FASTA:
 low entropy; binary index: near-incompressible).
 
-### 7-C. Pass criteria
-
-A build that violates any criterion is a blocking failure.
+#### Pass criteria
 
 | Criterion | Rule |
 |---|---|
@@ -475,12 +480,9 @@ A build that violates any criterion is a blocking failure.
 | **Retry skips uploaded chunks** | After a failed mid-push, retry must upload only chunks not yet present in registry (verified via M-08 and M-09 comparison) |
 | **MaxChunkedLayers fires pre-push** | A dataset that exceeds MaxChunkedLayers must return ErrValidation before any blob is pushed to the registry (M-09 = 0 on failure) |
 | **Reconstructed tree matches source** | Byte-for-byte digest of every file and the whole tree must match source after fetch |
-| **Benchmark results persisted** | Each gate run saves a result artifact (JSON or Markdown table) under `docs/bench/` or as a test output file |
+| **Benchmark results persisted** | Each gate run saves a result artifact at `docs/bench/YYYY-MM-DD-<fixture>.json` |
 
-### 7-D. Result format
-
-Each benchmark run produces a result file at
-`docs/bench/YYYY-MM-DD-<fixture>.json` with the following structure:
+#### Result format
 
 ```json
 {
@@ -508,7 +510,261 @@ Each benchmark run produces a result file at
 }
 ```
 
-`violations` lists the criterion IDs from §7-C that failed, if any.
+`violations` lists the criterion IDs that failed, if any.
+
+---
+
+### §7-2. Registry Compatibility Matrix
+
+Chunked CAS must be verified against the following registries before V1
+release.
+
+| Registry | Required for V1 | Notes |
+|---|---|---|
+| **Harbor** | Yes — V1 blocker | Primary target; must pass full push + fetch + dedup round-trip |
+| **GHCR** (GitHub Container Registry) | Yes — V1 blocker | Must pass full push + fetch + dedup round-trip |
+| **ECR** (Amazon Elastic Container Registry) | High priority | ECR's 1000-layer cap informs MaxChunkedLayers=900; verify empirically |
+| **Local OCI layout** (`oci.New`) | Yes — V1 blocker | Used in all unit tests; must support Exists check for dedup |
+| **Zot** | Nice-to-have | Open-source reference implementation; test if available |
+
+For each required registry, the compatibility test covers:
+
+1. Push a chunked artifact → verify manifest and all blobs reachable.
+2. Second push (identical) → verify zero bytes uploaded (dedup).
+3. Fetch → verify tree digest matches source.
+4. Tag overwrite (re-push after partial change) → verify old chunks still
+   present, only changed chunks uploaded.
+
+Registry tests are integration tests, gated behind a build tag
+(`//go:build integration`).  They require credentials and a live registry
+endpoint; they are not run in CI by default.
+
+---
+
+### §7-3. Retry / Cancel / Timeout Policy
+
+| Condition | Behaviour |
+|---|---|
+| **Context cancellation** (`ctx.Err() != nil`) | Immediate stop; return `ctx.Err()` unwrapped.  No retry. |
+| **5xx server error** | Bounded exponential backoff: 3 attempts, initial delay 500 ms, max delay 8 s, jitter ±10%.  After 3 failures return `ErrTransport`. |
+| **401 / 403 auth error** | Hard fail immediately; return `ErrAuth`.  Retrying with the same credentials cannot succeed. |
+| **Digest mismatch on fetch** | Hard fail immediately; return `ErrIntegrity`.  A corrupted chunk must not be silently retried or skipped. |
+| **Network timeout** | Treat as transient; subject to 5xx backoff policy. |
+| **404 on chunk Exists check** | Expected — treat as "not uploaded"; proceed with push. |
+
+Retry state is per-chunk, not per-artifact.  A retry of a full publish call
+restarts the walk from chunk 0 but skips chunks already confirmed present
+(D-5 dedup).  There is no global retry loop wrapping the entire artifact push.
+
+---
+
+### §7-4. Integrity Verification Policy
+
+#### Pre-push (publish side)
+
+- Compute chunk digest via Pass 1 `io.SectionReader` hash (§4).
+- After `registry.Push`, perform an optional existence check (`Exists(digest)`)
+  to confirm the registry acknowledged the blob.  This is a best-effort safety
+  net; full round-trip verification is the caller's responsibility.
+
+#### Post-fetch (fetch side)
+
+Three verification layers, applied in order:
+
+1. **Chunk-level**: after writing each chunk to its destination offset, verify
+   sha256 of written bytes == `chunk.digest` in chunk-index.json.
+   → `ErrIntegrity` on mismatch; fetch stops immediately.
+2. **File-level**: after all chunks for a file are written, verify sha256 of
+   the whole assembled file == `file.digest` in chunk-index.json.
+   → `ErrIntegrity` on mismatch.
+3. **Tree-level** (M-12): after all files are written, re-walk the destination
+   tree and verify each file digest matches.  Measures reassembly correctness
+   end-to-end.
+
+#### Partial output on failure
+
+On any integrity failure during fetch, the staging directory is removed
+(consistent with existing staging policy).  No partial output is left in
+`destRoot`.
+
+---
+
+### §7-5. Atomic Publish Semantics
+
+The publish sequence must ensure that no partially-complete chunked artifact
+is ever observable at a named tag.
+
+**Required order:**
+
+1. Push all chunk blobs (content-addressed; safe to push in any order).
+2. Push chunk-index.json blob.
+3. Push configblob layer blob (if present).
+4. Push OCI manifest → assign tag.
+
+**Invariant**: a tag is only created or updated at step 4.  Before that point,
+individual blobs are present in the registry CAS but are not reachable from
+any manifest.  A registry GC sweep between steps may reclaim unreferenced
+blobs; this is acceptable because the push is not yet committed.  If the push
+fails at any step before step 4, no tag points to an incomplete manifest.
+
+**No rollback mechanism**: sori does not delete blobs on push failure.
+Unreferenced blobs left by a failed push are GC'd by the registry operator.
+This is consistent with standard OCI client behaviour.
+
+---
+
+### §7-6. Observability / Progress
+
+Long-running operations on large datasets must not be silent.  V1 must emit
+progress information at a granularity that makes 40 GB pushes operationally
+observable.
+
+#### Required progress events
+
+| Event | Trigger | Fields |
+|---|---|---|
+| `ChunkSkipped` | Exists check returned true | `file`, `chunkIndex`, `digest` |
+| `ChunkUploaded` | Push completed for a chunk | `file`, `chunkIndex`, `digest`, `bytes`, `durationMs` |
+| `ChunkFetched` | Chunk written to destination | `file`, `chunkIndex`, `digest`, `bytes` |
+| `FileDone` | All chunks of a file written and verified | `file`, `totalBytes` |
+| `ArtifactDone` | Manifest pushed / fetch complete | `totalBytes`, `durationMs`, `chunksUploaded`, `chunksSkipped` |
+
+#### Progress interface
+
+The progress callback is injected via options, not logged globally.  Callers
+that do not need progress pass `nil`.  Example:
+
+```go
+type ChunkProgress struct {
+    Event      string // "ChunkSkipped" | "ChunkUploaded" | "ChunkFetched" | ...
+    File       string
+    ChunkIndex int
+    Bytes      int64
+    DurationMs int64
+    Digest     string
+}
+
+type ProgressFunc func(ChunkProgress)
+```
+
+`PackageOptions` and the fetch options struct gain an optional `Progress
+ProgressFunc` field.
+
+#### No silent long-running operations
+
+A caller that pushes a 60 GB artifact with `Progress: nil` should still see
+regular `Log.Infof` output at chunk boundaries so that the operation is not
+completely silent in server logs.
+
+---
+
+### §7-7. Concurrency / Backpressure
+
+#### Upload concurrency (push)
+
+| Parameter | V1 default | Notes |
+|---|---|---|
+| `uploadConcurrency` | 2 | Matches existing `PublishOptions.Concurrency` convention |
+| Inflight read buffer | 8–16 MiB per worker | Applied at the `io.SectionReader` read loop; not a per-chunk heap allocation |
+| Max inflight bytes | `uploadConcurrency × chunkSize` (≤ 2 GiB) | Not a hard limit in V1; informational for capacity planning |
+
+With concurrency=2 and 1 GiB chunks, peak inflight data is 2 × 32 KiB hash
+buffers (Pass 1) or 2 × ORAS internal buffers (Pass 2).  No 1 GiB buffers are
+allocated.
+
+#### Fetch concurrency
+
+| Parameter | V1 default | Notes |
+|---|---|---|
+| `fetchConcurrency` | 4 | Higher than upload; fetch is typically read-bound, not write-bound |
+| Worker pool | Fixed goroutine pool, bounded by `fetchConcurrency` | Prevents goroutine explosion on datasets with many small files |
+| File pre-allocation | `os.File.Truncate(fileSize)` before first chunk write | Eliminates fragmentation and detects disk-full early |
+
+#### Backpressure
+
+Worker pool uses a channel-based semaphore.  If all workers are busy,
+submission blocks the walk goroutine rather than spawning unbounded goroutines.
+No external rate limiter in V1.
+
+---
+
+### §7-8. Data Scope / Security
+
+**In scope (V1)**: publicly available genomics reference data.  Examples:
+- hg38 / hg19 human reference genome (FASTA + index files)
+- GRCh38 annotation GTF
+- STAR genome index (pre-built from public reference)
+- BWA / Bowtie2 index (pre-built from public reference)
+
+**Out of scope**: patient-derived or sample-level genomic data.  sori V1
+provides no encryption at rest, no access-control enforcement, and no audit
+logging.  Storing HIPAA-covered or GDPR-covered data via sori without an
+appropriate encryption + access-control adapter layer is prohibited.
+
+This constraint is enforced by documentation and user agreement, not by code.
+sori has no mechanism to detect whether a file contains personal genomic data.
+
+**Credential handling**: registry credentials flow through `AuthConfig` with
+`${ENV_VAR}` substitution (P4-1).  Credentials are never written to
+`chunk-index.json` or any sori metadata artifact.
+
+---
+
+### §7-9. Format Version / Capability Policy
+
+#### schemaVersion enforcement
+
+On fetch, if `chunk-index.json.schemaVersion` is not `"sori.chunked-cas.v1"`,
+the fetch must return `ErrValidation` immediately without downloading any chunk
+blobs.
+
+This is a hard fail, not a best-effort fallback.  A client that silently
+ignores an unknown schemaVersion risks data corruption if the schema changes
+in a future version.
+
+#### Config mediaType enforcement
+
+On fetch, if `manifest.Config.MediaType` is `"application/vnd.sori.chunked-cas.config.v1+json"`
+but no chunk-index layer is found by mediaType, the fetch must return
+`ErrValidation`.  An incomplete manifest is not silently treated as a legacy
+artifact.
+
+#### Forward compatibility
+
+A sori client encountering a `schemaVersion` it does not recognise must return
+`ErrValidation` with a message indicating the unknown version string.  It must
+not attempt to interpret unknown fields.
+
+Unknown `schemaVersion` values are reserved for future RFC iterations.
+
+---
+
+### §7-10. Dataset Preflight / Suitability
+
+Before starting a chunked CAS push, the implementation must perform a
+preflight check and report whether the dataset is suitable.
+
+#### Preflight steps
+
+1. **Walk and count**: walk `srcDir`, count files and total bytes.
+2. **Chunk estimate**: compute `estimatedChunks = ceil(totalBytes / chunkSize) + smallFileCount`.
+3. **MaxChunkedLayers check**: if `estimatedChunks > MaxChunkedLayers - 2`, return
+   `ErrValidation` (implemented; see D-11).
+4. **Suitability recommendation**: if `totalBytes < 1 GiB`, emit a log warning
+   recommending `ArtifactFormatLegacy` instead.  Chunked CAS overhead (chunk-index,
+   manifest complexity, dedup check round-trips) is not justified for small datasets.
+5. **Symlink / special file check**: report all rejectable files before pushing
+   any blobs (fail fast; see D-10).
+
+#### Suitability thresholds
+
+| Total dataset size | Recommendation |
+|---|---|
+| < 1 GiB | Use `ArtifactFormatLegacy`; chunked CAS overhead exceeds benefit |
+| 1 GiB – 10 GiB | Chunked CAS acceptable; legacy also fine |
+| > 10 GiB | Chunked CAS recommended; legacy disk spike and restart cost are significant |
+
+These are recommendations emitted as log warnings, not hard validation errors.
 
 ---
 
