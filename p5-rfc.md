@@ -1,6 +1,6 @@
 # P5 RFC — Chunked CAS for Large Dataset Artifacts
 
-**Status**: Draft (v4 — dataset metadata / catalog exposure added)
+**Status**: Draft (v5 — correctness fixes: self-ref removed, dynamic layer budget, structured compat, .sori/ path)
 **Target**: sori v0.6 (experimental), v0.7+ (stable)
 **Problem driver**: Large genomics reference datasets (STAR index ~40 GB, hg38 reference ~60 GB+)
 
@@ -102,6 +102,12 @@ primary metadata contract.  `configblob.json` is stored as a dedicated layer
 so the original caller-supplied config is preserved independently of format
 metadata (see D-7).
 
+The OCI `config` blob content is a minimal JSON descriptor:
+`{"schemaVersion": "sori.chunked-cas.v1"}`.  Its mediaType
+(`application/vnd.sori.chunked-cas.config.v1+json`) is the format detection
+signal used by dual-path fetch (D-13).  It must be pushed before the OCI
+manifest (see §7-5).
+
 Layer ordering mirrors chunk-index.json order for human readability.
 **Fetch correctness must rely on descriptors (digest + mediaType), not
 positional index.**  A fetcher must locate chunk-index.json by its mediaType,
@@ -190,10 +196,10 @@ In chunked CAS the config descriptor carries format metadata
 The original `configblob.json` must be stored separately.
 
 **Decision**: if a configblob is provided, store it as a dedicated layer with
-mediaType `application/vnd.sori.configblob.v1+json` (layers[1] in D-3).  The
-chunked fetch path reconstructs `configblob.json` from this layer, mirroring
-`restoreConfigBlob` in the legacy path.  If no configblob was provided, this
-layer is omitted.
+mediaType `application/vnd.sori.configblob.v1+json`.  Fetchers locate it by
+mediaType, not by layer position.  The chunked fetch path reconstructs
+`configblob.json` from this layer, mirroring `restoreConfigBlob` in the legacy
+path.  If no configblob was provided, this layer is omitted.
 
 ### D-8. Experimental gate and API placement
 
@@ -280,14 +286,21 @@ growth when a dataset contains many small files, a hard limit applies:
 MaxChunkedLayers = 900
 ```
 
-This accounts for:
-- 1 chunk-index.json layer
-- 1 optional dataset-metadata.json layer
-- 1 optional configblob layer
-- Up to 897 chunk layers
+The effective chunk layer budget is computed dynamically at push time based on
+which optional blobs are present:
 
-If the computed chunk count would exceed `MaxChunkedLayers - 2`, the publish
-call returns `ErrValidation`.
+```
+metadataLayerCount := 1  // chunk-index.json (always required)
+if opts.DatasetMetadata != nil { metadataLayerCount++ }
+if opts.ConfigBlob != nil      { metadataLayerCount++ }
+maxChunkLayers := MaxChunkedLayers - metadataLayerCount
+```
+
+If the computed chunk count would exceed `maxChunkLayers`, the publish call
+returns `ErrValidation` before any blob is pushed.
+
+Worst case (both optional layers present): 900 − 3 = **897 chunk layers**.
+Minimum case (neither optional layer): 900 − 1 = **899 chunk layers**.
 
 Rationale: ECR documented a 1000-layer limit; 900 provides headroom.  Once
 OQ-1 is resolved this constant may be raised.  Small-file packing (future RFC)
@@ -333,7 +346,9 @@ ChunkedPublish(ctx, srcDir, volName, opts):
 
   1. Walk srcDir → sorted regular-file list
      reject symlinks / special files with ErrValidation
-  2. Compute total chunk count; if > MaxChunkedLayers-2 → ErrValidation
+  2. Compute metadataLayerCount (1 + present optional layers)
+     estimatedChunks = sum over each file of ceil(file.size / chunkSize)
+     if estimatedChunks > MaxChunkedLayers - metadataLayerCount → ErrValidation
   3. For each file, for each chunk range [offset, offset+chunkSize):
        -- Pass 1: hash (small buffer, no heap allocation for full chunk) --
        f = os.Open(file)
@@ -352,16 +367,17 @@ ChunkedPublish(ctx, srcDir, volName, opts):
   4. Serialise chunk-index.json → push as blob
   5. If dataset-metadata provided: push as blob (mediaType vnd.sori.dataset.metadata.v1+json)
   6. If configblob provided: push as blob (mediaType vnd.sori.configblob.v1+json)
-  7. Build OCI manifest (config + chunk-index + optional dataset-metadata + optional configblob + all chunks)
-  8. Push manifest under volName tag
+  7. Push chunked-cas config blob: {"schemaVersion": "sori.chunked-cas.v1"}
+  8. Build OCI manifest (config + chunk-index + optional dataset-metadata + optional configblob + all chunks)
+  9. Push manifest → assign tag
 ```
 
 **Peak memory**: hash buffer (~32 KiB stdlib default) plus chunk-index.json
 in memory (tens of KB for typical datasets).  No per-chunk 1 GiB buffer.
-**Peak disk**: zero temp files.  Chunks are read directly from source files
-via `io.SectionReader` and pushed in-flight.
-
-This eliminates the disk spike (1-A) entirely.
+**Peak disk**: sori does not create a full-artifact temporary file during push.
+Chunks are read directly from source files via `io.SectionReader` and pushed
+in-flight.  This eliminates the sori-controlled full-layer disk spike (1-A).
+OS page cache and registry-side buffering are outside sori's control.
 
 ---
 
@@ -385,10 +401,11 @@ ChunkedFetch(ctx, destRoot, src, tag, concurrency):
          verify sha256 == chunk entry digest → ErrIntegrity on mismatch
   7. For each file: verify whole-file digest == chunk-index file.digest
   8. Locate dataset-metadata layer by mediaType vnd.sori.dataset.metadata.v1+json (if present)
-     fetch and write dataset-metadata.json under destRoot
+     fetch and write destRoot/.sori/dataset-metadata.json
+     (reserved path; avoids collision with a source file named dataset-metadata.json)
   9. Locate configblob layer by mediaType vnd.sori.configblob.v1+json (if present)
-     fetch and write configblob.json under destRoot
- 10. Write volume-index.json
+     fetch and write configblob.json under destRoot (legacy path; backward compatible)
+ 10. Write volume-index.json under destRoot (legacy path; backward compatible)
 ```
 
 No fetch resume in V1: on any error, the staging directory is removed and the
@@ -607,14 +624,16 @@ is ever observable at a named tag.
 
 1. Push all chunk blobs (content-addressed; safe to push in any order).
 2. Push chunk-index.json blob.
-3. Push configblob layer blob (if present).
-4. Push OCI manifest → assign tag.
+3. Push dataset-metadata blob (if present).
+4. Push configblob layer blob (if present).
+5. Push chunked-cas config blob (`{"schemaVersion": "sori.chunked-cas.v1"}`).
+6. Push OCI manifest → assign tag.
 
-**Invariant**: a tag is only created or updated at step 4.  Before that point,
+**Invariant**: a tag is only created or updated at step 6.  Before that point,
 individual blobs are present in the registry CAS but are not reachable from
 any manifest.  A registry GC sweep between steps may reclaim unreferenced
 blobs; this is acceptable because the push is not yet committed.  If the push
-fails at any step before step 4, no tag points to an incomplete manifest.
+fails at any step before step 6, no tag points to an incomplete manifest.
 
 **No rollback mechanism**: sori does not delete blobs on push failure.
 Unreferenced blobs left by a failed push are GC'd by the registry operator.
@@ -756,9 +775,10 @@ preflight check and report whether the dataset is suitable.
 #### Preflight steps
 
 1. **Walk and count**: walk `srcDir`, count files and total bytes.
-2. **Chunk estimate**: compute `estimatedChunks = ceil(totalBytes / chunkSize) + smallFileCount`.
-3. **MaxChunkedLayers check**: if `estimatedChunks > MaxChunkedLayers - 2`, return
-   `ErrValidation` (implemented; see D-11).
+2. **Chunk estimate**: compute `estimatedChunks = sum over each regular file of ceil(file.size / chunkSize)`.
+   File boundaries are never shared between chunks; each file contributes at least one chunk regardless of size.
+3. **MaxChunkedLayers check**: if `estimatedChunks > MaxChunkedLayers - metadataLayerCount`,
+   return `ErrValidation` before any blobs are pushed (see D-11).
 4. **Suitability recommendation**: if `totalBytes < 1 GiB`, emit a log warning
    recommending `ArtifactFormatLegacy` instead.  Chunked CAS overhead (chunk-index,
    manifest complexity, dedup check round-trips) is not justified for small datasets.
@@ -875,6 +895,15 @@ Minimum fields for a V1 catalog-capable artifact:
   "compatibleTools":      ["bwa", "bwa-mem2"],
   "compatibleNodeTypes":  ["BwaAlignNode", "BwaMem2AlignNode"],
   "compatibleInputTypes": ["reference_genome", "bwa_index"],
+  "compatibleInputs": [
+    {
+      "inputType":       "reference_genome",
+      "format":          "bwa-index",
+      "compatibleTools": ["bwa", "bwa-mem2"],
+      "organism":        "Homo sapiens",
+      "reference":       "GRCh38"
+    }
+  ],
   "sizeBytes": 42949672960,
   "source":  "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/",
   "license": "public-domain",
@@ -882,10 +911,16 @@ Minimum fields for a V1 catalog-capable artifact:
   "createdAt":        "2026-05-30T09:00:00Z",
   "createdBy":        "pipeline-admin@example.org",
   "validationStatus": "validated",
-  "artifactRef":      "harbor.internal/genomics/references:grch38-bwa-20260530",
-  "manifestDigest":   "sha256:abc123..."
+  "artifactRef":      "harbor.internal/genomics/references:grch38-bwa-20260530"
 }
 ```
+
+> **Note**: `manifestDigest` is intentionally absent from dataset-metadata.json.
+> dataset-metadata.json is pushed as an OCI layer; its own blob digest
+> contributes to the manifest digest calculation.  Embedding `manifestDigest`
+> inside the document would create the same self-reference problem as the
+> removed `artifactDigest` field in chunk-index.json (see D-4).  The manifest
+> digest is supplied externally by the catalog/indexer after resolving the tag.
 
 #### Field reference
 
@@ -904,7 +939,8 @@ Minimum fields for a V1 catalog-capable artifact:
 | `fileFormats` | []string | Recommended | File format identifiers (e.g. `["bwa-index", "fasta"]`) |
 | `compatibleTools` | []string | Recommended | Tool names that consume this dataset |
 | `compatibleNodeTypes` | []string | Recommended | Pipeline node type IDs that accept this dataset |
-| `compatibleInputTypes` | []string | Yes (catalog routing) | Input type identifiers used for pipeline editor matching |
+| `compatibleInputTypes` | []string | Yes (catalog routing) | Flat list of input type identifiers for quick search/filter |
+| `compatibleInputs` | []object | Recommended | Structured compatibility records; each entry specifies `inputType`, `format`, `compatibleTools`, `organism`, `reference` — used for precise pipeline editor matching |
 | `sizeBytes` | int64 | Recommended | Total uncompressed size in bytes |
 | `source` | string | Optional | Upstream URL or citation |
 | `license` | string | Recommended | License identifier (e.g. `"public-domain"`, `"CC-BY-4.0"`) |
@@ -913,7 +949,7 @@ Minimum fields for a V1 catalog-capable artifact:
 | `createdBy` | string | Optional | Operator identifier (email or username) |
 | `validationStatus` | string | Optional | `"validated"` \| `"unvalidated"` \| `"deprecated"` |
 | `artifactRef` | string | Recommended | `registry/repo:tag` used to pull this artifact |
-| `manifestDigest` | string | Recommended | sha256 digest of the OCI manifest |
+| ~~`manifestDigest`~~ | — | **Absent** | Self-reference: cannot be embedded (see schema note above). Catalog/indexer fills this in externally from the OCI resolve step. |
 
 ---
 
@@ -932,6 +968,10 @@ OCI manifest
 
 #### CatalogEntry structure
 
+`id` (= manifest digest) is filled in by the catalog/indexer from the OCI
+tag-resolve step, not from the dataset-metadata.json blob itself (see schema
+note in §10-3).
+
 ```json
 {
   "id":           "sha256:abc123...",
@@ -943,6 +983,15 @@ OCI manifest
   "validated":    true,
   "artifactRef":  "harbor.internal/genomics/references:grch38-bwa-20260530",
   "compatibleInputTypes": ["reference_genome", "bwa_index"],
+  "compatibleInputs": [
+    {
+      "inputType":       "reference_genome",
+      "format":          "bwa-index",
+      "compatibleTools": ["bwa", "bwa-mem2"],
+      "organism":        "Homo sapiens",
+      "reference":       "GRCh38"
+    }
+  ],
   "uiHints": {
     "icon":  "dna",
     "color": "blue"
@@ -962,15 +1011,18 @@ only the catalog UX is degraded.
 **Scenario**: a user wires up a BWA alignment node in the pipeline editor.
 
 1. The node definition declares `inputType: "reference_genome"` and
-   `format: "bwa_index"`.
-2. The pipeline editor queries the catalog:
-   `GET /catalog?compatibleInputTypes=reference_genome,bwa_index`
-3. The catalog returns entries whose `compatibleInputTypes` intersects the
-   query — including *GRCh38 BWA Index (Homo sapiens hg38)*.
-4. The editor presents: **GRCh38 BWA Index** — 40 GB — validated ✓
-5. The user selects the entry.  The editor stores the `artifactRef` in the
+   `format: "bwa-index"`.
+2. The pipeline editor performs a coarse search via the flat shortcut:
+   `GET /catalog?compatibleInputTypes=reference_genome`
+3. The catalog returns candidate entries based on `compatibleInputTypes`.
+4. For precise filtering, the editor evaluates each entry's `compatibleInputs`
+   array to confirm a record where `inputType == "reference_genome"` AND
+   `format == "bwa-index"` exists.  Entries that lack a matching record are
+   filtered out even if they appear in the coarse results.
+5. The editor presents: **GRCh38 BWA Index** — 40 GB — validated ✓
+6. The user selects the entry.  The editor stores the `artifactRef` in the
    node's input binding.
-6. At pipeline execution time, the executor calls
+7. At pipeline execution time, the executor calls
    `Client.FetchVolumeFromRemote(ctx, destRoot, target, tag, opts)` using the
    stored `artifactRef`.
 
