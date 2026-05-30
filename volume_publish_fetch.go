@@ -21,6 +21,7 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/oci"
+	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry/remote"
 )
 
@@ -348,11 +349,20 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 	}
 
 	if !anyPushed {
-		existingDesc, err := store.Resolve(ctx, volName)
-		if err == nil {
+		resolveErr := testHookResolveExistingErr
+		var existingDesc ocispec.Descriptor
+		if resolveErr == nil {
+			existingDesc, resolveErr = store.Resolve(ctx, volName)
+		}
+		switch {
+		case resolveErr == nil:
 			Log.Infof("No changes detected (config+layers), skipping manifest update for %q", volName)
 			vi.VolumeRef = existingDesc.Digest.String()
 			return vi, nil
+		case errors.Is(resolveErr, errdef.ErrNotFound):
+			// tag does not exist yet — proceed to pack and publish below
+		default:
+			return nil, transportError(publishCaller, fmt.Sprintf("resolve existing volume %q", volName), resolveErr)
 		}
 	}
 
@@ -670,6 +680,10 @@ func fetchVolParallelFrom(ctx context.Context, destRoot string, src oras.ReadOnl
 	}
 	return vi, nil
 }
+
+// testHookResolveExistingErr, if non-nil, replaces the store.Resolve call in
+// the skip-if-unchanged path of publishVolumeToStore.  Used only by tests.
+var testHookResolveExistingErr error
 
 // testHookPhase2RenameErr, if non-nil, replaces the Phase 2 os.Rename call in
 // fetchVolWithAtomicOverwrite.  Used only by tests.

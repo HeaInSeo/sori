@@ -1083,3 +1083,97 @@ func TestFetchVolumeFresh_LeavesDestAbsentOnFailure(t *testing.T) {
 		}
 	}
 }
+
+// ── skip-if-unchanged Resolve error handling ──────────────────────────────────
+
+// TestPublishVolumeToStore_SkipIfUnchanged_ResolveSuccess verifies that a
+// second publish of identical content skips pack/publish and returns the
+// existing manifest digest (Resolve succeeds → skip path taken).
+func TestPublishVolumeToStore_SkipIfUnchanged_ResolveSuccess(t *testing.T) {
+	ctx := context.Background()
+	storePath := t.TempDir()
+	req := PackageRequest{
+		SourceDir:   "./test-vol",
+		DisplayName: "skip-unchanged-test",
+		Tag:         "skip.v1",
+	}
+
+	res1, err := PackageVolumeToStore(ctx, storePath, req)
+	if err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+
+	// Second publish: all blobs already exist, tag present → skip path.
+	res2, err := PackageVolumeToStore(ctx, storePath, req)
+	if err != nil {
+		t.Fatalf("second publish: %v", err)
+	}
+	if res2.ManifestDigest != res1.ManifestDigest {
+		t.Errorf("skip path must return existing digest: got %s, want %s",
+			res2.ManifestDigest, res1.ManifestDigest)
+	}
+}
+
+// TestPublishVolumeToStore_SkipIfUnchanged_ResolveNotFound verifies that
+// publishing identical content under a new tag name proceeds to pack/publish
+// (Resolve returns ErrNotFound → proceed path taken).
+func TestPublishVolumeToStore_SkipIfUnchanged_ResolveNotFound(t *testing.T) {
+	ctx := context.Background()
+	storePath := t.TempDir()
+
+	// First publish under "v1" — populates all blobs.
+	_, err := PackageVolumeToStore(ctx, storePath, PackageRequest{
+		SourceDir: "./test-vol", DisplayName: "notfound-test", Tag: "notfound.v1",
+	})
+	if err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+
+	// Second publish with same content under new tag "v2":
+	// anyPushed=false (blobs exist), Resolve("notfound.v2")→ErrNotFound → proceed.
+	res2, err := PackageVolumeToStore(ctx, storePath, PackageRequest{
+		SourceDir: "./test-vol", DisplayName: "notfound-test", Tag: "notfound.v2",
+	})
+	if err != nil {
+		t.Fatalf("second publish (new tag): %v", err)
+	}
+	if res2.ManifestDigest == "" {
+		t.Error("expected non-empty manifest digest after publish to new tag")
+	}
+}
+
+// TestPublishVolumeToStore_SkipIfUnchanged_ResolveError verifies that a
+// non-ErrNotFound error from store.Resolve is returned immediately rather than
+// falling through to pack/publish.
+func TestPublishVolumeToStore_SkipIfUnchanged_ResolveError(t *testing.T) {
+	ctx := context.Background()
+	storePath := t.TempDir()
+
+	// First publish to populate blobs so anyPushed=false on the second call.
+	_, err := PackageVolumeToStore(ctx, storePath, PackageRequest{
+		SourceDir: "./test-vol", DisplayName: "resolve-err-test", Tag: "resolve-err.v1",
+	})
+	if err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+
+	sentinelErr := errors.New("simulated store IO error")
+	testHookResolveExistingErr = sentinelErr
+	t.Cleanup(func() { testHookResolveExistingErr = nil })
+
+	_, err = PackageVolumeToStore(ctx, storePath, PackageRequest{
+		SourceDir: "./test-vol", DisplayName: "resolve-err-test", Tag: "resolve-err.v1",
+	})
+	if err == nil {
+		t.Fatal("expected error from Resolve failure, got nil")
+	}
+	if !errors.Is(err, ErrTransport) {
+		t.Errorf("expected ErrTransport, got %T: %v", err, err)
+	}
+	if !errors.Is(err, sentinelErr) {
+		t.Errorf("expected sentinel error to be wrapped in chain, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "resolve-err.v1") {
+		t.Errorf("error message must contain volume name, got: %v", err)
+	}
+}
