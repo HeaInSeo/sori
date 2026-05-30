@@ -422,7 +422,97 @@ caller must retry from scratch (consistent with existing staging policy).
 
 ---
 
-## 7. Open questions (resolve before implementation)
+## 7. Benchmark / Resource Gate
+
+P5 V1 implementation is not complete until it passes this gate.
+Functional tests alone are insufficient.
+
+### 7-A. Metrics
+
+Every benchmark run records all twelve metrics.
+
+| # | Metric | Unit |
+|---|---|---|
+| M-01 | First push wall-clock time | seconds |
+| M-02 | Second push wall-clock time (all chunks skipped) | seconds |
+| M-03 | Partial update push time (changed chunks only) | seconds |
+| M-04 | Failed push retry time (skip already uploaded chunks) | seconds |
+| M-05 | Peak RSS memory during push | MiB |
+| M-06 | Peak temporary disk usage during push | MiB |
+| M-07 | Total bytes read from source during push | bytes |
+| M-08 | Total bytes uploaded to registry during push | bytes |
+| M-09 | Number of blobs/layers created in manifest | count |
+| M-10 | Fetch wall-clock time | seconds |
+| M-11 | Peak disk usage during fetch | MiB |
+| M-12 | Reconstructed tree digest verification time | milliseconds |
+
+### 7-B. Fixture datasets
+
+| Fixture | Description |
+|---|---|
+| `synthetic-1GiB` | Single file, 1 GiB of pseudorandom bytes |
+| `synthetic-10GiB` | 5 files × 2 GiB each |
+| `synthetic-50GiB` | 10 files × 5 GiB each |
+| `genomics-fasta` | Single large FASTA-like file (~3 GiB, compressible line structure) |
+| `genomics-bwa` | BWA index profile: 5 files, 2–5 GiB each, binary |
+| `genomics-star` | STAR index profile: 8–12 binary files, ~40 GiB total |
+| `genomics-mixed` | Large binaries + small metadata (`.dict`, `.fai`, JSON) |
+
+Genomics fixtures are generated synthetically; no real biological data is
+required.  Content should reflect realistic compressibility profiles (FASTA:
+low entropy; binary index: near-incompressible).
+
+### 7-C. Pass criteria
+
+A build that violates any criterion is a blocking failure.
+
+| Criterion | Rule |
+|---|---|
+| **No full-artifact temp file** | A temporary file equal to or larger than the full artifact size must never be created during push (M-06 must remain `O(metadata + small buffers)`, not `O(artifact size)`) |
+| **RSS does not scale with chunk size** | Push peak RSS (M-05) must be independent of configured chunk size |
+| **RSS ceiling** | Push peak RSS (M-05) must stay below 256 MiB at upload concurrency = 2 for all fixtures |
+| **Second push uploads zero chunks** | M-08 for an unchanged artifact must equal zero chunk bytes (only manifest + metadata re-pushed) |
+| **Retry skips uploaded chunks** | After a failed mid-push, retry must upload only chunks not yet present in registry (verified via M-08 and M-09 comparison) |
+| **MaxChunkedLayers fires pre-push** | A dataset that exceeds MaxChunkedLayers must return ErrValidation before any blob is pushed to the registry (M-09 = 0 on failure) |
+| **Reconstructed tree matches source** | Byte-for-byte digest of every file and the whole tree must match source after fetch |
+| **Benchmark results persisted** | Each gate run saves a result artifact (JSON or Markdown table) under `docs/bench/` or as a test output file |
+
+### 7-D. Result format
+
+Each benchmark run produces a result file at
+`docs/bench/YYYY-MM-DD-<fixture>.json` with the following structure:
+
+```json
+{
+  "date": "2026-05-30",
+  "soriVersion": "v0.6.0-dev",
+  "fixture": "synthetic-10GiB",
+  "chunkSizeBytes": 1073741824,
+  "uploadConcurrency": 2,
+  "metrics": {
+    "firstPushSeconds":         42.1,
+    "secondPushSeconds":         1.3,
+    "partialUpdatePushSeconds": 12.7,
+    "retryPushSeconds":         14.2,
+    "pushPeakRSSMiB":           48.3,
+    "pushPeakTempDiskMiB":       0.1,
+    "sourceBytesRead":    10737418240,
+    "uploadedBytes":      10737418240,
+    "blobsCreated":              10,
+    "fetchSeconds":             38.6,
+    "fetchPeakDiskMiB":       9960.0,
+    "treeVerifyMs":             210
+  },
+  "passed": true,
+  "violations": []
+}
+```
+
+`violations` lists the criterion IDs from §7-C that failed, if any.
+
+---
+
+## 8. Open questions (resolve before implementation)
 
 | # | Question | Impact |
 |---|---|---|
@@ -434,7 +524,7 @@ caller must retry from scratch (consistent with existing staging policy).
 
 ---
 
-## 8. V1.1 and future RFC items
+## 9. V1.1 and future RFC items
 
 | Item | Why deferred |
 |---|---|
