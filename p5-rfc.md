@@ -1,6 +1,6 @@
 # P5 RFC — Chunked CAS for Large Dataset Artifacts
 
-**Status**: Draft (v3 — production readiness requirements added)
+**Status**: Draft (v4 — dataset metadata / catalog exposure added)
 **Target**: sori v0.6 (experimental), v0.7+ (stable)
 **Problem driver**: Large genomics reference datasets (STAR index ~40 GB, hg38 reference ~60 GB+)
 
@@ -89,10 +89,11 @@ increases restart cost.
 OCI Image Manifest
   config:   application/vnd.sori.chunked-cas.config.v1+json
   layers:
-    [0]  application/vnd.sori.chunk-index.v1+json    (chunk-index.json)
-    [1]  application/vnd.sori.configblob.v1+json     (original configblob.json, if present)
-    [2]  application/vnd.sori.chunk.v1               (chunk 0)
-    [3]  application/vnd.sori.chunk.v1               (chunk 1)
+    [0]  application/vnd.sori.chunk-index.v1+json          (chunk-index.json)
+    [1]  application/vnd.sori.dataset.metadata.v1+json     (dataset-metadata.json, if provided)
+    [2]  application/vnd.sori.configblob.v1+json           (original configblob.json, if present)
+    [3]  application/vnd.sori.chunk.v1                     (chunk 0)
+    [4]  application/vnd.sori.chunk.v1                     (chunk 1)
     ...
 ```
 
@@ -231,6 +232,10 @@ type PackageOptions struct {
     // Format selects the artifact layout.  Defaults to ArtifactFormatLegacy.
     // ArtifactFormatChunkedCAS is experimental.
     Format ArtifactFormat
+    // DatasetMetadata is the serialised dataset-metadata.json to include as a
+    // dedicated OCI layer (mediaType vnd.sori.dataset.metadata.v1+json).
+    // Optional: fetch works without it; catalog exposure is degraded without it.
+    DatasetMetadata []byte
 }
 ```
 
@@ -277,8 +282,9 @@ MaxChunkedLayers = 900
 
 This accounts for:
 - 1 chunk-index.json layer
+- 1 optional dataset-metadata.json layer
 - 1 optional configblob layer
-- Up to 898 chunk layers
+- Up to 897 chunk layers
 
 If the computed chunk count would exceed `MaxChunkedLayers - 2`, the publish
 call returns `ErrValidation`.
@@ -344,9 +350,10 @@ ChunkedPublish(ctx, srcDir, volName, opts):
        registry.Push(chunkDescriptor{digest, size}, sr)
        append chunk entry to in-progress chunk-index
   4. Serialise chunk-index.json → push as blob
-  5. If configblob provided: push as blob (mediaType vnd.sori.configblob.v1+json)
-  6. Build OCI manifest (config + chunk-index + optional configblob + all chunks)
-  7. Push manifest under volName tag
+  5. If dataset-metadata provided: push as blob (mediaType vnd.sori.dataset.metadata.v1+json)
+  6. If configblob provided: push as blob (mediaType vnd.sori.configblob.v1+json)
+  7. Build OCI manifest (config + chunk-index + optional dataset-metadata + optional configblob + all chunks)
+  8. Push manifest under volName tag
 ```
 
 **Peak memory**: hash buffer (~32 KiB stdlib default) plus chunk-index.json
@@ -377,9 +384,11 @@ ChunkedFetch(ctx, destRoot, src, tag, concurrency):
          write at correct offset
          verify sha256 == chunk entry digest → ErrIntegrity on mismatch
   7. For each file: verify whole-file digest == chunk-index file.digest
-  8. Locate configblob layer by mediaType vnd.sori.configblob.v1+json (if present)
+  8. Locate dataset-metadata layer by mediaType vnd.sori.dataset.metadata.v1+json (if present)
+     fetch and write dataset-metadata.json under destRoot
+  9. Locate configblob layer by mediaType vnd.sori.configblob.v1+json (if present)
      fetch and write configblob.json under destRoot
-  9. Write volume-index.json
+ 10. Write volume-index.json
 ```
 
 No fetch resume in V1: on any error, the staging directory is removed and the
@@ -791,3 +800,214 @@ These are recommendations emitted as log warnings, not hard validation errors.
 | **Chunk-level compression** | Low value for genomics files; separate RFC |
 | **Remote-to-remote copy** | Requires registry-side blob mount; separate RFC |
 | **Encryption at rest** | Out of scope for sori core; adapter-layer concern |
+
+---
+
+## 10. Dataset Metadata / Catalog Exposure
+
+P5 V1 must ship with a stable metadata contract so that data artifacts are
+discoverable by catalog services and pipeline editors — not just fetchable by
+the sori runtime.
+
+---
+
+### §10-1. Design principle: separation of concerns
+
+`chunk-index.json` and `dataset-metadata.json` serve fundamentally different
+audiences and must not be conflated.
+
+| Layer | Audience | Purpose |
+|---|---|---|
+| `chunk-index.json` | sori runtime | Storage reconstruction: file paths, chunk offsets, digests, sizes |
+| `dataset-metadata.json` | Catalog / pipeline editor / human operator | Dataset identity, domain context, tool compatibility |
+
+**`chunk-index.json` must never contain** organism names, reference build
+names, display names, tool compatibility flags, or any domain/UI concern.  It
+is a low-level integrity contract between the push implementation and the fetch
+implementation.
+
+**`dataset-metadata.json`** is the contract between the data producer and the
+catalog/pipeline UX layer.  It is optional at the storage level: a fetch
+succeeds without it.  Without it, catalog exposure is degraded.
+
+---
+
+### §10-2. dataset-metadata.json layer
+
+| Property | Value |
+|---|---|
+| OCI layer mediaType | `application/vnd.sori.dataset.metadata.v1+json` |
+| Required for fetch | No — fetch proceeds without it |
+| Required for catalog exposure | Yes — catalog entry is unavailable or degraded without it |
+| Manifest position | See D-3; located by mediaType, not positional index |
+
+The layer is included in the OCI manifest alongside chunk layers, ensuring it
+is subject to the same OCI GC semantics as the rest of the artifact.  A
+catalog service fetches only this blob from the manifest; it does not need to
+download any chunk blobs.
+
+Supplied via `PackageOptions.DatasetMetadata []byte`.  If the field is nil,
+the layer is omitted from the manifest.
+
+---
+
+### §10-3. dataset-metadata.json schema
+
+Minimum fields for a V1 catalog-capable artifact:
+
+```json
+{
+  "schemaVersion": "sori.dataset.metadata.v1",
+  "kind": "reference_genome",
+  "displayName": "GRCh38 BWA Index (Homo sapiens hg38)",
+  "description": "Pre-built BWA-MEM2 index for GRCh38/hg38. Suitable for short-read whole-genome alignment.",
+  "organism": {
+    "name": "Homo sapiens",
+    "taxonomyId": "9606"
+  },
+  "reference": {
+    "name": "GRCh38",
+    "version": "p14",
+    "aliases": ["hg38", "GCA_000001405.15"]
+  },
+  "dataTypes":            ["index", "reference"],
+  "fileFormats":          ["bwa-index"],
+  "compatibleTools":      ["bwa", "bwa-mem2"],
+  "compatibleNodeTypes":  ["BwaAlignNode", "BwaMem2AlignNode"],
+  "compatibleInputTypes": ["reference_genome", "bwa_index"],
+  "sizeBytes": 42949672960,
+  "source":  "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/",
+  "license": "public-domain",
+  "tags": ["human", "hg38", "bwa", "alignment"],
+  "createdAt":        "2026-05-30T09:00:00Z",
+  "createdBy":        "pipeline-admin@example.org",
+  "validationStatus": "validated",
+  "artifactRef":      "harbor.internal/genomics/references:grch38-bwa-20260530",
+  "manifestDigest":   "sha256:abc123..."
+}
+```
+
+#### Field reference
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `schemaVersion` | string | Yes | Fixed `"sori.dataset.metadata.v1"` |
+| `kind` | string | Yes | Dataset category (e.g. `reference_genome`, `annotation`, `index`) |
+| `displayName` | string | Yes | Human-readable name shown in catalog / pipeline editor |
+| `description` | string | Yes | One-paragraph plain-text description |
+| `organism.name` | string | Recommended | Scientific name (e.g. `Homo sapiens`) |
+| `organism.taxonomyId` | string | Recommended | NCBI Taxonomy ID as a string (e.g. `"9606"`) |
+| `reference.name` | string | Recommended | Reference build name (e.g. `GRCh38`) |
+| `reference.version` | string | Optional | Patch version (e.g. `p14`) |
+| `reference.aliases` | []string | Optional | Common aliases (e.g. `["hg38"]`) |
+| `dataTypes` | []string | Recommended | Semantic type tags (e.g. `["index", "reference"]`) |
+| `fileFormats` | []string | Recommended | File format identifiers (e.g. `["bwa-index", "fasta"]`) |
+| `compatibleTools` | []string | Recommended | Tool names that consume this dataset |
+| `compatibleNodeTypes` | []string | Recommended | Pipeline node type IDs that accept this dataset |
+| `compatibleInputTypes` | []string | Yes (catalog routing) | Input type identifiers used for pipeline editor matching |
+| `sizeBytes` | int64 | Recommended | Total uncompressed size in bytes |
+| `source` | string | Optional | Upstream URL or citation |
+| `license` | string | Recommended | License identifier (e.g. `"public-domain"`, `"CC-BY-4.0"`) |
+| `tags` | []string | Optional | Free-form search/filter tags |
+| `createdAt` | RFC3339 | Recommended | Artifact creation timestamp |
+| `createdBy` | string | Optional | Operator identifier (email or username) |
+| `validationStatus` | string | Optional | `"validated"` \| `"unvalidated"` \| `"deprecated"` |
+| `artifactRef` | string | Recommended | `registry/repo:tag` used to pull this artifact |
+| `manifestDigest` | string | Recommended | sha256 digest of the OCI manifest |
+
+---
+
+### §10-4. Catalog projection contract
+
+The pipeline editor and NodeVault catalog service must not interpret
+`chunk-index.json` directly.  The catalog projection pipeline is:
+
+```
+OCI manifest
+  → locate layer by mediaType vnd.sori.dataset.metadata.v1+json
+  → fetch dataset-metadata.json blob (single small blob; no chunk downloads)
+  → catalog service / indexer maps to CatalogEntry
+  → pipeline editor reads CatalogEntry
+```
+
+#### CatalogEntry structure
+
+```json
+{
+  "id":           "sha256:abc123...",
+  "displayName":  "GRCh38 BWA Index (Homo sapiens hg38)",
+  "shortDescription": "Pre-built BWA-MEM2 index for the GRCh38/hg38 human reference genome.",
+  "tags":         ["human", "hg38", "bwa", "alignment"],
+  "category":     "reference_genome",
+  "sizeBytes":    42949672960,
+  "validated":    true,
+  "artifactRef":  "harbor.internal/genomics/references:grch38-bwa-20260530",
+  "compatibleInputTypes": ["reference_genome", "bwa_index"],
+  "uiHints": {
+    "icon":  "dna",
+    "color": "blue"
+  }
+}
+```
+
+**Degraded mode** (dataset-metadata.json absent): the catalog entry is either
+suppressed or shown with `displayName = artifactRef` and `validated = false`.
+Low-level fetch via `FetchVolume` / `FetchVolumeFromRemote` still succeeds;
+only the catalog UX is degraded.
+
+---
+
+### §10-5. Pipeline editor integration example
+
+**Scenario**: a user wires up a BWA alignment node in the pipeline editor.
+
+1. The node definition declares `inputType: "reference_genome"` and
+   `format: "bwa_index"`.
+2. The pipeline editor queries the catalog:
+   `GET /catalog?compatibleInputTypes=reference_genome,bwa_index`
+3. The catalog returns entries whose `compatibleInputTypes` intersects the
+   query — including *GRCh38 BWA Index (Homo sapiens hg38)*.
+4. The editor presents: **GRCh38 BWA Index** — 40 GB — validated ✓
+5. The user selects the entry.  The editor stores the `artifactRef` in the
+   node's input binding.
+6. At pipeline execution time, the executor calls
+   `Client.FetchVolumeFromRemote(ctx, destRoot, target, tag, opts)` using the
+   stored `artifactRef`.
+
+The executor never reads `chunk-index.json` or `dataset-metadata.json` directly.
+`dataset-metadata.json` is consumed exclusively by the catalog layer; the
+execution layer only calls the sori fetch API.
+
+---
+
+### §10-6. Product readiness criteria
+
+An implementation that passes all §6 functional tests and §7 benchmark gates
+but does not include `dataset-metadata.json` support is a **storage PoC**, not
+a **product-ready V1**.
+
+| Criterion | Gate |
+|---|---|
+| `dataset-metadata.json` schema frozen (schemaVersion, required fields) | **V1 blocker** |
+| Catalog projection contract documented (CatalogEntry shape) | **V1 blocker** |
+| `PackageOptions.DatasetMetadata []byte` accepted and pushed as OCI layer | **V1 blocker** |
+| Fetch writes `dataset-metadata.json` to `destRoot` when layer is present | **V1 blocker** |
+| `schemaVersion` mismatch on catalog read → `ErrValidation` | **V1 blocker** (mirrors §7-9) |
+| Integration test: push with metadata → catalog projection → round-trip verify | **V1 blocker** |
+| `uiHints` controlled vocabulary (icon names, color palette) | Future — V1 field is free-form string |
+| Full ontology validation (NCBI Taxonomy API, OBO lookups) | Future |
+| External metadata registry sync (dbGaP, EGA, BioStudies) | Future |
+| Advanced catalog search ranking / relevance scoring | Future |
+
+---
+
+### §10-7. Non-goals (V1)
+
+| Excluded | Reason |
+|---|---|
+| Full ontology integration (OBO, OLS, NCBI Taxonomy API) | External service dependency; V1 accepts free-form strings only |
+| Advanced search ranking / relevance scoring | Catalog service concern; sori defines the contract, not the search algorithm |
+| Rich icon / asset system | `uiHints.icon` is a free-form string; controlled vocabulary and assets are a front-end concern |
+| External metadata registry sync (dbGaP, EGA, BioStudies) | Cross-registry provenance requires a separate integration layer |
+| Automated metadata validation against biological databases | V1 does not call NCBI or any live API during push |
+| Metadata encryption or redaction | Patient/sample data is out of scope (see §2, §7-8); public reference data requires no redaction |
