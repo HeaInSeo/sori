@@ -168,12 +168,17 @@ func TestIntegration_LocalOCIRoundTrip(t *testing.T) {
 
 // TestIntegration_Harbor tests push/fetch via a Harbor registry.
 // Skips if SORI_HARBOR_URL, SORI_HARBOR_USER, SORI_HARBOR_PASSWORD are not set.
+// Optional: SORI_HARBOR_PROJECT sets the Harbor project (default: "library").
 func TestIntegration_Harbor(t *testing.T) {
 	harborURL := os.Getenv("SORI_HARBOR_URL")
 	harborUser := os.Getenv("SORI_HARBOR_USER")
 	harborPass := os.Getenv("SORI_HARBOR_PASSWORD")
 	if harborURL == "" || harborUser == "" || harborPass == "" {
 		t.Skip("skipping Harbor integration test: SORI_HARBOR_URL, SORI_HARBOR_USER, SORI_HARBOR_PASSWORD not set")
+	}
+	harborProject := os.Getenv("SORI_HARBOR_PROJECT")
+	if harborProject == "" {
+		harborProject = "library"
 	}
 
 	ctx := context.Background()
@@ -201,7 +206,8 @@ func TestIntegration_Harbor(t *testing.T) {
 	}
 
 	// Push local store → Harbor via ORAS Copy.
-	remoteRef := harborURL + "/harbor-test:v1"
+	// Harbor requires a project-scoped repository: <host>/<project>/<repo>:<tag>
+	remoteRef := harborURL + "/" + harborProject + "/harbor-test:v1"
 	remoteTarget, err := registryutil.NewRepository(remoteRef, registryutil.RemoteConfig{
 		Username:    harborUser,
 		Password:    harborPass,
@@ -215,7 +221,7 @@ func TestIntegration_Harbor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open local store: %v", err)
 	}
-	if _, err := oras.Copy(ctx, src, manifestDesc.Digest.String(), remoteTarget, "harbor-test:v1",
+	if _, err := oras.Copy(ctx, src, manifestDesc.Digest.String(), remoteTarget, "v1",
 		oras.DefaultCopyOptions); err != nil {
 		t.Fatalf("ORAS Copy to Harbor: %v", err)
 	}
@@ -225,7 +231,7 @@ func TestIntegration_Harbor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open fetch store: %v", err)
 	}
-	if _, err := oras.Copy(ctx, remoteTarget, "harbor-test:v1", fetchTarget, "harbor-test:v1",
+	if _, err := oras.Copy(ctx, remoteTarget, "v1", fetchTarget, "harbor-test:v1",
 		oras.DefaultCopyOptions); err != nil {
 		t.Fatalf("ORAS Copy from Harbor: %v", err)
 	}
