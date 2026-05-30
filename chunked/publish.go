@@ -385,6 +385,13 @@ func (p *Publisher) pushChunk(
 			return ocispec.Descriptor{}, ChunkEntry{}, ctx.Err()
 		}
 		if attempt > 0 {
+			p.emit(ChunkProgress{
+				Event:      "PushRetried",
+				File:       filePath,
+				ChunkIndex: chunkIdx,
+				Digest:     chunkDigest.String(),
+				Bytes:      chunkSize,
+			})
 			delay := time.Duration(float64(baseDelay) * float64(int(1)<<uint(attempt-1)))
 			if delay > 8*time.Second {
 				delay = 8 * time.Second

@@ -102,8 +102,8 @@ type CompatibleInput struct {
 // ChunkProgress carries per-event progress information emitted during a
 // chunked CAS push or fetch operation (§7-6).
 type ChunkProgress struct {
-	// Event is one of: "ChunkSkipped", "ChunkUploaded", "ChunkFetched",
-	// "FileDone", "ArtifactDone".
+	// Event is one of: "ChunkSkipped", "ChunkUploaded", "PushRetried",
+	// "ChunkFetched", "FileDone", "ArtifactDone".
 	Event      string
 	File       string
 	ChunkIndex int
