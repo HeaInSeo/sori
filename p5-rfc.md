@@ -1,6 +1,6 @@
 # P5 RFC — Chunked CAS for Large Dataset Artifacts
 
-**Status**: Draft (v5 — correctness fixes: self-ref removed, dynamic layer budget, structured compat, .sori/ path)
+**Status**: Draft (v6 — OCI config descriptor terminology, split schemaVersion/artifactFormat, GC retry policy)
 **Target**: sori v0.6 (experimental), v0.7+ (stable)
 **Problem driver**: Large genomics reference datasets (STAR index ~40 GB, hg38 reference ~60 GB+)
 
@@ -102,11 +102,33 @@ primary metadata contract.  `configblob.json` is stored as a dedicated layer
 so the original caller-supplied config is preserved independently of format
 metadata (see D-7).
 
-The OCI `config` blob content is a minimal JSON descriptor:
-`{"schemaVersion": "sori.chunked-cas.v1"}`.  Its mediaType
-(`application/vnd.sori.chunked-cas.config.v1+json`) is the format detection
-signal used by dual-path fetch (D-13).  It must be pushed before the OCI
-manifest (see §7-5).
+The OCI `config` descriptor (`manifest.Config`) is distinct from the entries
+in `manifest.Layers`.  Its **mediaType is the primary format detection signal**
+used by dual-path fetch (D-13):
+
+```
+manifest.Config.MediaType == "application/vnd.oci.image.config.v1+json"
+    → legacy tar.gz path
+
+manifest.Config.MediaType == "application/vnd.sori.chunked-cas.config.v1+json"
+    → chunked CAS path
+```
+
+The config descriptor blob contains a small JSON document for secondary
+validation:
+
+```json
+{
+  "schemaVersion": "sori.chunked-cas.config.v1",
+  "artifactFormat": "sori.chunked-cas.v1"
+}
+```
+
+`schemaVersion` identifies the schema of this config document itself.
+`artifactFormat` identifies the artifact layout version.  Separating the two
+allows the config schema to evolve (e.g. add `producerVersion`, `features`)
+independently of the artifact format version.  The config blob must be pushed
+before the OCI manifest (see §7-5).
 
 Layer ordering mirrors chunk-index.json order for human readability.
 **Fetch correctness must rely on descriptors (digest + mediaType), not
@@ -367,7 +389,8 @@ ChunkedPublish(ctx, srcDir, volName, opts):
   4. Serialise chunk-index.json → push as blob
   5. If dataset-metadata provided: push as blob (mediaType vnd.sori.dataset.metadata.v1+json)
   6. If configblob provided: push as blob (mediaType vnd.sori.configblob.v1+json)
-  7. Push chunked-cas config blob: {"schemaVersion": "sori.chunked-cas.v1"}
+  7. Push OCI config descriptor blob:
+       {"schemaVersion": "sori.chunked-cas.config.v1", "artifactFormat": "sori.chunked-cas.v1"}
   8. Build OCI manifest (config + chunk-index + optional dataset-metadata + optional configblob + all chunks)
   9. Push manifest → assign tag
 ```
@@ -625,15 +648,22 @@ is ever observable at a named tag.
 1. Push all chunk blobs (content-addressed; safe to push in any order).
 2. Push chunk-index.json blob.
 3. Push dataset-metadata blob (if present).
-4. Push configblob layer blob (if present).
-5. Push chunked-cas config blob (`{"schemaVersion": "sori.chunked-cas.v1"}`).
+4. Push original configblob blob as OCI layer (if present).
+5. Push OCI config descriptor blob:
+   `{"schemaVersion": "sori.chunked-cas.config.v1", "artifactFormat": "sori.chunked-cas.v1"}`.
 6. Push OCI manifest → assign tag.
 
 **Invariant**: a tag is only created or updated at step 6.  Before that point,
-individual blobs are present in the registry CAS but are not reachable from
-any manifest.  A registry GC sweep between steps may reclaim unreferenced
-blobs; this is acceptable because the push is not yet committed.  If the push
-fails at any step before step 6, no tag points to an incomplete manifest.
+individual blobs are present in the registry CAS but not reachable from any
+manifest.  If the push fails at any step before step 6, no tag points to an
+incomplete manifest.
+
+**GC window**: between steps 1–5 and step 6, pushed blobs are unreferenced and
+theoretically eligible for registry GC.  In practice this window is seconds,
+and most registries apply a grace period before collecting unreferenced blobs.
+If the manifest push (step 6) fails because a referenced blob was reclaimed by
+GC, the client must treat it as a transient publish failure and retry from the
+dedup-aware chunk push flow (steps 1–5 will skip blobs already present).
 
 **No rollback mechanism**: sori does not delete blobs on push failure.
 Unreferenced blobs left by a failed push are GC'd by the registry operator.
