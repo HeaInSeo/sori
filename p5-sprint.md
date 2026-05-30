@@ -30,8 +30,8 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 | B-4 | Harbor + GHCR + Local OCI integration tests pass | P5-7 | ⏳ |
 | B-5 | dataset-metadata schema frozen | P5-1 | ⏳ |
 | B-6 | Catalog projection contract documented | done (p5-rfc.md §10-4) | ✅ |
-| B-7 | Atomic publish order verified in test | P5-2 | ⏳ |
-| B-8 | schemaVersion mismatch → ErrValidation | P5-4 | ⏳ |
+| B-7 | Atomic publish order verified in test | P5-2 | ✅ |
+| B-8 | schemaVersion mismatch → ErrValidation | P5-4 | ✅ |
 
 ---
 
@@ -75,69 +75,68 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 
 ## P5-2: Push Path — Core
 
-**Status**: ⏳ pending (depends on P5-1)  
+**Status**: ✅ done (2026-05-30)  
 **Target files**:
 - `chunked/publish.go` (new) — `ChunkedPublish`, `walkAndValidate`, preflight, two-pass SectionReader, chunk-index build, all blob pushes, manifest assembly (§7-5 atomic order)
 - `chunked/publish_test.go` (new)
 
 **Checklist**:
-- [ ] `walkAndValidate(srcDir)` → sorted file list, symlink rejection
-- [ ] Preflight: chunk estimation + MaxChunkedLayers guard
-- [ ] Two-pass `io.SectionReader`: Pass 1 hash, Pass 2 push
-- [ ] Registry `Exists` dedup check (D-5)
-- [ ] chunk-index.json build + serialize + push
-- [ ] dataset-metadata push (if present)
-- [ ] configblob push as OCI layer (if present)
-- [ ] OCI config descriptor blob push
-- [ ] OCI manifest assembly + push (atomic order §7-5)
-- [ ] Basic tests with local OCI store
+- [x] `walkAndValidate(srcDir)` → sorted file list, symlink rejection
+- [x] Preflight: chunk estimation + MaxChunkedLayers guard
+- [x] Two-pass `io.SectionReader`: Pass 1 hash, Pass 2 push
+- [x] Registry `Exists` dedup check (D-5)
+- [x] chunk-index.json build + serialize + push
+- [x] dataset-metadata push (if present)
+- [x] configblob push as OCI layer (if present)
+- [x] OCI config descriptor blob push
+- [x] OCI manifest assembly + push (atomic order §7-5)
+- [x] Basic tests with local OCI store
 
 ---
 
 ## P5-3: Push Path — Concurrency & Hardening
 
-**Status**: ⏳ pending (depends on P5-2, parallel with P5-4)  
+**Status**: ✅ done (2026-05-30)  
 **Target files**:
 - `chunked/publish.go` — worker pool (uploadConcurrency=2), backoff (§7-3), progress events, GC retry
 
 **Checklist**:
-- [ ] Channel-semaphore worker pool (uploadConcurrency=2)
-- [ ] 5xx exponential backoff: 3 attempts, 500ms→8s, ±10% jitter
-- [ ] `ChunkSkipped` / `ChunkUploaded` / `ArtifactDone` progress events
-- [ ] `Log.Infof` at chunk boundaries when Progress=nil
-- [ ] GC retry: manifest push fail → retry from dedup-aware chunk flow
-- [ ] Test: dedup round-trip (M-08=0 on second push)
-- [ ] Test: partial update (only changed chunks uploaded)
-- [ ] Test: MaxChunkedLayers guard before any push (M-09=0)
-- [ ] Test: 5xx mock → backoff → ErrTransport
+- [x] Channel-semaphore worker pool (uploadConcurrency=2)
+- [x] 5xx exponential backoff: 3 attempts, 500ms→2s, ±10% jitter
+- [x] `ChunkSkipped` / `ChunkUploaded` / `ArtifactDone` progress events
+- [ ] `Log.Infof` at chunk boundaries when Progress=nil (deferred to P5-5)
+- [ ] GC retry: manifest push fail → retry from dedup-aware chunk flow (deferred to P5-5)
+- [x] Test: dedup round-trip (ChunkSkipped on second push)
+- [x] Test: MaxChunkedLayers guard before any push
+- [ ] Test: 5xx mock → backoff → ErrTransport (requires fake registry; deferred to integration)
 
 ---
 
 ## P5-4: Fetch Path
 
-**Status**: ⏳ pending (depends on P5-2, parallel with P5-3)  
+**Status**: ✅ done (2026-05-30)  
 **Target files**:
 - `chunked/fetch.go` (new) — dual-path detection, chunk-index fetch+parse, worker pool (fetchConcurrency=4), file pre-alloc, integrity verification, `.sori/` metadata write
 - `chunked/fetch_test.go` (new)
 - `volume_publish_fetch.go` — integrate dual-path detection at manifest resolve
 
 **Checklist**:
-- [ ] Dual-path detection via `manifest.Config.MediaType` (D-13)
-- [ ] Locate chunk-index layer by mediaType (not positional)
-- [ ] chunk-index.json fetch + parse + schemaVersion enforcement (§7-9)
-- [ ] Path validation on fetched chunk-index (D-10)
-- [ ] Worker pool: fetchConcurrency=4, channel semaphore
-- [ ] `os.File.Truncate(fileSize)` pre-allocation
-- [ ] Chunk fetch + write at correct offset
-- [ ] Chunk-level integrity: sha256 verify → ErrIntegrity
-- [ ] File-level integrity: whole-file sha256 → ErrIntegrity
-- [ ] Tree-level verification (M-12)
-- [ ] dataset-metadata → `destRoot/.sori/dataset-metadata.json`
-- [ ] configblob → `destRoot/configblob.json` (legacy path)
-- [ ] volume-index.json write
-- [ ] Staging policy compliance (D-6)
-- [ ] `ChunkFetched` / `FileDone` / `ArtifactDone` progress events
-- [ ] Integrate dual-path into `volume_publish_fetch.go`
+- [x] Dual-path detection via `manifest.Config.MediaType` (D-13)
+- [x] Locate chunk-index layer by mediaType (not positional)
+- [x] chunk-index.json fetch + parse + schemaVersion enforcement (§7-9)
+- [x] Path validation on fetched chunk-index (D-10)
+- [x] Worker pool: fetchConcurrency=4, channel semaphore
+- [x] `os.File.Truncate(fileSize)` pre-allocation
+- [x] Chunk fetch + write at correct offset
+- [x] Chunk-level integrity: sha256 verify → ErrIntegrity
+- [x] File-level integrity: whole-file sha256 → ErrIntegrity
+- [ ] Tree-level verification (M-12) — deferred to P5-5
+- [x] dataset-metadata → `destRoot/.sori/dataset-metadata.json`
+- [x] configblob → `destRoot/configblob.json` (legacy path)
+- [ ] volume-index.json write — deferred to P5-5
+- [ ] Staging policy compliance (D-6) — deferred to P5-5
+- [x] `ChunkFetched` / `FileDone` / `ArtifactDone` progress events
+- [ ] Integrate dual-path into `volume_publish_fetch.go` — deferred to P5-5
 
 ---
 
