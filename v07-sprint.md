@@ -16,7 +16,7 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 | B-1 | M-12 post-fetch tree verification in chunked.Fetch | P7-1 | ✅ |
 | B-2 | PackageVolumeToStore dispatches to chunked.Publish on ArtifactFormatChunkedCAS | P7-2 | ✅ |
 | B-3 | FetchVolSeq / FetchVolParallel auto-detect chunked-cas manifests | P7-2 | ✅ |
-| B-4 | ArtifactFormatChunkedCAS not marked experimental in comments | P7-3 | ⏳ |
+| B-4 | ArtifactFormatChunkedCAS not marked experimental in comments | P7-3 | ✅ |
 | B-5 | ECR MaxLayers empirical (OQ-1) | deferred | ⏳ AWS creds required |
 
 **Optional (not blocking)**:
@@ -113,20 +113,20 @@ Chunked + atomic overwrite is a future sprint item.
 
 ## P7-3: API Stabilization
 
-**Status**: ⏳ pending  
+**Status**: ✅ done (2026-05-30)  
 **Target files**:
 - `options.go`
 - `chunked/validate.go`, `chunked/types.go`
 - `p5-rfc.md`
 
 **Checklist**:
-- [ ] `options.go`: `ArtifactFormatChunkedCAS` — remove "is experimental"
-- [ ] `chunked/publish.go`: `PublishOptions.ChunkSize` doc — "zero defaults to DefaultChunkSize (1 GiB)"
-- [ ] `chunked/fetch.go`: `FetchOptions.VerifyTree` doc (carried from P7-1)
-- [ ] `go vet ./...` clean
-- [ ] `staticcheck ./...` clean (or document known suppressions)
-- [ ] `go test ./...` green
-- [ ] `p5-rfc.md` status line: `Draft (v6 ...)` → `Final (v6)`
+- [x] `options.go`: `ArtifactFormatChunkedCAS` — remove "is experimental"
+- [x] `chunked/publish.go`: `PublishOptions.ChunkSize` doc — "zero defaults to DefaultChunkSize (1 GiB)"
+- [x] `chunked/fetch.go`: `FetchOptions.VerifyTree` doc (carried from P7-1)
+- [x] `go vet ./...` clean
+- [x] `staticcheck ./...` clean (or document known suppressions)
+- [x] `go test ./...` green
+- [x] `p5-rfc.md` status line: `Draft (v6 ...)` → `Final (v6)`
 - [ ] `git tag v0.7.0-stable` after all blockers closed
 
 ---

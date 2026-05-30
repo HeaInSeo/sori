@@ -1,6 +1,6 @@
 # P5 RFC — Chunked CAS for Large Dataset Artifacts
 
-**Status**: Draft (v6 — OCI config descriptor terminology, split schemaVersion/artifactFormat, GC retry policy)
+**Status**: Final (v6 — OCI config descriptor terminology, split schemaVersion/artifactFormat, GC retry policy)
 **Target**: sori v0.6 (experimental), v0.7+ (stable)
 **Problem driver**: Large genomics reference datasets (STAR index ~40 GB, hg38 reference ~60 GB+)
 

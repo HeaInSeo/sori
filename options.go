@@ -12,8 +12,7 @@ const (
 	ArtifactFormatLegacy ArtifactFormat = iota
 
 	// ArtifactFormatChunkedCAS packages files as fixed-size raw chunks with a
-	// chunk-index.json manifest.  Experimental: only clients that include the
-	// chunked CAS fetch code can fetch these artifacts.
+	// chunk-index.json manifest.  Fetch requires a sori client at v0.7.0 or later.
 	ArtifactFormatChunkedCAS
 )
 
@@ -24,7 +23,6 @@ type PackageOptions struct {
 	ConfigBlob        []byte
 	RequireConfigBlob bool
 	// Format selects the artifact layout.  Defaults to ArtifactFormatLegacy.
-	// ArtifactFormatChunkedCAS is experimental.
 	Format ArtifactFormat
 	// DatasetMetadata is the serialised dataset-metadata.json to include as a
 	// dedicated OCI layer (mediaType application/vnd.sori.dataset.metadata.v1+json).

@@ -28,7 +28,7 @@ const uploadConcurrency = 2
 // PublishOptions controls a chunked CAS publish operation.
 type PublishOptions struct {
 	// ChunkSize is the nominal size of each chunk in bytes.
-	// Must be in [MinChunkSize, MaxChunkSize].  Defaults to DefaultChunkSize.
+	// Must be in [MinChunkSize, MaxChunkSize].  Zero defaults to DefaultChunkSize (1 GiB).
 	ChunkSize int64
 
 	// DatasetMetadata is the serialised dataset-metadata.json blob.
