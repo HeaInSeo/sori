@@ -127,7 +127,7 @@ Chunked + atomic overwrite is a future sprint item.
 - [x] `staticcheck ./...` clean (or document known suppressions)
 - [x] `go test ./...` green
 - [x] `p5-rfc.md` status line: `Draft (v6 ...)` → `Final (v6)`
-- [ ] `git tag v0.7.0-stable` after all blockers closed
+- [x] `git tag v0.7.0-stable` after all blockers closed
 
 ---
 
