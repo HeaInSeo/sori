@@ -90,6 +90,112 @@ func TestLoadConfig_NotFoundTypedError(t *testing.T) {
 	}
 }
 
-// TODO 여기서 테스트 몇가지 더 진행해야 한다.
-// TODO configblob.json 에 대해서도 처리 해줘야 한다. 볼륨 만들어줘야 하는 폴더에 있어야 한다. 그래야 oci 에 저장할 수 있음.
-// TODO 파일 읽기 다양하게 하는데 표준정해 놓고, 가장 좋은 것을 선택하자. 일단 여기서 부터 시작하자.
+// writeTestConfig writes a Config as JSON to a temp file and returns the path.
+func writeTestConfig(t *testing.T, cfg Config) string {
+	t.Helper()
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "sori.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return p
+}
+
+func baseTestConfig(localPath string, remotes ...RemoteStore) Config {
+	return Config{
+		Local:   LocalStore{Type: "oci", Path: localPath},
+		Remotes: remotes,
+	}
+}
+
+func TestLoadConfig_EnvVarSubstitution_Password(t *testing.T) {
+	t.Setenv("SORI_TEST_PASSWORD", "secret123")
+	tmp := t.TempDir()
+	cfg := baseTestConfig(filepath.Join(tmp, "oci"), RemoteStore{
+		Name: "r1", Registry: "reg.example.com", Repository: "proj/repo",
+		Auth: AuthConfig{Username: "user", Password: "${SORI_TEST_PASSWORD}"},
+	})
+	conf, err := LoadConfig(writeTestConfig(t, cfg))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := conf.Remotes[0].Auth.Password; got != "secret123" {
+		t.Fatalf("Password: got %q want %q", got, "secret123")
+	}
+}
+
+func TestLoadConfig_EnvVarSubstitution_Token(t *testing.T) {
+	t.Setenv("SORI_TEST_TOKEN", "tok-abc")
+	tmp := t.TempDir()
+	cfg := baseTestConfig(filepath.Join(tmp, "oci"), RemoteStore{
+		Name: "r1", Registry: "reg.example.com", Repository: "proj/repo",
+		Auth: AuthConfig{Token: "${SORI_TEST_TOKEN}"},
+	})
+	conf, err := LoadConfig(writeTestConfig(t, cfg))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := conf.Remotes[0].Auth.Token; got != "tok-abc" {
+		t.Fatalf("Token: got %q want %q", got, "tok-abc")
+	}
+}
+
+func TestLoadConfig_EnvVarSubstitution_UndefinedVar(t *testing.T) {
+	// An undefined variable expands to empty string (os.ExpandEnv behaviour).
+	const envKey = "SORI_TEST_UNDEFINED_XYZ_99"
+	os.Unsetenv(envKey)
+	tmp := t.TempDir()
+	cfg := baseTestConfig(filepath.Join(tmp, "oci"), RemoteStore{
+		Name: "r1", Registry: "reg.example.com", Repository: "proj/repo",
+		Auth: AuthConfig{Password: "${" + envKey + "}"},
+	})
+	conf, err := LoadConfig(writeTestConfig(t, cfg))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := conf.Remotes[0].Auth.Password; got != "" {
+		t.Fatalf("Password: got %q want empty string", got)
+	}
+}
+
+func TestLoadConfig_EnvVarSubstitution_LiteralValue(t *testing.T) {
+	// A plain string with no ${...} markers passes through unchanged.
+	tmp := t.TempDir()
+	cfg := baseTestConfig(filepath.Join(tmp, "oci"), RemoteStore{
+		Name: "r1", Registry: "reg.example.com", Repository: "proj/repo",
+		Auth: AuthConfig{Password: "plaintext-pass"},
+	})
+	conf, err := LoadConfig(writeTestConfig(t, cfg))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := conf.Remotes[0].Auth.Password; got != "plaintext-pass" {
+		t.Fatalf("Password: got %q want %q", got, "plaintext-pass")
+	}
+}
+
+func TestLoadConfig_EnvVarSubstitution_MultipleRemotes(t *testing.T) {
+	t.Setenv("SORI_TEST_PASS_A", "passA")
+	t.Setenv("SORI_TEST_PASS_B", "passB")
+	tmp := t.TempDir()
+	cfg := baseTestConfig(filepath.Join(tmp, "oci"),
+		RemoteStore{Name: "r1", Registry: "reg.example.com", Repository: "a/repo",
+			Auth: AuthConfig{Password: "${SORI_TEST_PASS_A}"}},
+		RemoteStore{Name: "r2", Registry: "reg2.example.com", Repository: "b/repo",
+			Auth: AuthConfig{Password: "${SORI_TEST_PASS_B}"}},
+	)
+	conf, err := LoadConfig(writeTestConfig(t, cfg))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := conf.Remotes[0].Auth.Password; got != "passA" {
+		t.Fatalf("Remotes[0].Password: got %q want %q", got, "passA")
+	}
+	if got := conf.Remotes[1].Auth.Password; got != "passB" {
+		t.Fatalf("Remotes[1].Password: got %q want %q", got, "passB")
+	}
+}

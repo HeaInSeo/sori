@@ -101,7 +101,8 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, validationError("LoadConfig", "decode json", err)
 	}
 
-	// 유효성 검사 TODO 지금 이렇게 간단히 하지만, 별도의 메서드를 만들어서 configblob 도 확인해줘야 함.
+	expandCredentials(cfg.Remotes)
+
 	if cfg.Local.Path == "" {
 		return nil, validationError("LoadConfig", "local.path is empty", nil)
 	}
@@ -116,6 +117,16 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// expandCredentials replaces ${ENV_VAR} references in the secret credential
+// fields of every remote store.  Username is not expanded — it is not a secret
+// and callers seldom need to parameterise it.
+func expandCredentials(remotes []RemoteStore) {
+	for i := range remotes {
+		remotes[i].Auth.Password = os.ExpandEnv(remotes[i].Auth.Password)
+		remotes[i].Auth.Token = os.ExpandEnv(remotes[i].Auth.Token)
+	}
 }
 
 // EnsureDir sori-oci.json 에 있는 path 에 실제 디렉토리가 있는지, TODO 수정해줘야 함. 루트 권한의 폴더에 대해서는 에러 리턴함. 오류는 아님.
