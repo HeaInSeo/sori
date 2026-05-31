@@ -17,8 +17,10 @@ GOENV := GOCACHE="$(GOCACHE_DIR)" GOTMPDIR="$(GOTMPDIR)"
 # All packages. Integration tests (those requiring a live registry) are
 # excluded by the -short flag at test time, not by package scope.
 PKGS_ALL      := ./...
-PKGS_CORE     := ./...
-PKGS_SECURITY := ./...
+# internal/bench requires -tags bench and has no regular test files;
+# exclude it from coverage and lint so the combined total is meaningful.
+PKGS_CORE     := $(shell go list ./... | grep -v 'internal/bench')
+PKGS_SECURITY := $(shell go list ./... | grep -v 'internal/bench')
 
 .PHONY: test coverage fmt vet lint lint-depguard lint-fix lint-security \
         vuln vuln-all golangci-lint govulncheck

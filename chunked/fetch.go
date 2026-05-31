@@ -58,6 +58,10 @@ func Fetch(ctx context.Context, storePath, destRoot, volName string, opts FetchO
 func (f *Fetcher) fetch(ctx context.Context, destRoot, volName string) error {
 	const caller = "chunked.Fetch"
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Step 1: resolve tag → manifest descriptor → manifest bytes.
 	manifestDesc, err := f.store.Resolve(ctx, volName)
 	if err != nil {

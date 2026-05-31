@@ -87,6 +87,9 @@ func (p *Publisher) publish(ctx context.Context, srcDir, volName string) (ocispe
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("%s: walk: %w", caller, err)
 	}
+	if len(files) == 0 {
+		return ocispec.Descriptor{}, fmt.Errorf("%w: %s: source directory contains no regular files", ErrValidation, caller)
+	}
 
 	sizes := make([]int64, len(files))
 	for i, f := range files {
