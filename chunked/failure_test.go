@@ -275,7 +275,9 @@ func TestPublish_InvalidStorePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)
 	}
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		t.Fatalf("close temp file: %v", err)
+	}
 
 	_, err = chunked.Publish(ctx, tmpFile.Name(), srcDir, "v1", chunked.PublishOptions{
 		ChunkSize: chunked.MinChunkSize,

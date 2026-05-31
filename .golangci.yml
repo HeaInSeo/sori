@@ -179,6 +179,13 @@ linters:
           - gocyclo
         path: "chunked/fetch\\.go"
 
+      # chunked/publish.go publish is a multi-step pipeline with validation,
+      # chunking, and manifest assembly — complexity is accepted.
+      - linters:
+          - gocognit
+          - gocyclo
+        path: "chunked/publish\\.go"
+
       # packageVolumeToStoreWithOptions handles both legacy and chunked paths
       # in a single function — complexity is accepted.
       - linters:
