@@ -29,7 +29,7 @@ func TestGate_SmallScale(t *testing.T) {
 				StorePath:   storePath,
 				SrcPath:     srcPath,
 				DestPath:    destPath,
-				SoriVersion: "v0.6.0-dev",
+				SoriVersion: "v0.7.0-stable",
 			}, resultDir)
 			if err != nil {
 				t.Fatalf("RunAndGate: %v", err)
@@ -71,7 +71,7 @@ func BenchmarkGate_GenomicsSTAR(b *testing.B) {
 
 func runBenchFixture(b *testing.B, fixture bench.FixtureConfig) {
 	b.Helper()
-	resultDir := "../../../../docs/bench"
+	resultDir := "../../docs/bench"
 
 	storePath, _ := os.MkdirTemp("", "sori-bench-store-*")
 	srcPath, _ := os.MkdirTemp("", "sori-bench-src-*")
@@ -89,7 +89,7 @@ func runBenchFixture(b *testing.B, fixture bench.FixtureConfig) {
 		StorePath:   storePath,
 		SrcPath:     srcPath,
 		DestPath:    destPath,
-		SoriVersion: "v0.6.0-dev",
+		SoriVersion: "v0.7.0-stable",
 	}, resultDir)
 	b.StopTimer()
 

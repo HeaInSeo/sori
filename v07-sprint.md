@@ -23,7 +23,7 @@ Legend: ✅ done · 🔄 in-progress · ⏳ pending · ❌ blocked
 
 | # | Condition | Sprint | Status |
 |---|---|---|---|
-| O-1 | Full-scale 1× benchmark (synthetic-1/10GiB, genomics-bwa, genomics-star) | P7-4 | ⏳ ~60 GiB disk required |
+| O-1 | Full-scale 1× benchmark (synthetic-1/10GiB, genomics-bwa, genomics-star) | P7-4 | ✅ |
 
 ---
 
@@ -133,7 +133,7 @@ Chunked + atomic overwrite is a future sprint item.
 
 ## P7-4: Full-Scale Benchmark Evidence (Hardware-Gated)
 
-**Status**: ⏳ pending — requires ~60 GiB free disk  
+**Status**: ✅ done (2026-05-30, k8s node /home, Xeon E5-2683 v4)  
 **Target files**: `docs/bench/`, `docs/research/results-summary.md`
 
 Run on a machine with sufficient disk (e.g., k8s node or dedicated bench host).
@@ -151,10 +151,10 @@ After each run, copy the JSON result to `docs/bench/` and fill in
 `docs/research/results-summary.md`.
 
 **Checklist**:
-- [ ] synthetic-1GiB passes at 1× scale
-- [ ] synthetic-10GiB passes at 1× scale
-- [ ] genomics-bwa passes at 1× scale
-- [ ] genomics-star passes at 1× scale (~40 GiB fixture)
+- [x] synthetic-1GiB passes at 1× scale
+- [x] synthetic-10GiB passes at 1× scale
+- [x] genomics-bwa passes at 1× scale
+- [x] genomics-star passes at 1× scale (~40 GiB fixture)
 - [ ] `docs/research/results-summary.md` filled with actual M-01~M-12 numbers
 - [ ] Legacy vs chunked CAS comparison column populated
 
