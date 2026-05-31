@@ -184,6 +184,9 @@ func (c *Client) FetchVolumeFromRemote(ctx context.Context, destRoot string, tar
 	if opts.RequireEmptyDestination && opts.AtomicOverwrite {
 		return nil, validationError("FetchVolumeFromRemote", "RequireEmptyDestination and AtomicOverwrite are mutually exclusive", nil)
 	}
+	if opts.RequireEmptyDestination && opts.SkipIfCurrent {
+		return nil, validationError("FetchVolumeFromRemote", "RequireEmptyDestination and SkipIfCurrent are mutually exclusive", nil)
+	}
 
 	if c.httpClient != nil {
 		target.HTTPClient = c.httpClient
@@ -196,6 +199,31 @@ func (c *Client) FetchVolumeFromRemote(ctx context.Context, destRoot string, tar
 	}
 
 	return fetchRemoteWithDualPath(ctx, "FetchVolumeFromRemote", destRoot, src, tag, opts)
+}
+
+// EnsureVolumeFromRemote fetches a packaged dataset from a remote OCI registry
+// into destRoot only if the local content is absent or out of date.
+//
+// It resolves the remote tag to its manifest digest and compares it with the
+// VolumeRef stored in destRoot/volume-index.json. If they match the download
+// is skipped and the returned VolumeIndex has Skipped set to true, reducing a
+// typical k8s init-container re-check to a single network round-trip.
+//
+// If destRoot does not exist or contains a different version, the dataset is
+// fetched via the 3-phase atomic overwrite path so the transition is safe
+// under concurrent reads.
+//
+// This is the recommended call pattern for k8s init containers:
+//
+//	vi, err := client.EnsureVolumeFromRemote(ctx, "/data/refs/hg38-star", target, "hg38-2.7.10a")
+//	if vi != nil && vi.Skipped {
+//	    // already up to date, no download performed
+//	}
+func (c *Client) EnsureVolumeFromRemote(ctx context.Context, destRoot string, target RemoteTarget, tag string) (*VolumeIndex, error) {
+	return c.FetchVolumeFromRemote(ctx, destRoot, target, tag, FetchOptions{
+		AtomicOverwrite: true,
+		SkipIfCurrent:   true,
+	})
 }
 
 // PublishVolume publishes an already-built VolumeIndex through the client path.

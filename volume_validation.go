@@ -121,6 +121,22 @@ func ValidateVolumeDir(volDir string) ([]byte, error) {
 	return raw, nil
 }
 
+// readLocalVolumeIndex reads destRoot/volume-index.json and returns the stored
+// VolumeIndex. Any error (file absent, malformed JSON) is returned as-is; the
+// caller should treat a non-nil error as "no valid local index" and proceed
+// with a full fetch.
+func readLocalVolumeIndex(destRoot string) (*VolumeIndex, error) {
+	data, err := os.ReadFile(filepath.Join(destRoot, VolumeIndexJson))
+	if err != nil {
+		return nil, err
+	}
+	var vi VolumeIndex
+	if err := json.Unmarshal(data, &vi); err != nil {
+		return nil, err
+	}
+	return &vi, nil
+}
+
 func writeVolumeIndex(destRoot string, vi *VolumeIndex) error {
 	if err := os.MkdirAll(destRoot, 0o755); err != nil {
 		return transportError("writeVolumeIndex", fmt.Sprintf("create destination root %s", destRoot), err)

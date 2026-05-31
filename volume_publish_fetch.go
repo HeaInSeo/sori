@@ -890,7 +890,11 @@ func fetchChunkedWithStaging(ctx context.Context, destRoot, storePath, tag, mani
 		return nil, transportError("fetchChunkedWithStaging", "commit staging to destination", err)
 	}
 	cleanup = false
-	return &VolumeIndex{VolumeRef: manifestDigest}, nil
+	vi := &VolumeIndex{VolumeRef: manifestDigest}
+	if err := writeVolumeIndex(destRoot, vi); err != nil {
+		return nil, err
+	}
+	return vi, nil
 }
 
 // fetchVolWithStagingFrom is the ReadOnlyTarget-based staging extraction path,
@@ -1016,6 +1020,16 @@ func fetchRemoteWithDualPath(ctx context.Context, caller, destRoot string, src o
 		}
 		return nil, transportError(caller, fmt.Sprintf("resolve tag %q", tag), err)
 	}
+
+	if opts.SkipIfCurrent {
+		if localVI, readErr := readLocalVolumeIndex(destRoot); readErr == nil &&
+			localVI.VolumeRef != "" &&
+			localVI.VolumeRef == manifestDesc.Digest.String() {
+			localVI.Skipped = true
+			return localVI, nil
+		}
+	}
+
 	if mediaType == chunked.MediaTypeConfig {
 		if opts.AtomicOverwrite {
 			return fetchChunkedFromRemoteWithAtomicOverwrite(ctx, destRoot, src, tag, manifestDesc.Digest.String())
@@ -1106,7 +1120,11 @@ func fetchChunkedWithAtomicOverwrite(ctx context.Context, destRoot, storePath, t
 			Log.Warnf("fetchChunkedWithAtomicOverwrite: failed to remove backup %s: %v", backupPath, cleanupErr)
 		}
 	}
-	return &VolumeIndex{VolumeRef: manifestDigest}, nil
+	vi := &VolumeIndex{VolumeRef: manifestDigest}
+	if err := writeVolumeIndex(destRoot, vi); err != nil {
+		return nil, err
+	}
+	return vi, nil
 }
 
 // fetchVolWithAtomicOverwriteFrom is the ReadOnlyTarget-based 3-phase overwrite

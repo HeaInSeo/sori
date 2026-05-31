@@ -35,6 +35,10 @@ type (
 		DisplayName string      `json:"display_name"`
 		CreatedAt   string      `json:"created_at"`
 		Partitions  []Partition `json:"partitions"`
+		// Skipped is true when FetchVolumeFromRemote detected that destRoot
+		// already holds the requested manifest digest and skipped the download.
+		// This field is runtime-only and is never written to volume-index.json.
+		Skipped bool `json:"-"`
 	}
 	ConfigBlob  map[string]interface{}
 	VolumeEntry struct {

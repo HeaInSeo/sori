@@ -59,6 +59,18 @@ type FetchOptions struct {
 	// AtomicOverwrite and RequireEmptyDestination are mutually exclusive;
 	// setting both returns ErrValidation.
 	AtomicOverwrite bool
+	// SkipIfCurrent, when true, resolves the remote tag to its manifest digest
+	// and compares it with the VolumeRef stored in destRoot/volume-index.json.
+	// If they match the fetch is skipped and the returned VolumeIndex has
+	// Skipped set to true.  If destRoot does not contain a valid
+	// volume-index.json, or VolumeRef is empty, the fetch proceeds normally.
+	//
+	// The typical k8s init-container pattern is:
+	//   FetchOptions{AtomicOverwrite: true, SkipIfCurrent: true}
+	//
+	// SkipIfCurrent and RequireEmptyDestination are mutually exclusive;
+	// setting both returns ErrValidation.
+	SkipIfCurrent bool
 }
 
 // ReferrerOptions controls the experimental referrer helpers.
