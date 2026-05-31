@@ -95,6 +95,49 @@ func TestTarGzDir_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestTarGzDirTo_EmptyPrefix verifies that TarGzDirTo with prefixPath="" produces
+// a valid archive that UntarGzDir can extract without error. This was the root
+// cause of the RunLegacy benchmark failure (root dir entry got name "" which
+// SecureJoinArchivePath rejected).
+func TestTarGzDirTo_EmptyPrefix(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "data.bin"), []byte("bench payload"), 0o644); err != nil {
+		t.Fatalf("write data.bin: %v", err)
+	}
+	sub := filepath.Join(src, "subdir")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "nested.txt"), []byte("nested"), 0o644); err != nil {
+		t.Fatalf("write nested.txt: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := TarGzDirTo(&buf, src, ""); err != nil {
+		t.Fatalf("TarGzDirTo: %v", err)
+	}
+
+	dest := t.TempDir()
+	if err := UntarGzDir(bytes.NewReader(buf.Bytes()), dest); err != nil {
+		t.Fatalf("UntarGzDir: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dest, "data.bin"))
+	if err != nil {
+		t.Fatalf("read data.bin: %v", err)
+	}
+	if string(got) != "bench payload" {
+		t.Fatalf("data.bin content mismatch: got %q", got)
+	}
+	got, err = os.ReadFile(filepath.Join(dest, "subdir", "nested.txt"))
+	if err != nil {
+		t.Fatalf("read nested.txt: %v", err)
+	}
+	if string(got) != "nested" {
+		t.Fatalf("nested.txt content mismatch: got %q", got)
+	}
+}
+
 func TestTarGzDir_Deterministic(t *testing.T) {
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "z.txt"), []byte("z"), 0o644); err != nil {

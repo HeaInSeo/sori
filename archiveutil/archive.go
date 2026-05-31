@@ -57,6 +57,12 @@ func TarGzDirTo(w io.Writer, fsDir, prefixPath string) error {
 		} else {
 			tarName = filepath.ToSlash(filepath.Join(prefixPath, rel))
 		}
+		if tarName == "" {
+			// Root directory with no prefix produces an empty name, which
+			// UntarGzDir correctly rejects. Skip it — dest is created by
+			// the caller.
+			continue
+		}
 
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
