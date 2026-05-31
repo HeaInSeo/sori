@@ -128,7 +128,6 @@ func (f *Fetcher) fetch(ctx context.Context, destRoot, volName string) error {
 	sem := make(chan struct{}, fetchConcurrency)
 
 	for _, idxFile := range idx.Files {
-		idxFile := idxFile // capture loop variable
 		sem <- struct{}{}
 		g.Go(func() error {
 			defer func() { <-sem }()
@@ -201,7 +200,7 @@ func VerifyDestTree(destRoot string, files []ChunkIndexFile) (durationMs int64, 
 		}
 		h := digest.Canonical.Hash()
 		_, copyErr := io.Copy(h, f)
-		f.Close()
+		_ = f.Close()
 		if copyErr != nil {
 			return 0, fmt.Errorf("chunked.VerifyDestTree: hash %s: %w", files[i].Path, copyErr)
 		}
@@ -232,7 +231,7 @@ func (f *Fetcher) reconstructFile(ctx context.Context, destRoot string, idxFile 
 	}
 	if idxFile.Size > 0 {
 		if err := file.Truncate(idxFile.Size); err != nil {
-			file.Close()
+			_ = file.Close()
 			return fmt.Errorf("%s: truncate file %s: %w", caller, idxFile.Path, err)
 		}
 	}
@@ -247,27 +246,27 @@ func (f *Fetcher) reconstructFile(ctx context.Context, destRoot string, idxFile 
 
 		rc, err := f.store.Fetch(ctx, chunkDesc)
 		if err != nil {
-			file.Close()
+			_ = file.Close()
 			return fmt.Errorf("%s: fetch chunk %d of %s: %w", caller, i, idxFile.Path, err)
 		}
 		data, err := io.ReadAll(rc)
-		rc.Close()
+		_ = rc.Close()
 		if err != nil {
-			file.Close()
+			_ = file.Close()
 			return fmt.Errorf("%s: read chunk %d of %s: %w", caller, i, idxFile.Path, err)
 		}
 
 		// Verify chunk integrity.
 		got := digest.FromBytes(data)
 		if got != digest.Digest(chunk.Digest) {
-			file.Close()
+			_ = file.Close()
 			return fmt.Errorf("%s: chunk %d of %s: digest mismatch got %s want %s: %w",
 				caller, i, idxFile.Path, got, chunk.Digest, ErrIntegrity)
 		}
 
 		// Write at correct offset.
 		if _, err := file.WriteAt(data, chunk.Offset); err != nil {
-			file.Close()
+			_ = file.Close()
 			return fmt.Errorf("%s: write chunk %d of %s at offset %d: %w",
 				caller, i, idxFile.Path, chunk.Offset, err)
 		}
@@ -293,10 +292,12 @@ func (f *Fetcher) reconstructFile(ctx context.Context, destRoot string, idxFile 
 	}
 	h := digest.Canonical.Hash()
 	if _, err := io.Copy(h, rf); err != nil {
-		rf.Close()
+		_ = rf.Close()
 		return fmt.Errorf("%s: hash file %s: %w", caller, idxFile.Path, err)
 	}
-	rf.Close()
+	if err := rf.Close(); err != nil {
+		return fmt.Errorf("%s: close verification file %s: %w", caller, idxFile.Path, err)
+	}
 
 	gotFileDigest := digest.NewDigest(digest.Canonical, h)
 	if gotFileDigest.String() != idxFile.Digest {

@@ -147,7 +147,9 @@ func TestLoadConfig_EnvVarSubstitution_Token(t *testing.T) {
 func TestLoadConfig_EnvVarSubstitution_UndefinedVar(t *testing.T) {
 	// An undefined variable expands to empty string (os.ExpandEnv behaviour).
 	const envKey = "SORI_TEST_UNDEFINED_XYZ_99"
-	os.Unsetenv(envKey)
+	if err := os.Unsetenv(envKey); err != nil {
+		t.Fatalf("Unsetenv: %v", err)
+	}
 	tmp := t.TempDir()
 	cfg := baseTestConfig(filepath.Join(tmp, "oci"), RemoteStore{
 		Name: "r1", Registry: "reg.example.com", Repository: "proj/repo",

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/HeaInSeo/sori/chunked"
@@ -122,11 +123,14 @@ func TestFetch_ProgressEvents(t *testing.T) {
 		t.Fatalf("Publish: %v", err)
 	}
 
+	var mu sync.Mutex
 	var events []chunked.ChunkProgress
 	destDir := t.TempDir()
 	err = chunked.Fetch(ctx, storePath, destDir, "progress:v1", chunked.FetchOptions{
 		Progress: func(cp chunked.ChunkProgress) {
+			mu.Lock()
 			events = append(events, cp)
+			mu.Unlock()
 		},
 	})
 	if err != nil {

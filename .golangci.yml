@@ -172,6 +172,20 @@ linters:
           - gocyclo
         path: "volume_publish_fetch\\.go"
 
+      # chunked/fetch.go reconstructFile and fetch are inherently complex IO
+      # state machines with multi-step integrity verification.
+      - linters:
+          - gocognit
+          - gocyclo
+        path: "chunked/fetch\\.go"
+
+      # packageVolumeToStoreWithOptions handles both legacy and chunked paths
+      # in a single function — complexity is accepted.
+      - linters:
+          - gocognit
+          - gocyclo
+        path: "volume-index\\.go"
+
       # catalogutil has its own inline writeFileAtomic copy — dupl is expected.
       - linters:
           - dupl

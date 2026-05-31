@@ -214,7 +214,10 @@ func packageVolumeToStoreWithOptions(ctx context.Context, localStorePath string,
 // packageVolumeChunked handles the ArtifactFormatChunkedCAS dispatch path.
 // Unlike the legacy path it does NOT call ValidateVolumeDir, so srcDir is never
 // modified as a side-effect of packaging.
-func packageVolumeChunked(ctx context.Context, storePath string, req PackageRequest, opts PackageOptions, configBlob []byte, now func() time.Time) (*PackageResult, error) {
+func packageVolumeChunked(
+	ctx context.Context, storePath string, req PackageRequest,
+	opts PackageOptions, configBlob []byte, now func() time.Time,
+) (*PackageResult, error) {
 	publishOpts := chunked.PublishOptions{
 		ConfigBlob:      configBlob,
 		DatasetMetadata: opts.DatasetMetadata,

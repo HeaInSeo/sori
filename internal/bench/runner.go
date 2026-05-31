@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"hash"
 	"io"
 	"io/fs"
 	"math/rand"
@@ -273,7 +272,7 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	var h hash.Hash = sha256.New()
+	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}

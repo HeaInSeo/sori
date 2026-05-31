@@ -127,7 +127,6 @@ func (p *Publisher) publish(ctx context.Context, srcDir, volName string) (ocispe
 	sem := make(chan struct{}, uploadConcurrency)
 
 	for i, sf := range files {
-		i, sf := i, sf // capture loop vars
 		sem <- struct{}{}
 		g.Go(func() error {
 			defer func() { <-sem }()

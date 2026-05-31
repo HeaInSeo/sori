@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -316,12 +317,15 @@ func TestPublish_WorkerPoolConcurrency(t *testing.T) {
 	})
 
 	ctx := context.Background()
+	var mu sync.Mutex
 	var uploadCount int
 	_, err := chunked.Publish(ctx, storePath, srcDir, "pool:v1", chunked.PublishOptions{
 		ChunkSize: chunked.MinChunkSize,
 		Progress: func(cp chunked.ChunkProgress) {
 			if cp.Event == "ChunkUploaded" {
+				mu.Lock()
 				uploadCount++
+				mu.Unlock()
 			}
 		},
 	})
