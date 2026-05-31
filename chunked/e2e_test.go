@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	digest "github.com/opencontainers/go-digest"
@@ -41,9 +42,12 @@ func TestE2E_TC03_PartialChangePush(t *testing.T) {
 		t.Fatalf("update file: %v", err)
 	}
 
+	var mu sync.Mutex
 	var uploaded, skipped int
 	uploadedFiles := make(map[string]int)
 	opts.Progress = func(cp chunked.ChunkProgress) {
+		mu.Lock()
+		defer mu.Unlock()
 		switch cp.Event {
 		case "ChunkUploaded":
 			uploaded++
