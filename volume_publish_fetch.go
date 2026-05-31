@@ -844,6 +844,7 @@ func uniqueBackupPath(parent, prefix string) (string, error) {
 
 // fetchVolWithStaging extracts layers to a temporary staging directory and
 // atomically renames it to destRoot only on full success.
+// Dual-path (D-13): detects chunked CAS vs legacy from Config.MediaType.
 //
 // Precondition: destRoot must not exist (call ensureDestinationAbsent first).
 func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
@@ -851,7 +852,45 @@ func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concur
 	if err != nil {
 		return nil, transportError("fetchVolWithStaging", "open OCI store", err)
 	}
+	manifestDesc, mediaType, err := detectManifestMediaType(ctx, src, tag)
+	if err != nil {
+		if errors.Is(err, errdef.ErrNotFound) {
+			return nil, notFoundError("fetchVolWithStaging", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		return nil, transportError("fetchVolWithStaging", fmt.Sprintf("resolve tag %q", tag), err)
+	}
+	if mediaType == chunked.MediaTypeConfig {
+		return fetchChunkedWithStaging(ctx, destRoot, repo, tag, manifestDesc.Digest.String())
+	}
 	return fetchVolWithStagingFrom(ctx, destRoot, src, tag, concurrency)
+}
+
+// fetchChunkedWithStaging extracts a chunked CAS artifact to a staging sibling
+// of destRoot and renames it to destRoot on success.
+func fetchChunkedWithStaging(ctx context.Context, destRoot, storePath, tag, manifestDigest string) (*VolumeIndex, error) {
+	parent := filepath.Dir(destRoot)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return nil, transportError("fetchChunkedWithStaging", "create parent directory", err)
+	}
+	base := filepath.Base(destRoot)
+	stagingDir, err := os.MkdirTemp(parent, ".staging-"+base+"-*")
+	if err != nil {
+		return nil, transportError("fetchChunkedWithStaging", "create staging directory", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			os.RemoveAll(stagingDir)
+		}
+	}()
+	if err := chunked.Fetch(ctx, storePath, stagingDir, tag, chunked.FetchOptions{}); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(stagingDir, destRoot); err != nil {
+		return nil, transportError("fetchChunkedWithStaging", "commit staging to destination", err)
+	}
+	cleanup = false
+	return &VolumeIndex{VolumeRef: manifestDigest}, nil
 }
 
 // fetchVolWithStagingFrom is the ReadOnlyTarget-based staging extraction path,
@@ -898,12 +937,98 @@ func fetchVolWithStagingFrom(ctx context.Context, destRoot string, src oras.Read
 
 // fetchVolWithAtomicOverwrite implements the 3-phase overwrite path for a
 // local OCI store. See fetchVolWithAtomicOverwriteFrom for the full algorithm.
+// Dual-path (D-13): detects chunked CAS vs legacy from Config.MediaType.
 func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
 	src, err := oci.New(repo)
 	if err != nil {
 		return nil, transportError("fetchVolWithAtomicOverwrite", "open OCI store", err)
 	}
+	manifestDesc, mediaType, err := detectManifestMediaType(ctx, src, tag)
+	if err != nil {
+		if errors.Is(err, errdef.ErrNotFound) {
+			return nil, notFoundError("fetchVolWithAtomicOverwrite", fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		return nil, transportError("fetchVolWithAtomicOverwrite", fmt.Sprintf("resolve tag %q", tag), err)
+	}
+	if mediaType == chunked.MediaTypeConfig {
+		return fetchChunkedWithAtomicOverwrite(ctx, destRoot, repo, tag, manifestDesc.Digest.String())
+	}
 	return fetchVolWithAtomicOverwriteFrom(ctx, destRoot, src, tag, concurrency)
+}
+
+// fetchChunkedWithAtomicOverwrite implements the 3-phase overwrite path for a
+// chunked CAS artifact stored in a local OCI store.
+//
+//	Phase 1 — extract to a staging sibling of destRoot via chunked.Fetch
+//	Phase 2 — rename existing destRoot to a backup sibling (if present)
+//	Phase 3 — rename staging to destRoot (atomic commit)
+//	Cleanup — remove backup (best-effort; warning logged on failure)
+func fetchChunkedWithAtomicOverwrite(ctx context.Context, destRoot, storePath, tag, manifestDigest string) (*VolumeIndex, error) {
+	parent := filepath.Dir(destRoot)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return nil, transportError("fetchChunkedWithAtomicOverwrite", "create parent directory", err)
+	}
+	base := filepath.Base(destRoot)
+	stagingDir, err := os.MkdirTemp(parent, ".staging-"+base+"-*")
+	if err != nil {
+		return nil, transportError("fetchChunkedWithAtomicOverwrite", "create staging directory", err)
+	}
+	cleanupStaging := true
+	defer func() {
+		if cleanupStaging {
+			os.RemoveAll(stagingDir)
+		}
+	}()
+
+	// Phase 1: extract to staging.
+	if err := chunked.Fetch(ctx, storePath, stagingDir, tag, chunked.FetchOptions{}); err != nil {
+		return nil, err
+	}
+
+	// Phase 2: back up existing destRoot if present.
+	var backupPath string
+	if _, statErr := os.Stat(destRoot); statErr == nil {
+		bp, err := uniqueBackupPath(parent, ".backup-"+base+"-")
+		if err != nil {
+			return nil, transportError("fetchChunkedWithAtomicOverwrite", "reserve backup path", err)
+		}
+		if testHookPhase2RenameErr != nil {
+			return nil, testHookPhase2RenameErr
+		}
+		if err := os.Rename(destRoot, bp); err != nil {
+			return nil, transportError("fetchChunkedWithAtomicOverwrite", "rename destRoot to backup", err)
+		}
+		backupPath = bp
+	}
+
+	// Phase 3: atomic commit — rename staging to destRoot.
+	phase3Err := testHookPhase3RenameErr
+	if phase3Err == nil {
+		phase3Err = os.Rename(stagingDir, destRoot)
+	}
+	if phase3Err != nil {
+		if backupPath != "" {
+			if rbErr := os.Rename(backupPath, destRoot); rbErr != nil {
+				return nil, transportError("fetchChunkedWithAtomicOverwrite",
+					fmt.Sprintf("phase 3 failed and rollback also failed; staging=%s backup=%s", stagingDir, backupPath),
+					errors.Join(phase3Err, rbErr))
+			}
+		}
+		return nil, transportError("fetchChunkedWithAtomicOverwrite", "commit staging to destination", phase3Err)
+	}
+	cleanupStaging = false
+
+	// Cleanup: remove backup (best-effort).
+	if backupPath != "" {
+		cleanupErr := testHookBackupCleanupErr
+		if cleanupErr == nil {
+			cleanupErr = os.RemoveAll(backupPath)
+		}
+		if cleanupErr != nil {
+			Log.Warnf("fetchChunkedWithAtomicOverwrite: failed to remove backup %s: %v", backupPath, cleanupErr)
+		}
+	}
+	return &VolumeIndex{VolumeRef: manifestDigest}, nil
 }
 
 // fetchVolWithAtomicOverwriteFrom is the ReadOnlyTarget-based 3-phase overwrite

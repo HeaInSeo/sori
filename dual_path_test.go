@@ -217,6 +217,79 @@ func TestDualPath_FetchVolSeq_EquivalentToDirectChunkedFetch(t *testing.T) {
 	assertDirContentsEqual(t, srcDir, destDirect)
 }
 
+// TestDualPath_RequireEmpty_ChunkedCAS verifies that FetchVolume with
+// RequireEmptyDestination dispatches to the chunked fetch path and reconstructs
+// files byte-identically.
+func TestDualPath_RequireEmpty_ChunkedCAS(t *testing.T) {
+	ctx := context.Background()
+	client, storePath := newChunkedClient(t)
+	srcDir := newChunkedSrcDir(t)
+	destDir := filepath.Join(t.TempDir(), "dest")
+
+	if _, err := client.PackageVolumeWithOptions(ctx, sori.PackageRequest{
+		SourceDir:   srcDir,
+		DisplayName: "RequireEmpty Chunked Test",
+		Tag:         "re:v1",
+	}, sori.PackageOptions{Format: sori.ArtifactFormatChunkedCAS}); err != nil {
+		t.Fatalf("PackageVolumeWithOptions: %v", err)
+	}
+
+	vi, err := client.FetchVolume(ctx, destDir, storePath, "re:v1", sori.FetchOptions{
+		RequireEmptyDestination: true,
+		Concurrency:             1,
+	})
+	if err != nil {
+		t.Fatalf("FetchVolume (RequireEmptyDestination, chunked): %v", err)
+	}
+	if vi.VolumeRef == "" {
+		t.Fatal("VolumeRef must not be empty")
+	}
+	assertDirContentsEqual(t, srcDir, destDir)
+}
+
+// TestDualPath_AtomicOverwrite_ChunkedCAS verifies that FetchVolume with
+// AtomicOverwrite dispatches to the chunked fetch path, and that a second fetch
+// with a different version replaces destRoot atomically.
+func TestDualPath_AtomicOverwrite_ChunkedCAS(t *testing.T) {
+	ctx := context.Background()
+	client, storePath := newChunkedClient(t)
+	srcV1 := newChunkedSrcDir(t)
+	destDir := filepath.Join(t.TempDir(), "dest")
+
+	// Build v2 source with a different file to detect overwrite.
+	srcV2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcV2, "updated.txt"), []byte("v2 content"), 0o644); err != nil {
+		t.Fatalf("write v2 file: %v", err)
+	}
+
+	if _, err := client.PackageVolumeWithOptions(ctx, sori.PackageRequest{
+		SourceDir: srcV1, DisplayName: "AtomicOverwrite Test v1", Tag: "aow:v1",
+	}, sori.PackageOptions{Format: sori.ArtifactFormatChunkedCAS}); err != nil {
+		t.Fatalf("PackageVolumeWithOptions v1: %v", err)
+	}
+	if _, err := client.PackageVolumeWithOptions(ctx, sori.PackageRequest{
+		SourceDir: srcV2, DisplayName: "AtomicOverwrite Test v2", Tag: "aow:v2",
+	}, sori.PackageOptions{Format: sori.ArtifactFormatChunkedCAS}); err != nil {
+		t.Fatalf("PackageVolumeWithOptions v2: %v", err)
+	}
+
+	// First fetch: destDir does not exist yet.
+	if _, err := client.FetchVolume(ctx, destDir, storePath, "aow:v1", sori.FetchOptions{AtomicOverwrite: true}); err != nil {
+		t.Fatalf("FetchVolume v1 (AtomicOverwrite, chunked): %v", err)
+	}
+	assertDirContentsEqual(t, srcV1, destDir)
+
+	// Second fetch: overwrite destDir with v2.
+	vi, err := client.FetchVolume(ctx, destDir, storePath, "aow:v2", sori.FetchOptions{AtomicOverwrite: true})
+	if err != nil {
+		t.Fatalf("FetchVolume v2 (AtomicOverwrite, chunked): %v", err)
+	}
+	if vi.VolumeRef == "" {
+		t.Fatal("VolumeRef must not be empty after overwrite")
+	}
+	assertDirContentsEqual(t, srcV2, destDir)
+}
+
 // TestDualPath_RequireConfigBlob_Chunked verifies that RequireConfigBlob
 // returns ErrValidation when no blob is provided on the chunked path.
 func TestDualPath_RequireConfigBlob_Chunked(t *testing.T) {
