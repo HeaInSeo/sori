@@ -1,6 +1,6 @@
 # sori
 
-OCI 기반 참조 데이터(볼륨) 패키징 및 referrer push 라이브러리.  
+**v0.7.0-stable** — OCI 기반 참조 데이터(볼륨) 패키징 및 referrer push 라이브러리.  
 디렉터리를 OCI 아티팩트로 변환하고, 로컬 OCI 스토어와 원격 레지스트리(Harbor 등) 사이의 push/fetch를 담당한다.
 
 ## 개요
@@ -8,11 +8,12 @@ OCI 기반 참조 데이터(볼륨) 패키징 및 referrer push 라이브러리.
 `sori`는 바이오인포매틱스 파이프라인에서 사용하는 참조 데이터(genome, annotation 등)를  
 OCI 이미지 형식으로 패키징하는 Go 라이브러리다.
 
-- **Core**: OCI volume packaging + push/fetch + artifact metadata
+- **Core (stable)**: OCI volume packaging + push/fetch + artifact metadata + chunked CAS
 - **Experimental**: NodeVault-oriented referrer push (toolspec / toolprofile / security / dataspec)
 
 | 문서 | 내용 |
 |------|------|
+| [docs/research/results-summary.md](docs/research/results-summary.md) | 벤치마크 결과 (v0.7.0-stable 실측값) |
 | [docs/public-api.md](docs/public-api.md) | 공개 API 안정도 분류 |
 | [docs/generalization-sprint-plan.md](docs/generalization-sprint-plan.md) | 범용 라이브러리화 로드맵 |
 | [docs/maturity-sprint-plan.md](docs/maturity-sprint-plan.md) | 성숙화 계획 |
@@ -145,6 +146,44 @@ if err != nil { ... }
 
 단계 `4~6`, `10`은 stable core 흐름이고, `7~9`는 experimental 계층이다.
 
+### Chunked CAS 경로 (v0.7.0-stable)
+
+대용량 데이터셋(STAR index 40 GiB+ 등)에는 chunked CAS 포맷을 사용한다.  
+`PackageOptions.Format`을 `ArtifactFormatChunkedCAS`로 지정하면 파일을 1 GiB 고정 청크로 분할해 OCI 레이어로 저장한다.  
+fetch 측은 manifest의 `Config.MediaType`을 보고 자동으로 chunked 경로로 디스패치되므로 별도 설정이 필요 없다.
+
+```go
+// Chunked CAS push
+pkg, err := client.PackageVolumeWithOptions(ctx, sori.PackageRequest{
+    SourceDir:   "./star-index",
+    DisplayName: "STAR index GRCh38",
+    Tag:         "star:v2.7.10",
+}, sori.PackageOptions{
+    Format: sori.ArtifactFormatChunkedCAS,
+})
+if err != nil { ... }
+
+// Fetch — chunked/legacy 자동 감지
+vi, err := sori.FetchVolSeq(ctx, "./dest", storePath, "star:v2.7.10")
+if err != nil { ... }
+
+// 사후 무결성 검증 (M-12)
+err = chunked.Fetch(ctx, storePath, "./dest", "star:v2.7.10", chunked.FetchOptions{
+    VerifyTree: true, // fetch 완료 후 destRoot 전체 sha256 재검증
+})
+```
+
+**실측 벤치마크** (Xeon E5-2683 v4, 1 GiB 청크, gate violations 없음):
+
+| fixture | size | push | fetch | peak RSS |
+|---|---|---|---|---|
+| synthetic-1GiB | 1 GiB | 11.9 s | 9.3 s | 7.9 MiB |
+| synthetic-10GiB | 10 GiB | 54.8 s | 41.1 s | 10.4 MiB |
+| genomics-bwa | 15 GiB | 75.5 s | 53.8 s | 10.6 MiB |
+| genomics-star | 40 GiB | 194.5 s | 147.7 s | 10.4 MiB |
+
+RSS가 데이터 크기와 무관하게 11 MiB 이하로 유지된다 (스트리밍 청킹). 전체 결과: [`docs/research/results-summary.md`](docs/research/results-summary.md)
+
 ## 설정 파일 (`sori-oci.json`)
 
 ```json
@@ -186,13 +225,23 @@ func (conf *Config) NewClient(opts ...ClientOption) *Client
 ```go
 type Client struct { ... }
 type ClientOption func(*Client)
-type PackageOptions struct { ConfigBlob []byte }
+
+type PackageOptions struct {
+    ConfigBlob        []byte
+    RequireConfigBlob bool
+    Format            ArtifactFormat  // 0 = ArtifactFormatLegacy (default), ArtifactFormatChunkedCAS
+    DatasetMetadata   []byte          // optional; written as .sori/dataset-metadata.json on fetch
+    Progress          chunked.ProgressFunc
+}
+
 type PushOptions struct { Target RemoteTarget }
+
 type FetchOptions struct {
     Concurrency             int
     RequireEmptyDestination bool
     AtomicOverwrite         bool  // 3-phase overwrite: staging → backup → rename
 }
+
 type ReferrerOptions struct { Target RemoteTarget }
 
 func NewClient(opts ...ClientOption) *Client
@@ -499,7 +548,7 @@ func UntarGzDir(gzipStream io.Reader, dest string) error   // tar.gz 해제 (pat
 
 | 계층 | 포함 항목 |
 |------|-----------|
-| **Stable** | `Config.NewClient`, `Client` 기반 package/push/fetch, `BuildArtifactMetadata`, typed error, option 모델 |
+| **Stable** | `Config.NewClient`, `Client` 기반 package/push/fetch, `ArtifactFormatChunkedCAS`, `chunked.Publish` / `chunked.Fetch`, `FetchOptions.VerifyTree`, `BuildArtifactMetadata`, typed error, option 모델 |
 | **Compatibility** | `InitConfig`, `PackageVolume`, `PushLocalToRemote`, `VolumeIndex.PublishVolume` |
 | **Experimental** | `DataSpec`, referrer API (`PushToolSpecReferrer` / `PushToolProfileReferrer` / `PushSecurityReferrer` / `PushDataSpecReferrer`), registration/catalog API |
 
@@ -533,7 +582,8 @@ root 권한이 없는 환경에서는 `TestLoadConfig` / `TestInitConfig`가 자
 
 | 항목 | 현재 상태 | 해결 방향 |
 |------|-----------|-----------|
-| **Streaming tar/push** | Step 1 완료: 레이어를 temp 파일에 기록(메모리 버퍼 제거). Step 2(진정한 스트리밍 push)·Step 3(chunked CAS)는 미설계 | ORAS `Store.Push` streaming 모드 검토 후 구현 |
+| **Streaming tar/push** | Step 1 완료: 레이어를 temp 파일에 기록(메모리 버퍼 제거). Step 2(진정한 스트리밍 push)는 미설계 | ORAS `Store.Push` streaming 모드 검토 후 구현 |
+| ✅ **Chunked CAS** | `ArtifactFormatChunkedCAS` stable 승격 완료 (v0.7.0-stable). 1 GiB 청크, 스트리밍, M-12 tree verify 포함. | — |
 | ✅ **Remote registry fetch** | `Client.FetchVolumeFromRemote` 추가 완료 | — |
 | ✅ **Staging 고도화** | safe fetch(`RequireEmptyDestination`) + 3-phase `AtomicOverwrite` + `validateStagingDir` 모두 완료 | — |
 
