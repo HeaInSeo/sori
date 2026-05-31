@@ -17,10 +17,12 @@ GOENV := GOCACHE="$(GOCACHE_DIR)" GOTMPDIR="$(GOTMPDIR)"
 # All packages. Integration tests (those requiring a live registry) are
 # excluded by the -short flag at test time, not by package scope.
 PKGS_ALL      := ./...
-# internal/bench requires -tags bench and has no regular test files;
-# exclude it from coverage and lint so the combined total is meaningful.
-PKGS_CORE     := $(shell go list ./... | grep -v 'internal/bench')
-PKGS_SECURITY := $(shell go list ./... | grep -v 'internal/bench')
+# Lint and security targets use ./... patterns (golangci-lint requires relative patterns).
+PKGS_CORE     := ./...
+PKGS_SECURITY := ./...
+# Coverage excludes internal/bench: it requires -tags bench and has no
+# regular test files, so its 0% coverage would drag down the combined total.
+PKGS_COVERAGE := $(shell go list ./... | grep -v 'internal/bench')
 
 .PHONY: test coverage fmt vet lint lint-depguard lint-fix lint-security \
         vuln vuln-all golangci-lint govulncheck
@@ -36,7 +38,7 @@ test:
 
 coverage:
 	@mkdir -p "$(REPORT_DIR)" "$(GOCACHE_DIR)" "$(GOTMPDIR)"
-	$(GOENV) go test -short $(PKGS_CORE) -coverprofile="$(REPORT_DIR)/cover.out" -covermode=atomic
+	$(GOENV) go test -short $(PKGS_COVERAGE) -coverprofile="$(REPORT_DIR)/cover.out" -covermode=atomic
 	go tool cover -func="$(REPORT_DIR)/cover.out" | tee "$(REPORT_DIR)/coverage.txt"
 
 # ── Format / Vet ──────────────────────────────────────────────────────────────
