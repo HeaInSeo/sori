@@ -155,8 +155,8 @@ After each run, copy the JSON result to `docs/bench/` and fill in
 - [x] synthetic-10GiB passes at 1× scale
 - [x] genomics-bwa passes at 1× scale
 - [x] genomics-star passes at 1× scale (~40 GiB fixture)
-- [ ] `docs/research/results-summary.md` filled with actual M-01~M-12 numbers
-- [ ] Legacy vs chunked CAS comparison column populated
+- [x] `docs/research/results-summary.md` filled with actual M-01~M-12 numbers
+- [ ] Legacy vs chunked CAS comparison column populated — N/A: RunLegacy fails on all fixtures (UntarGzDir path bug, deferred)
 
 ---
 
