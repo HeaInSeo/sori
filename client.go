@@ -195,13 +195,7 @@ func (c *Client) FetchVolumeFromRemote(ctx context.Context, destRoot string, tar
 		return nil, err
 	}
 
-	if opts.AtomicOverwrite {
-		return fetchVolWithAtomicOverwriteFrom(ctx, destRoot, src, tag, opts.Concurrency)
-	}
-	if err := ensureDestinationAbsent(destRoot); err != nil {
-		return nil, err
-	}
-	return fetchVolWithStagingFrom(ctx, destRoot, src, tag, opts.Concurrency)
+	return fetchRemoteWithDualPath(ctx, "FetchVolumeFromRemote", destRoot, src, tag, opts)
 }
 
 // PublishVolume publishes an already-built VolumeIndex through the client path.

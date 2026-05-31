@@ -1,6 +1,7 @@
 package sori
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/HeaInSeo/sori/chunked"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/content/oci"
@@ -351,4 +353,136 @@ func TestFetchVolumeFromRemote_ValidationErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newChunkedRemoteSrcDir creates a temp directory with a few files for chunked
+// remote fetch tests (package-internal helper).
+func newChunkedRemoteSrcDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string][]byte{
+		"alpha.txt":     []byte("remote chunked content"),
+		"beta.bin":      bytes.Repeat([]byte{0xAB}, 256),
+		"sub/gamma.txt": []byte("nested remote file"),
+	}
+	for rel, data := range files {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(p), err)
+		}
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	return dir
+}
+
+// assertRemoteDirContentsEqual verifies that every file in srcDir appears in
+// destDir with identical content (package-internal helper).
+func assertRemoteDirContentsEqual(t *testing.T, srcDir, destDir string) {
+	t.Helper()
+	if err := filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(srcDir, path)
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("read src %s: %v", rel, err)
+			return nil
+		}
+		dst, err := os.ReadFile(filepath.Join(destDir, rel))
+		if err != nil {
+			t.Errorf("read dest %s: %v", rel, err)
+			return nil
+		}
+		if !bytes.Equal(src, dst) {
+			t.Errorf("content mismatch for %s", rel)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk srcDir: %v", err)
+	}
+}
+
+// TestFetchVolumeFromRemote_ChunkedCAS packages a chunked CAS artifact,
+// serves it via a mock OCI registry, fetches it with FetchVolumeFromRemote
+// (default staging path), and verifies the extracted files are byte-identical.
+func TestFetchVolumeFromRemote_ChunkedCAS(t *testing.T) {
+	ctx := context.Background()
+	storePath := t.TempDir()
+	srcDir := newChunkedRemoteSrcDir(t)
+	destRoot := filepath.Join(t.TempDir(), "dest")
+
+	manifestDesc, err := chunked.Publish(ctx, storePath, srcDir, "chunked.v1", chunked.PublishOptions{
+		ChunkSize: chunked.MinChunkSize,
+	})
+	if err != nil {
+		t.Fatalf("chunked.Publish: %v", err)
+	}
+
+	ts := newMockOCIServer(t, storePath, "testrepo", "chunked.v1")
+	host := ts.Listener.Addr().String()
+
+	client := NewClient(WithLocalStorePath(t.TempDir()))
+	vi, err := client.FetchVolumeFromRemote(ctx, destRoot, RemoteTarget{
+		Registry:   host,
+		Repository: "testrepo",
+		PlainHTTP:  true,
+	}, "chunked.v1", FetchOptions{})
+	if err != nil {
+		t.Fatalf("FetchVolumeFromRemote (chunked): %v", err)
+	}
+	if vi.VolumeRef != manifestDesc.Digest.String() {
+		t.Errorf("VolumeRef=%q want %q", vi.VolumeRef, manifestDesc.Digest.String())
+	}
+	assertRemoteDirContentsEqual(t, srcDir, destRoot)
+}
+
+// TestFetchVolumeFromRemote_ChunkedCAS_AtomicOverwrite packages two versions of
+// a chunked CAS artifact, fetches v1 then overwrites with v2 using
+// AtomicOverwrite, and verifies that destRoot contains the v2 files.
+func TestFetchVolumeFromRemote_ChunkedCAS_AtomicOverwrite(t *testing.T) {
+	ctx := context.Background()
+	storePath := t.TempDir()
+	srcV1 := newChunkedRemoteSrcDir(t)
+
+	srcV2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcV2, "updated.txt"), []byte("v2 remote content"), 0o644); err != nil {
+		t.Fatalf("write v2 file: %v", err)
+	}
+
+	if _, err := chunked.Publish(ctx, storePath, srcV1, "aow.v1", chunked.PublishOptions{ChunkSize: chunked.MinChunkSize}); err != nil {
+		t.Fatalf("chunked.Publish v1: %v", err)
+	}
+	if _, err := chunked.Publish(ctx, storePath, srcV2, "aow.v2", chunked.PublishOptions{ChunkSize: chunked.MinChunkSize}); err != nil {
+		t.Fatalf("chunked.Publish v2: %v", err)
+	}
+
+	destRoot := filepath.Join(t.TempDir(), "dest")
+	client := NewClient(WithLocalStorePath(t.TempDir()))
+
+	tsV1 := newMockOCIServer(t, storePath, "testrepo", "aow.v1")
+	if _, err := client.FetchVolumeFromRemote(ctx, destRoot, RemoteTarget{
+		Registry:   tsV1.Listener.Addr().String(),
+		Repository: "testrepo",
+		PlainHTTP:  true,
+	}, "aow.v1", FetchOptions{}); err != nil {
+		t.Fatalf("FetchVolumeFromRemote v1: %v", err)
+	}
+	assertRemoteDirContentsEqual(t, srcV1, destRoot)
+
+	tsV2 := newMockOCIServer(t, storePath, "testrepo", "aow.v2")
+	vi, err := client.FetchVolumeFromRemote(ctx, destRoot, RemoteTarget{
+		Registry:   tsV2.Listener.Addr().String(),
+		Repository: "testrepo",
+		PlainHTTP:  true,
+	}, "aow.v2", FetchOptions{AtomicOverwrite: true})
+	if err != nil {
+		t.Fatalf("FetchVolumeFromRemote v2 (AtomicOverwrite): %v", err)
+	}
+	if vi.VolumeRef == "" {
+		t.Fatal("VolumeRef must not be empty after overwrite")
+	}
+	assertRemoteDirContentsEqual(t, srcV2, destRoot)
 }

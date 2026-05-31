@@ -66,7 +66,7 @@ func detectManifestMediaType(ctx context.Context, src oras.ReadOnlyTarget, tag s
 	defer rc.Close()
 	var m ocispec.Manifest
 	if err := json.NewDecoder(rc).Decode(&m); err != nil {
-		return ocispec.Descriptor{}, "", err
+		return ocispec.Descriptor{}, "", integrityError("detectManifestMediaType", "decode manifest", err)
 	}
 	return desc, m.Config.MediaType, nil
 }
@@ -954,6 +954,84 @@ func fetchVolWithAtomicOverwrite(ctx context.Context, destRoot, repo, tag string
 		return fetchChunkedWithAtomicOverwrite(ctx, destRoot, repo, tag, manifestDesc.Digest.String())
 	}
 	return fetchVolWithAtomicOverwriteFrom(ctx, destRoot, src, tag, concurrency)
+}
+
+// fetchChunkedFromRemoteWithStaging pulls a chunked CAS artifact from a remote
+// ReadOnlyTarget into a temp local OCI store, then extracts it with staging
+// semantics using fetchChunkedWithStaging.
+func fetchChunkedFromRemoteWithStaging(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag, manifestDigest string) (*VolumeIndex, error) {
+	tmpStore, err := os.MkdirTemp("", ".sori-remote-store-*")
+	if err != nil {
+		return nil, transportError("fetchChunkedFromRemoteWithStaging", "create temp OCI store", err)
+	}
+	defer os.RemoveAll(tmpStore)
+
+	localStore, err := oci.New(tmpStore)
+	if err != nil {
+		return nil, transportError("fetchChunkedFromRemoteWithStaging", "init temp OCI store", err)
+	}
+	if _, err := oras.Copy(ctx, src, tag, localStore, tag, oras.DefaultCopyOptions); err != nil {
+		if registryutil.IsAuthError(err) {
+			return nil, authError("fetchChunkedFromRemoteWithStaging", "pull chunked artifact", err)
+		}
+		return nil, transportError("fetchChunkedFromRemoteWithStaging", "pull chunked artifact", err)
+	}
+	return fetchChunkedWithStaging(ctx, destRoot, tmpStore, tag, manifestDigest)
+}
+
+// fetchChunkedFromRemoteWithAtomicOverwrite pulls a chunked CAS artifact from a
+// remote ReadOnlyTarget into a temp local OCI store, then extracts it with
+// 3-phase overwrite semantics using fetchChunkedWithAtomicOverwrite.
+func fetchChunkedFromRemoteWithAtomicOverwrite(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag, manifestDigest string) (*VolumeIndex, error) {
+	tmpStore, err := os.MkdirTemp("", ".sori-remote-store-*")
+	if err != nil {
+		return nil, transportError("fetchChunkedFromRemoteWithAtomicOverwrite", "create temp OCI store", err)
+	}
+	defer os.RemoveAll(tmpStore)
+
+	localStore, err := oci.New(tmpStore)
+	if err != nil {
+		return nil, transportError("fetchChunkedFromRemoteWithAtomicOverwrite", "init temp OCI store", err)
+	}
+	if _, err := oras.Copy(ctx, src, tag, localStore, tag, oras.DefaultCopyOptions); err != nil {
+		if registryutil.IsAuthError(err) {
+			return nil, authError("fetchChunkedFromRemoteWithAtomicOverwrite", "pull chunked artifact", err)
+		}
+		return nil, transportError("fetchChunkedFromRemoteWithAtomicOverwrite", "pull chunked artifact", err)
+	}
+	return fetchChunkedWithAtomicOverwrite(ctx, destRoot, tmpStore, tag, manifestDigest)
+}
+
+// fetchRemoteWithDualPath detects whether src holds a chunked CAS artifact or a
+// legacy artifact and dispatches to the appropriate staging/overwrite helper.
+// It is used exclusively by Client.FetchVolumeFromRemote.
+func fetchRemoteWithDualPath(ctx context.Context, caller, destRoot string, src oras.ReadOnlyTarget, tag string, opts FetchOptions) (*VolumeIndex, error) {
+	manifestDesc, mediaType, err := detectManifestMediaType(ctx, src, tag)
+	if err != nil {
+		if registryutil.IsAuthError(err) {
+			return nil, authError(caller, fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		if errors.Is(err, errdef.ErrNotFound) {
+			return nil, notFoundError(caller, fmt.Sprintf("resolve tag %q", tag), err)
+		}
+		return nil, transportError(caller, fmt.Sprintf("resolve tag %q", tag), err)
+	}
+	if mediaType == chunked.MediaTypeConfig {
+		if opts.AtomicOverwrite {
+			return fetchChunkedFromRemoteWithAtomicOverwrite(ctx, destRoot, src, tag, manifestDesc.Digest.String())
+		}
+		if err := ensureDestinationAbsent(destRoot); err != nil {
+			return nil, err
+		}
+		return fetchChunkedFromRemoteWithStaging(ctx, destRoot, src, tag, manifestDesc.Digest.String())
+	}
+	if opts.AtomicOverwrite {
+		return fetchVolWithAtomicOverwriteFrom(ctx, destRoot, src, tag, opts.Concurrency)
+	}
+	if err := ensureDestinationAbsent(destRoot); err != nil {
+		return nil, err
+	}
+	return fetchVolWithStagingFrom(ctx, destRoot, src, tag, opts.Concurrency)
 }
 
 // fetchChunkedWithAtomicOverwrite implements the 3-phase overwrite path for a
