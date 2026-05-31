@@ -1,0 +1,42 @@
+{
+  "date": "2026-05-31",
+  "soriVersion": "v0.7.0-stable",
+  "fixture": "synthetic-1GiB",
+  "chunkSizeBytes": 1073741824,
+  "uploadConcurrency": 2,
+  "metrics": {
+    "firstPushSeconds": 12.377486776,
+    "secondPushSeconds": 7.884333494,
+    "partialUpdatePushSeconds": 7.739828494,
+    "retryPushSeconds": 0,
+    "pushPeakRSSMiB": 7.859375,
+    "pushPeakTempDiskMiB": 0,
+    "sourceBytesRead": 1073741824,
+    "uploadedBytes": 1073741824,
+    "blobsCreated": 3,
+    "fetchSeconds": 9.904338196,
+    "fetchPeakDiskMiB": 1024,
+    "treeVerifyMs": 3881
+  },
+  "passed": true,
+  "violations": [],
+  "environment": {
+    "os": "linux",
+    "arch": "amd64",
+    "goVersion": "go1.25.5",
+    "soriCommit": "unknown",
+    "chunkSizeBytes": 1073741824,
+    "uploadConcurrency": 2,
+    "fetchConcurrency": 4,
+    "fixtureName": "synthetic-1GiB",
+    "fixtureScale": 1,
+    "runCommand": "/home/seoy/bench-tmp/go-build2225008871/b001/bench.test"
+  },
+  "legacyMetrics": {
+    "firstPushSeconds": 30.972781976,
+    "pushPeakTempDiskMiB": 1024.312656402588,
+    "sourceBytesRead": 1073741824,
+    "fetchSeconds": 0.913446285,
+    "treeVerifyMs": 7406
+  }
+}

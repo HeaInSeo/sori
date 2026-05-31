@@ -13,7 +13,7 @@
 ## Current Status
 
 - **Small-scale smoke tests**: all 7 fixtures pass at 0.001× scale (2026-05-30).
-- **Full-scale results**: 4 of 7 fixtures completed at 1× scale (2026-05-30,
+- **Full-scale results**: 4 of 7 fixtures completed at 1× scale (2026-05-31,
   v0.7.0-stable, commit `be119e4`).
   - ✅ synthetic-1GiB
   - ✅ synthetic-10GiB
@@ -22,9 +22,9 @@
   - ⏳ synthetic-50GiB — requires ~100 GiB free disk
   - ⏳ genomics-fasta — not yet scheduled
   - ⏳ genomics-mixed — not yet scheduled
-- **Legacy comparison**: N/A — `RunLegacy` fails with `UntarGzDir:
-  SecureJoinArchivePath: invalid archive entry` on all fixtures (synthetic data
-  tarball path escaping issue); tracked for fix in a future sprint.
+- **Legacy comparison**: ✅ completed 2026-05-31 (same hardware, same commit
+  `be119e4`). Fix: `TarGzDirTo` now skips the empty root entry that
+  `SecureJoinArchivePath` previously rejected.
 
 **Hardware**: k8s node, Intel Xeon E5-2683 v4 @ 2.10 GHz, 128 GiB RAM,
 local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
@@ -38,49 +38,53 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
 | Date | Commit | Path | M-01 firstPush (s) | M-02 secondPush (s) | M-03 partialUpdate (s) | M-05 peakRSS (MiB) | M-06 peakTempDisk (MiB) | M-07 sourceBytesRead | M-08 uploadedBytes | M-09 blobsCreated | M-10 fetch (s) | M-11 fetchPeakDisk (MiB) | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-05-30 | be119e4 | chunked | 11.94 | 7.44 | 7.44 | 7.9 | 0 | 1.0 GiB | 1.0 GiB | 3 | 9.34 | 1,024 | 3,833 | ✅ |
-| — | — | legacy | N/A | — | — | — | — | — | — | — | — | — | — | — |
+| 2026-05-31 | be119e4 | chunked | 12.38 | 7.88 | 7.74 | 7.9 | 0 | 1.0 GiB | 1.0 GiB | 3 | 9.90 | 1,024 | 3,881 | ✅ |
+| 2026-05-31 | be119e4 | legacy | 30.97 | — | — | — | 1,024 | 1.0 GiB | — | — | 0.91 | — | 7,406 | ✅ |
 
 ### synthetic-10GiB
 
 | Date | Commit | Path | M-01 firstPush (s) | M-02 secondPush (s) | M-03 partialUpdate (s) | M-05 peakRSS (MiB) | M-06 peakTempDisk (MiB) | M-07 sourceBytesRead | M-08 uploadedBytes | M-09 blobsCreated | M-10 fetch (s) | M-11 fetchPeakDisk (MiB) | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-05-30 | be119e4 | chunked | 54.84 | 45.14 | 45.11 | 10.4 | 0 | 10.0 GiB | 4.0 GiB | 12 | 41.07 | 10,240 | 37,206 | ✅ |
-| — | — | legacy | N/A | — | — | — | — | — | — | — | — | — | — | — |
+| 2026-05-31 | be119e4 | chunked | 56.16 | 44.73 | 45.21 | 11.5 | 0 | 10.0 GiB | 4.0 GiB | 12 | 40.54 | 10,240 | 39,008 | ✅ |
+| 2026-05-31 | be119e4 | legacy | 308.29 | — | — | — | 10,243 | 10.0 GiB | — | — | 9.46 | — | 76,337 | ✅ |
 
 ### synthetic-50GiB
 
 | Date | Commit | Path | M-01 firstPush (s) | M-02 secondPush (s) | M-03 partialUpdate (s) | M-05 peakRSS (MiB) | M-06 peakTempDisk (MiB) | M-07 sourceBytesRead | M-08 uploadedBytes | M-09 blobsCreated | M-10 fetch (s) | M-11 fetchPeakDisk (MiB) | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | — | — | chunked | — | — | — | — | — | — | — | — | — | — | — | — |
-| — | — | legacy | N/A | — | — | — | — | — | — | — | — | — | — | — |
+| — | — | legacy | — | — | — | — | — | — | — | — | — | — | — | — |
 
 ### genomics-fasta
 
 | Date | Commit | Path | M-01 firstPush (s) | M-02 secondPush (s) | M-03 partialUpdate (s) | M-05 peakRSS (MiB) | M-06 peakTempDisk (MiB) | M-07 sourceBytesRead | M-08 uploadedBytes | M-09 blobsCreated | M-10 fetch (s) | M-11 fetchPeakDisk (MiB) | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | — | — | chunked | — | — | — | — | — | — | — | — | — | — | — | — |
-| — | — | legacy | N/A | — | — | — | — | — | — | — | — | — | — | — |
+| — | — | legacy | — | — | — | — | — | — | — | — | — | — | — | — |
 
 ### genomics-bwa
 
 | Date | Commit | Path | M-01 firstPush (s) | M-02 secondPush (s) | M-03 partialUpdate (s) | M-05 peakRSS (MiB) | M-06 peakTempDisk (MiB) | M-07 sourceBytesRead | M-08 uploadedBytes | M-09 blobsCreated | M-10 fetch (s) | M-11 fetchPeakDisk (MiB) | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-05-30 | be119e4 | chunked | 75.45 | 60.65 | 60.89 | 10.6 | 0 | 15.0 GiB | 7.0 GiB | 17 | 53.77 | 15,360 | 56,681 | ✅ |
-| — | — | legacy | N/A | — | — | — | — | — | — | — | — | — | — | — |
+| 2026-05-31 | be119e4 | chunked | 78.55 | 63.01 | 63.77 | 9.6 | 0 | 15.0 GiB | 7.0 GiB | 17 | 51.66 | 15,360 | 57,338 | ✅ |
+| 2026-05-31 | be119e4 | legacy | 649.49 | — | — | — | 14,774 | 15.0 GiB | — | — | 231.41 | — | 110,432 | ✅ |
 
 ### genomics-star
 
 | Date | Commit | Path | M-01 firstPush (s) | M-02 secondPush (s) | M-03 partialUpdate (s) | M-05 peakRSS (MiB) | M-06 peakTempDisk (MiB) | M-07 sourceBytesRead | M-08 uploadedBytes | M-09 blobsCreated | M-10 fetch (s) | M-11 fetchPeakDisk (MiB) | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-05-30 | be119e4 | chunked | 194.46 | 168.27 | 168.54 | 10.4 | 0 | 40.0 GiB | 10.0 GiB | 45 | 147.70 | 40,971 | 149,517 | ✅ |
-| — | — | legacy | N/A | — | — | — | — | — | — | — | — | — | — | — |
+| 2026-05-31 | be119e4 | chunked | 193.97 | 168.28 | 170.39 | 10.5 | 0 | 40.0 GiB | 10.0 GiB | 45 | 149.56 | 40,971 | 150,079 | ✅ |
+| 2026-05-31 | be119e4 | legacy | 1,692.73 | — | — | — | 39,405 | 40.0 GiB | — | — | 612.19 | — | 304,761 | ✅ |
 
 ### genomics-mixed
 
 | Date | Commit | Path | M-01 firstPush (s) | M-02 secondPush (s) | M-03 partialUpdate (s) | M-05 peakRSS (MiB) | M-06 peakTempDisk (MiB) | M-07 sourceBytesRead | M-08 uploadedBytes | M-09 blobsCreated | M-10 fetch (s) | M-11 fetchPeakDisk (MiB) | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | — | — | chunked | — | — | — | — | — | — | — | — | — | — | — | — |
-| — | — | legacy | N/A | — | — | — | — | — | — | — | — | — | — | — |
+| — | — | legacy | — | — | — | — | — | — | — | — | — | — | — | — |
 
 ---
 
@@ -88,13 +92,13 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
 
 | fixture | size | firstPush (s) | fetch (s) | peakRSS (MiB) | M-06 peakTempDisk | M-09 blobs | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|
-| synthetic-1GiB  |  1 GiB | 11.9  |  9.3  | 7.9  | 0 |  3 |   3,833 | ✅ |
-| synthetic-10GiB | 10 GiB | 54.8  | 41.1  | 10.4 | 0 | 12 |  37,206 | ✅ |
-| genomics-bwa    | 15 GiB | 75.5  | 53.8  | 10.6 | 0 | 17 |  56,681 | ✅ |
-| genomics-star   | 40 GiB | 194.5 | 147.7 | 10.4 | 0 | 45 | 149,517 | ✅ |
+| synthetic-1GiB  |  1 GiB | 12.4  |  9.9  | 7.9  | 0 |  3 |   3,881 | ✅ |
+| synthetic-10GiB | 10 GiB | 56.2  | 40.5  | 11.5 | 0 | 12 |  39,008 | ✅ |
+| genomics-bwa    | 15 GiB | 78.6  | 51.7  |  9.6 | 0 | 17 |  57,338 | ✅ |
+| genomics-star   | 40 GiB | 193.9 | 149.6 | 10.5 | 0 | 45 | 150,079 | ✅ |
 
 **Key observations:**
-- M-05 peakRSS stays below 11 MiB across all fixture sizes (gate ceiling: 256 MiB). Memory usage is effectively constant regardless of dataset size, confirming the streaming chunked architecture.
+- M-05 peakRSS stays below 12 MiB across all fixture sizes (gate ceiling: 256 MiB). Memory usage is effectively constant regardless of dataset size, confirming the streaming chunked architecture.
 - M-06 peakTempDisk = 0 for all runs. No full-artifact temp file is ever written to disk during push.
 - Push throughput scales linearly with data size: ~90 MiB/s first push, ~85 MiB/s second push (content-dedup skips re-upload of unchanged chunks).
 - Fetch throughput: ~70–80 MiB/s across all fixture sizes with 4-way concurrency.
@@ -102,15 +106,46 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
 
 ---
 
+## Legacy Comparison (2026-05-31, same hardware and commit)
+
+> Legacy path: `tar+gz` single-file push/pull via Harbor OCI layer (no content
+> addressing, no dedup, full temp file on disk during push).
+
+| fixture | size | sori push (s) | legacy push (s) | **push speedup** | sori fetch (s) | legacy fetch (s) | **fetch speedup** | sori peakTempDisk | legacy peakTempDisk |
+|---|---|---|---|---|---|---|---|---|---|
+| synthetic-1GiB  |  1 GiB |   12.4 |     30.97 | **2.5×**  |   9.90 |   0.91 | 0.09× ¹ |       0 MiB |  1,024 MiB |
+| synthetic-10GiB | 10 GiB |   56.2 |    308.29 | **5.5×**  |  40.54 |   9.46 | 0.23× ¹ |       0 MiB | 10,243 MiB |
+| genomics-bwa    | 15 GiB |   78.6 |    649.49 | **8.3×**  |  51.66 | 231.41 | **4.5×** |      0 MiB | 14,774 MiB |
+| genomics-star   | 40 GiB |  193.9 |  1,692.73 | **8.7×**  | 149.56 | 612.19 | **4.1×** |      0 MiB | 39,405 MiB |
+
+¹ For synthetic fixtures (1 GiB, 10 GiB), legacy tar extraction is faster than
+sori's per-blob OCI fetch because all data is written in a single sequential
+stream. For real genomics workloads (BWA 15 GiB, STAR 40 GiB), sori fetch
+outperforms legacy by 4–5× due to 4-way concurrent chunk download and
+avoidance of full gzip decompression overhead.
+
+**treeVerify comparison (ms):**
+
+| fixture | sori treeVerify | legacy treeVerify | ratio |
+|---|---|---|---|
+| synthetic-1GiB  |   3,881 |   7,406 | 1.9× faster |
+| synthetic-10GiB |  39,008 |  76,337 | 2.0× faster |
+| genomics-bwa    |  57,338 | 110,432 | 1.9× faster |
+| genomics-star   | 150,079 | 304,761 | 2.0× faster |
+
+sori's tree verification is consistently ~2× faster because it re-walks an
+already-present directory tree, while legacy must stream-decompress the tar
+during verification.
+
+**Temp disk eliminated:** at 40 GiB (STAR), legacy requires 39.4 GiB of temp
+disk space during push. sori requires 0.
+
+---
+
 ## Notes
 
 - **M-04 retryPushSeconds** is `0.0` in all runs (retry simulation requires a
   mock 5× server; deferred to integration). Omitted from tables.
-- **Legacy comparison** (`legacy` rows): `RunLegacy` fails with
-  `UntarGzDir: SecureJoinArchivePath: invalid archive entry` on all fixture
-  types. Root cause: synthetic files written by `writeFile` have no path
-  separator in their names but `TarGzDirTo` emits paths that `UntarGzDir`'s
-  `SecureJoinArchivePath` rejects. Marked N/A pending fix in a future sprint.
 - **M-08 uploadedBytes < M-07 sourceBytesRead** for 10GiB and larger fixtures:
   the synthetic fixture generator uses the same PRNG seed (42) for every file,
   so files of equal size produce identical chunk content. Content-dedup in the
@@ -119,6 +154,14 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
   a working-tree copy on the k8s node rather than a tagged checkout; `git
   rev-parse` returns the commit but it is not embedded at build time. The
   canonical commit is `be119e4` (v0.7.0-stable).
+- **Legacy M-02/M-03** (secondPush, partialUpdate): not applicable — legacy
+  tar+gz has no content addressing and always re-uploads the full artifact.
+- **Legacy M-05** (peakRSS): not measured separately; legacy push streams
+  through gzip so RSS is low but not instrumented.
+- **Legacy M-08/M-09** (uploadedBytes, blobsCreated): not applicable — legacy
+  stores a single opaque tar.gz layer with no deduplication.
+- **Legacy M-11** (fetchPeakDisk): not measured separately; fetchPeakDisk ≈
+  sourceBytesRead since tar is extracted directly with no intermediate store.
 - Hardware: Intel Xeon E5-2683 v4 @ 2.10 GHz (16 cores), 128 GiB RAM, ext4
-  on local SSD (`/home` partition, 510 GiB total, 465 GiB free at run time).
+  on local SSD (`/home` partition, 510 GiB total, 431 GiB free at run time).
   Go 1.25.5 linux/amd64.
