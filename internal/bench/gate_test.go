@@ -61,12 +61,20 @@ func BenchmarkGate_Synthetic50GiB(b *testing.B) {
 	runBenchFixture(b, bench.AllFixtures[2])
 }
 
+func BenchmarkGate_GenomicsFasta(b *testing.B) {
+	runBenchFixture(b, bench.AllFixtures[3])
+}
+
 func BenchmarkGate_GenomicsBWA(b *testing.B) {
 	runBenchFixture(b, bench.AllFixtures[4])
 }
 
 func BenchmarkGate_GenomicsSTAR(b *testing.B) {
 	runBenchFixture(b, bench.AllFixtures[5])
+}
+
+func BenchmarkGate_GenomicsMixed(b *testing.B) {
+	runBenchFixture(b, bench.AllFixtures[6])
 }
 
 func runBenchFixture(b *testing.B, fixture bench.FixtureConfig) {
