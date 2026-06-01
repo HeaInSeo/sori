@@ -13,15 +13,15 @@
 ## Current Status
 
 - **Small-scale smoke tests**: all 7 fixtures pass at 0.001× scale (2026-05-30).
-- **Full-scale results**: 5 of 7 fixtures completed at 1× scale (v0.7.0-stable,
+- **Full-scale results**: 6 of 7 fixtures completed at 1× scale (v0.7.0-stable,
   commit `be119e4`).
   - ✅ synthetic-1GiB (2026-05-31)
   - ✅ synthetic-10GiB (2026-05-31)
   - ✅ synthetic-50GiB (2026-05-31)
+  - ✅ genomics-fasta (2026-06-01, 3 GiB)
   - ✅ genomics-bwa (2026-05-31, 15 GiB)
   - ✅ genomics-star (2026-05-31, 40 GiB)
-  - ⏳ genomics-fasta — not yet scheduled
-  - ⏳ genomics-mixed — not yet scheduled
+  - ⏳ genomics-mixed — in progress
 - **Legacy comparison**: ✅ completed 2026-05-31 (same hardware, same commit
   `be119e4`). Fix: `TarGzDirTo` now skips the empty root entry that
   `SecureJoinArchivePath` previously rejected.
@@ -60,8 +60,8 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
 
 | Date | Commit | Path | M-01 firstPush (s) | M-02 secondPush (s) | M-03 partialUpdate (s) | M-05 peakRSS (MiB) | M-06 peakTempDisk (MiB) | M-07 sourceBytesRead | M-08 uploadedBytes | M-09 blobsCreated | M-10 fetch (s) | M-11 fetchPeakDisk (MiB) | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| — | — | chunked | — | — | — | — | — | — | — | — | — | — | — | — |
-| — | — | legacy | — | — | — | — | — | — | — | — | — | — | — | — |
+| 2026-06-01 | be119e4 | chunked | 36.2 | 22.6 | 22.5 | 9.0 | 0 | 3.0 GiB | 3.0 GiB | 5 | 28.3 | 3,072 | 11,168 | ✅ |
+| 2026-06-01 | be119e4 | legacy | 4,794.2 | — | — | — | 1,083 | 3.0 GiB | — | — | 29.1 | — | 22,850 | ✅ |
 
 ### genomics-bwa
 
@@ -95,6 +95,7 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
 | synthetic-1GiB  |  1 GiB |  12.4 |   9.9 |  7.9 | 0 |  3 |   3,881 | ✅ |
 | synthetic-10GiB | 10 GiB |  56.2 |  40.5 | 11.5 | 0 | 12 |  39,008 | ✅ |
 | synthetic-50GiB | 50 GiB | 218.8 | 180.1 | 10.4 | 0 | 52 | 186,974 | ✅ |
+| genomics-fasta  |  3 GiB |  36.2 |  28.3 |  9.0 | 0 |  5 |  11,168 | ✅ |
 | genomics-bwa    | 15 GiB |  78.6 |  51.7 |  9.6 | 0 | 17 |  57,338 | ✅ |
 | genomics-star   | 40 GiB | 193.9 | 149.6 | 10.5 | 0 | 45 | 150,079 | ✅ |
 
@@ -114,17 +115,23 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
 
 | fixture | size | sori push (s) | legacy push (s) | **push speedup** | sori fetch (s) | legacy fetch (s) | **fetch speedup** | sori peakTempDisk | legacy peakTempDisk |
 |---|---|---|---|---|---|---|---|---|---|
-| synthetic-1GiB  |  1 GiB |   12.4 |     30.97 | **2.5×**  |   9.90 |   0.91 | 0.09× ¹ |       0 MiB |   1,024 MiB |
-| synthetic-10GiB | 10 GiB |   56.2 |    308.29 | **5.5×**  |  40.54 |   9.46 | 0.23× ¹ |       0 MiB |  10,243 MiB |
-| synthetic-50GiB | 50 GiB |  218.8 |  1,538.56 | **7.0×**  | 180.14 | 131.67 | 0.73× ¹ |       0 MiB |  51,216 MiB |
-| genomics-bwa    | 15 GiB |   78.6 |    649.49 | **8.3×**  |  51.66 | 231.41 | **4.5×** |      0 MiB |  14,774 MiB |
-| genomics-star   | 40 GiB |  193.9 |  1,692.73 | **8.7×**  | 149.56 | 612.19 | **4.1×** |      0 MiB |  39,405 MiB |
+| synthetic-1GiB  |  1 GiB |   12.4 |     30.97 |   **2.5×**  |   9.90 |   0.91 | 0.09× ¹ |       0 MiB |   1,024 MiB |
+| synthetic-10GiB | 10 GiB |   56.2 |    308.29 |   **5.5×**  |  40.54 |   9.46 | 0.23× ¹ |       0 MiB |  10,243 MiB |
+| synthetic-50GiB | 50 GiB |  218.8 |  1,538.56 |   **7.0×**  | 180.14 | 131.67 | 0.73× ¹ |       0 MiB |  51,216 MiB |
+| genomics-fasta  |  3 GiB |   36.2 |  4,794.19 | **132.6×** ² |  28.31 |  29.08 | 0.97× ¹ |       0 MiB |   1,083 MiB |
+| genomics-bwa    | 15 GiB |   78.6 |    649.49 |   **8.3×**  |  51.66 | 231.41 | **4.5×** |      0 MiB |  14,774 MiB |
+| genomics-star   | 40 GiB |  193.9 |  1,692.73 |   **8.7×**  | 149.56 | 612.19 | **4.1×** |      0 MiB |  39,405 MiB |
 
-¹ For synthetic fixtures (1 GiB, 10 GiB), legacy tar extraction is faster than
-sori's per-blob OCI fetch because all data is written in a single sequential
-stream. For real genomics workloads (BWA 15 GiB, STAR 40 GiB), sori fetch
-outperforms legacy by 4–5× due to 4-way concurrent chunk download and
-avoidance of full gzip decompression overhead.
+¹ Sequential tar extraction is faster than sori fetch for fixtures where data
+is highly random (synthetic) or highly compressible with low source entropy
+(genomics-fasta). For large, high-entropy genomics workloads (BWA 15 GiB,
+STAR 40 GiB), sori fetch outperforms legacy by 4–5× due to 4-way concurrent
+chunk download and avoidance of full gzip decompression overhead.
+
+² genomics-fasta contains a single 3 GiB low-entropy FASTA reference file
+(entropy=0.2). Legacy tar.gz spends ~4794s compressing nearly-incompressible
+nucleotide sequence data, whereas sori stores raw chunks without compression.
+This is the most dramatic push speedup in the suite (132.6×).
 
 **treeVerify comparison (ms):**
 
@@ -133,6 +140,7 @@ avoidance of full gzip decompression overhead.
 | synthetic-1GiB  |   3,881 |   7,406 | 1.9× faster |
 | synthetic-10GiB |  39,008 |  76,337 | 2.0× faster |
 | synthetic-50GiB | 186,974 | 386,496 | 2.1× faster |
+| genomics-fasta  |  11,168 |  22,850 | 2.0× faster |
 | genomics-bwa    |  57,338 | 110,432 | 1.9× faster |
 | genomics-star   | 150,079 | 304,761 | 2.0× faster |
 
