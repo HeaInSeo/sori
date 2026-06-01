@@ -1,0 +1,42 @@
+{
+  "date": "2026-06-01",
+  "soriVersion": "v0.7.0-stable",
+  "fixture": "genomics-mixed",
+  "chunkSizeBytes": 1073741824,
+  "uploadConcurrency": 2,
+  "metrics": {
+    "firstPushSeconds": 61.046599614,
+    "secondPushSeconds": 38.547250768,
+    "partialUpdatePushSeconds": 37.802819752,
+    "retryPushSeconds": 0,
+    "pushPeakRSSMiB": 11.5546875,
+    "pushPeakTempDiskMiB": 0,
+    "sourceBytesRead": 8590786560,
+    "uploadedBytes": 8590786560,
+    "blobsCreated": 13,
+    "fetchSeconds": 48.52868086,
+    "fetchPeakDiskMiB": 8192.8125,
+    "treeVerifyMs": 29723
+  },
+  "passed": true,
+  "violations": [],
+  "environment": {
+    "os": "linux",
+    "arch": "amd64",
+    "goVersion": "go1.25.5",
+    "soriCommit": "unknown",
+    "chunkSizeBytes": 1073741824,
+    "uploadConcurrency": 2,
+    "fetchConcurrency": 4,
+    "fixtureName": "genomics-mixed",
+    "fixtureScale": 1,
+    "runCommand": "/home/seoy/bench-tmp/go-build467480794/b001/bench.test"
+  },
+  "legacyMetrics": {
+    "firstPushSeconds": 5159.658965884,
+    "pushPeakTempDiskMiB": 6008.240734100342,
+    "sourceBytesRead": 8590786560,
+    "fetchSeconds": 100.764376507,
+    "treeVerifyMs": 57340
+  }
+}
