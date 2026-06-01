@@ -13,13 +13,13 @@
 ## Current Status
 
 - **Small-scale smoke tests**: all 7 fixtures pass at 0.001× scale (2026-05-30).
-- **Full-scale results**: 4 of 7 fixtures completed at 1× scale (2026-05-31,
-  v0.7.0-stable, commit `be119e4`).
-  - ✅ synthetic-1GiB
-  - ✅ synthetic-10GiB
-  - ✅ genomics-bwa (15 GiB)
-  - ✅ genomics-star (40 GiB)
-  - ⏳ synthetic-50GiB — requires ~100 GiB free disk
+- **Full-scale results**: 5 of 7 fixtures completed at 1× scale (v0.7.0-stable,
+  commit `be119e4`).
+  - ✅ synthetic-1GiB (2026-05-31)
+  - ✅ synthetic-10GiB (2026-05-31)
+  - ✅ synthetic-50GiB (2026-05-31)
+  - ✅ genomics-bwa (2026-05-31, 15 GiB)
+  - ✅ genomics-star (2026-05-31, 40 GiB)
   - ⏳ genomics-fasta — not yet scheduled
   - ⏳ genomics-mixed — not yet scheduled
 - **Legacy comparison**: ✅ completed 2026-05-31 (same hardware, same commit
@@ -53,8 +53,8 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
 
 | Date | Commit | Path | M-01 firstPush (s) | M-02 secondPush (s) | M-03 partialUpdate (s) | M-05 peakRSS (MiB) | M-06 peakTempDisk (MiB) | M-07 sourceBytesRead | M-08 uploadedBytes | M-09 blobsCreated | M-10 fetch (s) | M-11 fetchPeakDisk (MiB) | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| — | — | chunked | — | — | — | — | — | — | — | — | — | — | — | — |
-| — | — | legacy | — | — | — | — | — | — | — | — | — | — | — | — |
+| 2026-05-31 | be119e4 | chunked | 218.8 | 192.8 | 192.1 | 10.4 | 0 | 50.0 GiB | 10.0 GiB | 52 | 180.1 | 51,200 | 186,974 | ✅ |
+| 2026-05-31 | be119e4 | legacy | 1,538.6 | — | — | — | 51,216 | 50.0 GiB | — | — | 131.7 | — | 386,496 | ✅ |
 
 ### genomics-fasta
 
@@ -92,17 +92,18 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
 
 | fixture | size | firstPush (s) | fetch (s) | peakRSS (MiB) | M-06 peakTempDisk | M-09 blobs | M-12 treeVerify (ms) | passed |
 |---|---|---|---|---|---|---|---|---|
-| synthetic-1GiB  |  1 GiB | 12.4  |  9.9  | 7.9  | 0 |  3 |   3,881 | ✅ |
-| synthetic-10GiB | 10 GiB | 56.2  | 40.5  | 11.5 | 0 | 12 |  39,008 | ✅ |
-| genomics-bwa    | 15 GiB | 78.6  | 51.7  |  9.6 | 0 | 17 |  57,338 | ✅ |
+| synthetic-1GiB  |  1 GiB |  12.4 |   9.9 |  7.9 | 0 |  3 |   3,881 | ✅ |
+| synthetic-10GiB | 10 GiB |  56.2 |  40.5 | 11.5 | 0 | 12 |  39,008 | ✅ |
+| synthetic-50GiB | 50 GiB | 218.8 | 180.1 | 10.4 | 0 | 52 | 186,974 | ✅ |
+| genomics-bwa    | 15 GiB |  78.6 |  51.7 |  9.6 | 0 | 17 |  57,338 | ✅ |
 | genomics-star   | 40 GiB | 193.9 | 149.6 | 10.5 | 0 | 45 | 150,079 | ✅ |
 
 **Key observations:**
-- M-05 peakRSS stays below 12 MiB across all fixture sizes (gate ceiling: 256 MiB). Memory usage is effectively constant regardless of dataset size, confirming the streaming chunked architecture.
+- M-05 peakRSS stays below 12 MiB across all fixture sizes including 50 GiB (gate ceiling: 256 MiB). Memory usage is effectively constant regardless of dataset size, confirming the streaming chunked architecture.
 - M-06 peakTempDisk = 0 for all runs. No full-artifact temp file is ever written to disk during push.
 - Push throughput scales linearly with data size: ~90 MiB/s first push, ~85 MiB/s second push (content-dedup skips re-upload of unchanged chunks).
 - Fetch throughput: ~70–80 MiB/s across all fixture sizes with 4-way concurrency.
-- M-12 treeVerify scales linearly with source size (~3.8 s/GiB on this hardware), confirming O(n) re-walk behaviour.
+- M-12 treeVerify scales linearly with source size (~3.7 s/GiB on this hardware), confirming O(n) re-walk behaviour.
 
 ---
 
@@ -113,10 +114,11 @@ local filesystem (`/home/seoy/bench-tmp`, NFS-backed storage on ext4).
 
 | fixture | size | sori push (s) | legacy push (s) | **push speedup** | sori fetch (s) | legacy fetch (s) | **fetch speedup** | sori peakTempDisk | legacy peakTempDisk |
 |---|---|---|---|---|---|---|---|---|---|
-| synthetic-1GiB  |  1 GiB |   12.4 |     30.97 | **2.5×**  |   9.90 |   0.91 | 0.09× ¹ |       0 MiB |  1,024 MiB |
-| synthetic-10GiB | 10 GiB |   56.2 |    308.29 | **5.5×**  |  40.54 |   9.46 | 0.23× ¹ |       0 MiB | 10,243 MiB |
-| genomics-bwa    | 15 GiB |   78.6 |    649.49 | **8.3×**  |  51.66 | 231.41 | **4.5×** |      0 MiB | 14,774 MiB |
-| genomics-star   | 40 GiB |  193.9 |  1,692.73 | **8.7×**  | 149.56 | 612.19 | **4.1×** |      0 MiB | 39,405 MiB |
+| synthetic-1GiB  |  1 GiB |   12.4 |     30.97 | **2.5×**  |   9.90 |   0.91 | 0.09× ¹ |       0 MiB |   1,024 MiB |
+| synthetic-10GiB | 10 GiB |   56.2 |    308.29 | **5.5×**  |  40.54 |   9.46 | 0.23× ¹ |       0 MiB |  10,243 MiB |
+| synthetic-50GiB | 50 GiB |  218.8 |  1,538.56 | **7.0×**  | 180.14 | 131.67 | 0.73× ¹ |       0 MiB |  51,216 MiB |
+| genomics-bwa    | 15 GiB |   78.6 |    649.49 | **8.3×**  |  51.66 | 231.41 | **4.5×** |      0 MiB |  14,774 MiB |
+| genomics-star   | 40 GiB |  193.9 |  1,692.73 | **8.7×**  | 149.56 | 612.19 | **4.1×** |      0 MiB |  39,405 MiB |
 
 ¹ For synthetic fixtures (1 GiB, 10 GiB), legacy tar extraction is faster than
 sori's per-blob OCI fetch because all data is written in a single sequential
@@ -130,6 +132,7 @@ avoidance of full gzip decompression overhead.
 |---|---|---|---|
 | synthetic-1GiB  |   3,881 |   7,406 | 1.9× faster |
 | synthetic-10GiB |  39,008 |  76,337 | 2.0× faster |
+| synthetic-50GiB | 186,974 | 386,496 | 2.1× faster |
 | genomics-bwa    |  57,338 | 110,432 | 1.9× faster |
 | genomics-star   | 150,079 | 304,761 | 2.0× faster |
 
@@ -137,8 +140,8 @@ sori's tree verification is consistently ~2× faster because it re-walks an
 already-present directory tree, while legacy must stream-decompress the tar
 during verification.
 
-**Temp disk eliminated:** at 40 GiB (STAR), legacy requires 39.4 GiB of temp
-disk space during push. sori requires 0.
+**Temp disk eliminated:** at 50 GiB (synthetic-50GiB), legacy requires 51.2 GiB
+of temp disk space during push. sori requires 0 across all fixture sizes.
 
 ---
 
