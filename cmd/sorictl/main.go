@@ -17,7 +17,13 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-const defaultStoreName = ".sori-oci"
+const (
+	defaultStoreName = ".sori-oci"
+	helpCommand      = "help"
+	helpLong         = "--help"
+	outputJSON       = "json"
+	outputText       = "text"
+)
 
 type pushConfig struct {
 	ref             string
@@ -115,7 +121,7 @@ func run(args []string) error {
 		return runDataset(args[1:])
 	case "metadata":
 		return runMetadata(args[1:])
-	case "help", "-h", "--help":
+	case helpCommand, "-h", helpLong:
 		printUsage(os.Stdout)
 		return nil
 	default:
@@ -136,7 +142,7 @@ func runDataset(args []string) error {
 		return runDatasetInspect(args[1:])
 	case "fetch":
 		return runDatasetFetch(args[1:])
-	case "help", "-h", "--help":
+	case helpCommand, "-h", helpLong:
 		printDatasetUsage(os.Stdout)
 		return nil
 	default:
@@ -153,7 +159,7 @@ func runMetadata(args []string) error {
 	switch args[0] {
 	case "init":
 		return runMetadataInit(args[1:])
-	case "help", "-h", "--help":
+	case helpCommand, "-h", helpLong:
 		printMetadataUsage(os.Stdout)
 		return nil
 	default:
@@ -313,7 +319,7 @@ func parsePushConfig(args []string) (pushConfig, error) {
 		kind:            "dataset",
 		passwordEnv:     "SORI_REGISTRY_PASSWORD",
 		tokenEnv:        "SORI_REGISTRY_TOKEN",
-		output:          "text",
+		output:          outputText,
 		requireMetadata: true,
 		progress:        true,
 	}
@@ -371,7 +377,7 @@ func parsePushConfig(args []string) (pushConfig, error) {
 		return cfg, errors.New("tag is required; pass --ref REGISTRY/REPOSITORY:TAG or --tag")
 	}
 	switch cfg.output {
-	case "text", "json":
+	case outputText, outputJSON:
 	default:
 		return cfg, validateOutput(cfg.output)
 	}
@@ -385,7 +391,7 @@ func initRegistryFlags(flags *registryFlags) {
 	flags.username = os.Getenv("SORI_REGISTRY_USERNAME")
 	flags.passwordEnv = "SORI_REGISTRY_PASSWORD"
 	flags.tokenEnv = "SORI_REGISTRY_TOKEN"
-	flags.output = "text"
+	flags.output = outputText
 }
 
 func addRegistryFlags(fs *flag.FlagSet, flags *registryFlags) {
@@ -400,7 +406,7 @@ func addRegistryFlags(fs *flag.FlagSet, flags *registryFlags) {
 
 func validateOutput(output string) error {
 	switch output {
-	case "text", "json":
+	case outputText, outputJSON:
 		return nil
 	default:
 		return errors.New("--output must be text or json")
@@ -408,7 +414,7 @@ func validateOutput(output string) error {
 }
 
 func configureLibraryLogging(output string) {
-	if output == "json" {
+	if output == outputJSON {
 		sori.Log.SetOutput(io.Discard)
 		return
 	}
@@ -468,41 +474,57 @@ func inspectRemote(ctx context.Context, ref imageRef, flags registryFlags) (insp
 		LayerCount:      len(manifest.Layers),
 	}
 	for _, layer := range manifest.Layers {
-		switch layer.MediaType {
-		case sori.MediaTypeChunkIndex:
-			idx, err := fetchChunkIndex(ctx, repo, layer)
-			if err != nil {
-				return inspectOutput{}, err
-			}
-			out.FileCount = len(idx.Files)
-			out.ChunkSize = idx.ChunkSize
-			for _, file := range idx.Files {
-				out.TotalSize += file.Size
-				out.ChunkCount += len(file.Chunks)
-			}
-		case sori.MediaTypeDatasetMetadata:
-			data, err := fetchBlob(ctx, repo, layer)
-			if err != nil {
-				return inspectOutput{}, fmt.Errorf("fetch dataset metadata: %w", err)
-			}
-			var meta sori.DatasetMetadata
-			if err := json.Unmarshal(data, &meta); err != nil {
-				out.DatasetMetadata = true
-				out.MetadataMediaType = layer.MediaType
-				out.MetadataError = fmt.Sprintf("decode dataset metadata: %v", err)
-				continue
-			}
-			out.DatasetMetadata = true
-			out.MetadataMediaType = layer.MediaType
-			out.Metadata = &meta
-			if err := sori.ValidateDatasetMetadata(&meta); err != nil {
-				out.MetadataError = err.Error()
-			} else {
-				out.MetadataValid = true
-			}
+		if err := inspectLayer(ctx, repo, layer, &out); err != nil {
+			return inspectOutput{}, err
 		}
 	}
 	return out, nil
+}
+
+func inspectLayer(ctx context.Context, repo interface {
+	Fetch(context.Context, ocispec.Descriptor) (io.ReadCloser, error)
+}, layer ocispec.Descriptor, out *inspectOutput) error {
+	switch layer.MediaType {
+	case sori.MediaTypeChunkIndex:
+		idx, err := fetchChunkIndex(ctx, repo, layer)
+		if err != nil {
+			return err
+		}
+		applyChunkIndexSummary(out, idx)
+	case sori.MediaTypeDatasetMetadata:
+		data, err := fetchBlob(ctx, repo, layer)
+		if err != nil {
+			return fmt.Errorf("fetch dataset metadata: %w", err)
+		}
+		applyDatasetMetadata(out, layer.MediaType, data)
+	}
+	return nil
+}
+
+func applyChunkIndexSummary(out *inspectOutput, idx sori.ChunkIndex) {
+	out.FileCount = len(idx.Files)
+	out.ChunkSize = idx.ChunkSize
+	for _, file := range idx.Files {
+		out.TotalSize += file.Size
+		out.ChunkCount += len(file.Chunks)
+	}
+}
+
+func applyDatasetMetadata(out *inspectOutput, mediaType string, data []byte) {
+	out.DatasetMetadata = true
+	out.MetadataMediaType = mediaType
+
+	var meta sori.DatasetMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		out.MetadataError = fmt.Sprintf("decode dataset metadata: %v", err)
+		return
+	}
+	out.Metadata = &meta
+	if err := sori.ValidateDatasetMetadata(&meta); err != nil {
+		out.MetadataError = err.Error()
+		return
+	}
+	out.MetadataValid = true
 }
 
 func fetchChunkIndex(ctx context.Context, repo interface {
@@ -641,105 +663,120 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+type textWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (tw *textWriter) printf(format string, args ...any) {
+	if tw.err != nil {
+		return
+	}
+	_, tw.err = fmt.Fprintf(tw.w, format, args...)
+}
+
 func writePushOutput(w io.Writer, format string, out pushOutput) error {
-	if format == "json" {
+	if format == outputJSON {
 		return writeJSON(w, out)
 	}
-	fmt.Fprintf(w, "Pushed dataset artifact\n")
-	fmt.Fprintf(w, "  reference: %s\n", out.Reference)
-	fmt.Fprintf(w, "  digest:    %s\n", out.ManifestDigest)
-	fmt.Fprintf(w, "  size:      %d bytes\n", out.TotalSize)
+	tw := &textWriter{w: w}
+	tw.printf("Pushed dataset artifact\n")
+	tw.printf("  reference: %s\n", out.Reference)
+	tw.printf("  digest:    %s\n", out.ManifestDigest)
+	tw.printf("  size:      %d bytes\n", out.TotalSize)
 	if out.DatasetMetadata {
-		fmt.Fprintf(w, "  metadata:  attached (%s)\n", out.MetadataMediaType)
+		tw.printf("  metadata:  attached (%s)\n", out.MetadataMediaType)
 	} else {
-		fmt.Fprintf(w, "  metadata:  not attached\n")
+		tw.printf("  metadata:  not attached\n")
 	}
-	return nil
+	return tw.err
 }
 
 func writeInspectOutput(w io.Writer, format string, out inspectOutput) error {
-	if format == "json" {
+	if format == outputJSON {
 		return writeJSON(w, out)
 	}
 	return writeInspectText(w, out)
 }
 
 func writeInspectText(w io.Writer, out inspectOutput) error {
-	fmt.Fprintf(w, "Dataset artifact\n")
-	fmt.Fprintf(w, "  reference: %s\n", out.Reference)
-	fmt.Fprintf(w, "  digest:    %s\n", out.ManifestDigest)
-	fmt.Fprintf(w, "  format:    %s\n", firstNonEmpty(out.ArtifactFormat, out.ConfigMediaType))
-	fmt.Fprintf(w, "  layers:    %d\n", out.LayerCount)
+	tw := &textWriter{w: w}
+	tw.printf("Dataset artifact\n")
+	tw.printf("  reference: %s\n", out.Reference)
+	tw.printf("  digest:    %s\n", out.ManifestDigest)
+	tw.printf("  format:    %s\n", firstNonEmpty(out.ArtifactFormat, out.ConfigMediaType))
+	tw.printf("  layers:    %d\n", out.LayerCount)
 	if out.FileCount > 0 {
-		fmt.Fprintf(w, "  files:     %d\n", out.FileCount)
+		tw.printf("  files:     %d\n", out.FileCount)
 	}
 	if out.ChunkCount > 0 {
-		fmt.Fprintf(w, "  chunks:    %d", out.ChunkCount)
+		tw.printf("  chunks:    %d", out.ChunkCount)
 		if out.ChunkSize > 0 {
-			fmt.Fprintf(w, " (%d byte chunk size)", out.ChunkSize)
+			tw.printf(" (%d byte chunk size)", out.ChunkSize)
 		}
-		fmt.Fprintf(w, "\n")
+		tw.printf("\n")
 	}
 	if out.TotalSize > 0 {
-		fmt.Fprintf(w, "  size:      %d bytes\n", out.TotalSize)
+		tw.printf("  size:      %d bytes\n", out.TotalSize)
 	}
 	if !out.DatasetMetadata || out.Metadata == nil {
 		if out.MetadataError != "" {
-			fmt.Fprintf(w, "  metadata:  invalid (%s)\n", out.MetadataError)
-			return nil
+			tw.printf("  metadata:  invalid (%s)\n", out.MetadataError)
+			return tw.err
 		}
-		fmt.Fprintf(w, "  metadata:  not attached\n")
-		return nil
+		tw.printf("  metadata:  not attached\n")
+		return tw.err
 	}
 	if out.MetadataValid {
-		fmt.Fprintf(w, "  metadata:  attached (%s)\n", out.MetadataMediaType)
+		tw.printf("  metadata:  attached (%s)\n", out.MetadataMediaType)
 	} else {
-		fmt.Fprintf(w, "  metadata:  attached but invalid (%s)\n", out.MetadataError)
+		tw.printf("  metadata:  attached but invalid (%s)\n", out.MetadataError)
 	}
-	fmt.Fprintf(w, "\n")
-	fmt.Fprintf(w, "Dataset metadata\n")
-	fmt.Fprintf(w, "  name:        %s\n", out.Metadata.DisplayName)
-	fmt.Fprintf(w, "  kind:        %s\n", out.Metadata.Kind)
-	fmt.Fprintf(w, "  description: %s\n", out.Metadata.Description)
+	tw.printf("\n")
+	tw.printf("Dataset metadata\n")
+	tw.printf("  name:        %s\n", out.Metadata.DisplayName)
+	tw.printf("  kind:        %s\n", out.Metadata.Kind)
+	tw.printf("  description: %s\n", out.Metadata.Description)
 	if out.Metadata.Organism.Name != "" {
-		fmt.Fprintf(w, "  organism:    %s", out.Metadata.Organism.Name)
+		tw.printf("  organism:    %s", out.Metadata.Organism.Name)
 		if out.Metadata.Organism.TaxonomyID != "" {
-			fmt.Fprintf(w, " (%s)", out.Metadata.Organism.TaxonomyID)
+			tw.printf(" (%s)", out.Metadata.Organism.TaxonomyID)
 		}
-		fmt.Fprintf(w, "\n")
+		tw.printf("\n")
 	}
 	if out.Metadata.Reference.Name != "" {
-		fmt.Fprintf(w, "  reference:   %s", out.Metadata.Reference.Name)
+		tw.printf("  reference:   %s", out.Metadata.Reference.Name)
 		if out.Metadata.Reference.Version != "" {
-			fmt.Fprintf(w, " %s", out.Metadata.Reference.Version)
+			tw.printf(" %s", out.Metadata.Reference.Version)
 		}
-		fmt.Fprintf(w, "\n")
+		tw.printf("\n")
 	}
 	if len(out.Metadata.CompatibleTools) > 0 {
-		fmt.Fprintf(w, "  tools:       %s\n", strings.Join(out.Metadata.CompatibleTools, ", "))
+		tw.printf("  tools:       %s\n", strings.Join(out.Metadata.CompatibleTools, ", "))
 	}
 	if len(out.Metadata.Tags) > 0 {
-		fmt.Fprintf(w, "  tags:        %s\n", strings.Join(out.Metadata.Tags, ", "))
+		tw.printf("  tags:        %s\n", strings.Join(out.Metadata.Tags, ", "))
 	}
-	return nil
+	return tw.err
 }
 
 func writeFetchOutput(w io.Writer, format string, out fetchOutput) error {
-	if format == "json" {
+	if format == outputJSON {
 		return writeJSON(w, out)
 	}
+	tw := &textWriter{w: w}
 	if out.Skipped {
-		fmt.Fprintf(w, "Dataset already current\n")
+		tw.printf("Dataset already current\n")
 	} else {
-		fmt.Fprintf(w, "Fetched dataset artifact\n")
+		tw.printf("Fetched dataset artifact\n")
 	}
-	fmt.Fprintf(w, "  reference:   %s\n", out.Reference)
-	fmt.Fprintf(w, "  destination: %s\n", out.Destination)
-	fmt.Fprintf(w, "  digest:      %s\n", out.VolumeRef)
+	tw.printf("  reference:   %s\n", out.Reference)
+	tw.printf("  destination: %s\n", out.Destination)
+	tw.printf("  digest:      %s\n", out.VolumeRef)
 	if out.DatasetMetadata != "" {
-		fmt.Fprintf(w, "  metadata:    %s\n", out.DatasetMetadata)
+		tw.printf("  metadata:    %s\n", out.DatasetMetadata)
 	}
-	return nil
+	return tw.err
 }
 
 func progressPrinter(enabled bool) sori.ProgressFunc {
@@ -764,10 +801,17 @@ func progressPrinter(enabled bool) sori.ProgressFunc {
 
 func authHint(cfg pushConfig) string {
 	if cfg.username == "" && envValue(cfg.tokenEnv) == "" && envValue(cfg.passwordEnv) == "" {
-		return "\nHint: registry push usually needs credentials. Pass --username and --password-env, or set SORI_REGISTRY_USERNAME plus SORI_REGISTRY_TOKEN/SORI_REGISTRY_PASSWORD."
+		return "\nHint: registry push usually needs credentials. " +
+			"Pass --username and --password-env, or set SORI_REGISTRY_USERNAME " +
+			"plus SORI_REGISTRY_TOKEN/SORI_REGISTRY_PASSWORD."
 	}
 	if envValue(cfg.tokenEnv) == "" && envValue(cfg.passwordEnv) == "" {
-		return fmt.Sprintf("\nHint: %s and %s are empty. Put your registry token/password in one of them, or pass --password-env with the variable name you use.", cfg.tokenEnv, cfg.passwordEnv)
+		return fmt.Sprintf(
+			"\nHint: %s and %s are empty. Put your registry token/password in one of them, "+
+				"or pass --password-env with the variable name you use.",
+			cfg.tokenEnv,
+			cfg.passwordEnv,
+		)
 	}
 	return ""
 }
@@ -923,7 +967,7 @@ func metadataValueFlags() map[string]struct{} {
 }
 
 func printUsage(w *os.File) {
-	fmt.Fprintln(w, `sorictl packages reference datasets as OCI artifacts.
+	_, _ = fmt.Fprintln(w, `sorictl packages reference datasets as OCI artifacts.
 
 Usage:
   sorictl metadata init [flags]
@@ -939,7 +983,7 @@ Examples:
 }
 
 func printDatasetUsage(w *os.File) {
-	fmt.Fprintln(w, `Usage:
+	_, _ = fmt.Fprintln(w, `Usage:
   sorictl dataset push SOURCE_DIR --ref REGISTRY/REPOSITORY:TAG --metadata dataset-metadata.json
   sorictl dataset inspect REGISTRY/REPOSITORY:TAG
   sorictl dataset fetch REGISTRY/REPOSITORY:TAG DEST
@@ -955,7 +999,7 @@ Auth:
 }
 
 func printMetadataUsage(w *os.File) {
-	fmt.Fprintln(w, `Usage:
+	_, _ = fmt.Fprintln(w, `Usage:
   sorictl metadata init --ref REGISTRY/REPOSITORY:TAG --name NAME --display-name DISPLAY --description TEXT
 
 Example:
