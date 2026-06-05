@@ -1,8 +1,68 @@
 package sori
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/HeaInSeo/sori/chunked"
+)
 
 const ArtifactMetadataSchemaVersion = "sori.artifact.v1"
+
+const (
+	// DatasetMetadataSchemaVersion is the schemaVersion used by
+	// dataset-metadata.json blobs attached to chunked CAS artifacts.
+	DatasetMetadataSchemaVersion = chunked.SchemaVersionMetadata
+
+	// MediaTypeDatasetMetadata is the OCI layer media type for
+	// dataset-metadata.json.
+	MediaTypeDatasetMetadata = chunked.MediaTypeDatasetMeta
+)
+
+type (
+	// DatasetMetadata is the public dataset-metadata.json model used for
+	// catalog and human/operator-facing dataset descriptions.
+	DatasetMetadata = chunked.DatasetMetadata
+
+	// Organism describes the biological organism for a genomics dataset.
+	Organism = chunked.Organism
+
+	// DatasetReference describes the reference build for a genomics dataset.
+	DatasetReference = chunked.DatasetReference
+
+	// CompatibleInput is a structured compatibility record used by pipeline
+	// editors for precise inputType+format+organism matching.
+	CompatibleInput = chunked.CompatibleInput
+)
+
+// ValidateDatasetMetadata checks the minimum catalog-capable metadata fields.
+func ValidateDatasetMetadata(meta *DatasetMetadata) error {
+	if meta == nil {
+		return validationError("ValidateDatasetMetadata", "metadata is required", nil)
+	}
+	if strings.TrimSpace(meta.SchemaVersion) != DatasetMetadataSchemaVersion {
+		return validationError("ValidateDatasetMetadata", "schemaVersion must be "+DatasetMetadataSchemaVersion, nil)
+	}
+	if strings.TrimSpace(meta.Kind) == "" {
+		return validationError("ValidateDatasetMetadata", "kind is required", nil)
+	}
+	if strings.TrimSpace(meta.DisplayName) == "" {
+		return validationError("ValidateDatasetMetadata", "displayName is required", nil)
+	}
+	if strings.TrimSpace(meta.Description) == "" {
+		return validationError("ValidateDatasetMetadata", "description is required", nil)
+	}
+	return nil
+}
+
+// ValidateDatasetMetadataJSON decodes and validates dataset-metadata.json.
+func ValidateDatasetMetadataJSON(data []byte) error {
+	var meta DatasetMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return validationError("ValidateDatasetMetadataJSON", "decode json", err)
+	}
+	return ValidateDatasetMetadata(&meta)
+}
 
 // ArtifactMetadata is the generic metadata model for the preferred core path.
 //

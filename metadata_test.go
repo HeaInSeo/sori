@@ -1,6 +1,9 @@
 package sori
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestBuildArtifactMetadata(t *testing.T) {
 	pkg := &PackageResult{
@@ -108,5 +111,29 @@ func TestArtifactMetadataAdapters(t *testing.T) {
 	}
 	if registered.StorageURI != meta.Location.Reference {
 		t.Fatalf("registered storage uri mismatch: got %q", registered.StorageURI)
+	}
+}
+
+func TestValidateDatasetMetadata(t *testing.T) {
+	meta := &DatasetMetadata{
+		SchemaVersion: DatasetMetadataSchemaVersion,
+		Kind:          "reference_genome",
+		DisplayName:   "GRCh38 FASTA",
+		Description:   "Human GRCh38 reference FASTA.",
+	}
+	if err := ValidateDatasetMetadata(meta); err != nil {
+		t.Fatalf("ValidateDatasetMetadata: %v", err)
+	}
+}
+
+func TestValidateDatasetMetadataJSON_InvalidSchema(t *testing.T) {
+	err := ValidateDatasetMetadataJSON([]byte(`{
+		"schemaVersion": "wrong",
+		"kind": "reference_genome",
+		"displayName": "GRCh38 FASTA",
+		"description": "Human GRCh38 reference FASTA."
+	}`))
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
 	}
 }

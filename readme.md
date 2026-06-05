@@ -146,6 +146,42 @@ if err != nil { ... }
 
 단계 `4~6`, `10`은 stable core 흐름이고, `7~9`는 experimental 계층이다.
 
+## CLI UX 실험
+
+`cmd/sorictl`은 `sori` 라이브러리를 사용하는 범용 OCI registry CLI 초안이다.  
+GHCR, Harbor, local registry 등 특정 registry에 고정하지 않고 `--registry`와 `--repository`로 대상을 지정한다.
+
+```bash
+# 1) dataset-metadata.json 초안 생성
+go run ./cmd/sorictl metadata init \
+  --ref ghcr.io/OWNER/references:grch38-bwa-v1 \
+  --name grch38-bwa \
+  --display-name "GRCh38 BWA Index" \
+  --description "Human GRCh38 BWA index." \
+  > dataset-metadata.json
+
+# 2) 데이터 디렉터리 패키징 + registry push
+go run ./cmd/sorictl dataset push ./grch38-bwa \
+  --ref ghcr.io/OWNER/references:grch38-bwa-v1 \
+  --metadata dataset-metadata.json \
+  --username USER \
+  --password-env GHCR_TOKEN
+
+# 3) 원격 artifact metadata 확인
+go run ./cmd/sorictl dataset inspect \
+  ghcr.io/OWNER/references:grch38-bwa-v1 \
+  --username USER \
+  --password-env GHCR_TOKEN
+
+# 4) 원격 artifact fetch
+go run ./cmd/sorictl dataset fetch \
+  ghcr.io/OWNER/references:grch38-bwa-v1 ./refs/grch38-bwa \
+  --username USER \
+  --password-env GHCR_TOKEN
+```
+
+CLI는 UX 검증용 entrypoint이고, 안정 계약의 중심은 계속 Go library API다.
+
 ### Chunked CAS 경로 (v0.7.0-stable)
 
 대용량 데이터셋(STAR index 40 GiB+ 등)에는 chunked CAS 포맷을 사용한다.  
@@ -340,16 +376,25 @@ func PushRemoteDataSpecReferrer(ctx context.Context, push *PushResult, target Re
 
 ```go
 const ArtifactMetadataSchemaVersion = "sori.artifact.v1"
+const DatasetMetadataSchemaVersion = "sori.dataset.metadata.v1"
+const MediaTypeDatasetMetadata = "application/vnd.sori.dataset.metadata.v1+json"
+const MediaTypeChunkedConfig = "application/vnd.sori.chunked-cas.config.v1+json"
+const MediaTypeChunkIndex = "application/vnd.sori.chunk-index.v1+json"
 
 type ArtifactMetadata struct { ... }
 type ArtifactMetadataInput struct { ... }
+type DatasetMetadata struct { ... }
+type ChunkIndex struct { ... }
 
 func BuildArtifactMetadata(input ArtifactMetadataInput, pkg *PackageResult, push *PushResult) (*ArtifactMetadata, error)
+func ValidateDatasetMetadata(meta *DatasetMetadata) error
+func ValidateDatasetMetadataJSON(data []byte) error
 func ArtifactMetadataToDataSpec(meta *ArtifactMetadata) *DataSpec
 func ArtifactMetadataToRegisteredDataDefinition(meta *ArtifactMetadata, req DataRegisterRequest) *RegisteredDataDefinition
 ```
 
 `ArtifactMetadata`는 core 계층의 중립 metadata 모델이다. `DataSpec`과 `RegisteredDataDefinition`은 이 모델을 NodeVault 친화 구조로 변환한 adapter 결과다.
+`DatasetMetadata`는 OCI artifact에 `dataset-metadata.json` 레이어로 포함되는 catalog/operator용 설명 모델이며, 외부 CLI나 catalog indexer가 안정적으로 사용할 수 있는 public API다.
 
 ### Experimental: OCI Referrer Push
 

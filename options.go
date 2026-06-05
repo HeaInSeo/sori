@@ -16,6 +16,15 @@ const (
 	ArtifactFormatChunkedCAS
 )
 
+const (
+	// MediaTypeChunkedConfig is the OCI config media type for chunked CAS
+	// artifacts.
+	MediaTypeChunkedConfig = chunked.MediaTypeConfig
+
+	// MediaTypeChunkIndex is the OCI layer media type for chunk-index.json.
+	MediaTypeChunkIndex = chunked.MediaTypeChunkIndex
+)
+
 // PackageOptions controls the preferred core packaging path.
 //
 // This option surface is part of the stable core candidate contract.
@@ -32,6 +41,19 @@ type PackageOptions struct {
 	// Use chunked.ProgressFunc and chunked.ChunkProgress for the callback type.
 	Progress chunked.ProgressFunc
 }
+
+type (
+	// ChunkIndex is the public representation of chunk-index.json for
+	// inspection and catalog tooling.
+	ChunkIndex = chunked.ChunkIndex
+
+	// ChunkProgress carries per-event progress information emitted during a
+	// chunked CAS push or fetch operation.
+	ChunkProgress = chunked.ChunkProgress
+
+	// ProgressFunc receives chunked CAS progress events.
+	ProgressFunc = chunked.ProgressFunc
+)
 
 // PushOptions controls the preferred core push path.
 //

@@ -48,6 +48,17 @@
 - `ArtifactMetadata`
 - `ArtifactMetadataInput`
 - `BuildArtifactMetadata`
+- `DatasetMetadata`
+- `Organism`
+- `DatasetReference`
+- `CompatibleInput`
+- `DatasetMetadataSchemaVersion`
+- `MediaTypeDatasetMetadata`
+- `MediaTypeChunkedConfig`
+- `MediaTypeChunkIndex`
+- `ValidateDatasetMetadata`
+- `ValidateDatasetMetadataJSON`
+- `ChunkIndex`
 
 ### Stable core result types
 
