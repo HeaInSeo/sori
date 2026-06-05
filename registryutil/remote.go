@@ -45,7 +45,9 @@ func NewRepository(remoteRepo string, cfg RemoteConfig) (*remote.Repository, err
 			Username: cfg.Username,
 			Password: cfg.Password,
 		}
-		if cfg.Token != "" {
+		if cred.Username != "" && cred.Password == "" && cfg.Token != "" {
+			cred.Password = cfg.Token
+		} else if cfg.Token != "" {
 			cred.AccessToken = cfg.Token
 		}
 		credentialFunc = auth.StaticCredential(repo.Reference.Registry, cred)

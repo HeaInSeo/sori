@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/opencontainers/go-digest"
 )
 
 // Layer budget constants (D-11).
@@ -91,6 +93,65 @@ func ValidatePaths(idx *ChunkIndex) error {
 		seen[f.Path] = struct{}{}
 	}
 	return nil
+}
+
+// ValidateIndex checks the structural reconstruction contract of a chunk index.
+// It verifies paths plus file/chunk sizes, contiguous offsets, and digest syntax.
+func ValidateIndex(idx *ChunkIndex) error {
+	if idx == nil {
+		return fmt.Errorf("%w: chunk-index is required", ErrValidation)
+	}
+	if err := ValidateChunkSize(idx.ChunkSize); err != nil {
+		return fmt.Errorf("%w: %w", ErrValidation, err)
+	}
+	if err := ValidatePaths(idx); err != nil {
+		return err
+	}
+	for _, f := range idx.Files {
+		if err := validateIndexFile(f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateIndexFile(f ChunkIndexFile) error {
+	if f.Size < 0 {
+		return fmt.Errorf("%w: negative file size for %s", ErrValidation, f.Path)
+	}
+	if _, err := digest.Parse(f.Digest); err != nil {
+		return fmt.Errorf("%w: invalid file digest for %s: %w", ErrValidation, f.Path, err)
+	}
+	if len(f.Chunks) == 0 {
+		return fmt.Errorf("%w: file has no chunks: %s", ErrValidation, f.Path)
+	}
+	total, err := validateIndexChunks(f)
+	if err != nil {
+		return err
+	}
+	if total != f.Size {
+		return fmt.Errorf("%w: chunk sizes for %s sum to %d, want file size %d",
+			ErrValidation, f.Path, total, f.Size)
+	}
+	return nil
+}
+
+func validateIndexChunks(f ChunkIndexFile) (int64, error) {
+	var offset int64
+	for i, c := range f.Chunks {
+		if c.Offset != offset {
+			return 0, fmt.Errorf("%w: non-contiguous chunk %d for %s: got offset %d want %d",
+				ErrValidation, i, f.Path, c.Offset, offset)
+		}
+		if c.Size < 0 {
+			return 0, fmt.Errorf("%w: negative chunk size for %s chunk %d", ErrValidation, f.Path, i)
+		}
+		if _, err := digest.Parse(c.Digest); err != nil {
+			return 0, fmt.Errorf("%w: invalid chunk digest for %s chunk %d: %w", ErrValidation, f.Path, i, err)
+		}
+		offset += c.Size
+	}
+	return offset, nil
 }
 
 // MetadataLayerCount returns the number of non-chunk OCI layers for a given

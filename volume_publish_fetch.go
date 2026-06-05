@@ -886,14 +886,14 @@ func fetchChunkedWithStaging(ctx context.Context, destRoot, storePath, tag, mani
 	if err := chunked.Fetch(ctx, storePath, stagingDir, tag, chunked.FetchOptions{}); err != nil {
 		return nil, err
 	}
+	vi := &VolumeIndex{VolumeRef: manifestDigest}
+	if err := writeVolumeIndex(stagingDir, vi); err != nil {
+		return nil, err
+	}
 	if err := os.Rename(stagingDir, destRoot); err != nil {
 		return nil, transportError("fetchChunkedWithStaging", "commit staging to destination", err)
 	}
 	cleanup = false
-	vi := &VolumeIndex{VolumeRef: manifestDigest}
-	if err := writeVolumeIndex(destRoot, vi); err != nil {
-		return nil, err
-	}
 	return vi, nil
 }
 
@@ -1076,6 +1076,10 @@ func fetchChunkedWithAtomicOverwrite(ctx context.Context, destRoot, storePath, t
 	if err := chunked.Fetch(ctx, storePath, stagingDir, tag, chunked.FetchOptions{}); err != nil {
 		return nil, err
 	}
+	vi := &VolumeIndex{VolumeRef: manifestDigest}
+	if err := writeVolumeIndex(stagingDir, vi); err != nil {
+		return nil, err
+	}
 
 	// Phase 2: back up existing destRoot if present.
 	var backupPath string
@@ -1119,10 +1123,6 @@ func fetchChunkedWithAtomicOverwrite(ctx context.Context, destRoot, storePath, t
 		if cleanupErr != nil {
 			Log.Warnf("fetchChunkedWithAtomicOverwrite: failed to remove backup %s: %v", backupPath, cleanupErr)
 		}
-	}
-	vi := &VolumeIndex{VolumeRef: manifestDigest}
-	if err := writeVolumeIndex(destRoot, vi); err != nil {
-		return nil, err
 	}
 	return vi, nil
 }

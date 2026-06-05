@@ -118,7 +118,7 @@ func (f *Fetcher) fetch(ctx context.Context, destRoot, volName string) error {
 		return fmt.Errorf("%s: chunk-index schemaVersion %q, want %q: %w",
 			caller, idx.SchemaVersion, SchemaVersionChunkIndex, ErrValidation)
 	}
-	if err := ValidatePaths(&idx); err != nil {
+	if err := ValidateIndex(&idx); err != nil {
 		return fmt.Errorf("%s: %w", caller, err)
 	}
 

@@ -69,6 +69,46 @@ func TestValidatePaths_Clean(t *testing.T) {
 	}
 }
 
+func TestValidateIndex_RejectsNonContiguousChunks(t *testing.T) {
+	idx := &ChunkIndex{
+		SchemaVersion: SchemaVersionChunkIndex,
+		ChunkSize:     MinChunkSize,
+		Files: []ChunkIndexFile{{
+			Path:   "file.txt",
+			Size:   4,
+			Digest: "sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+			Chunks: []ChunkEntry{{
+				Offset: 1,
+				Size:   4,
+				Digest: "sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+			}},
+		}},
+	}
+	if err := ValidateIndex(idx); err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateIndex_RejectsInvalidDigest(t *testing.T) {
+	idx := &ChunkIndex{
+		SchemaVersion: SchemaVersionChunkIndex,
+		ChunkSize:     MinChunkSize,
+		Files: []ChunkIndexFile{{
+			Path:   "file.txt",
+			Size:   4,
+			Digest: "not-a-digest",
+			Chunks: []ChunkEntry{{
+				Offset: 0,
+				Size:   4,
+				Digest: "sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+			}},
+		}},
+	}
+	if err := ValidateIndex(idx); err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
 func TestMetadataLayerCount(t *testing.T) {
 	tests := []struct {
 		hasMeta       bool

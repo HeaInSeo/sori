@@ -151,6 +151,9 @@ func packageVolumeToStoreWithOptions(ctx context.Context, localStorePath string,
 	if opts.Format == ArtifactFormatChunkedCAS {
 		var configBlob []byte
 		if len(opts.ConfigBlob) > 0 {
+			if err := validateJSONBytes(opts.ConfigBlob); err != nil {
+				return nil, validationError("PackageVolumeToStore", "invalid config blob", err)
+			}
 			configBlob = opts.ConfigBlob
 		} else if len(req.ConfigBlob) > 0 {
 			if err := validateJSONBytes(req.ConfigBlob); err != nil {
@@ -159,6 +162,11 @@ func packageVolumeToStoreWithOptions(ctx context.Context, localStorePath string,
 			configBlob = append([]byte(nil), req.ConfigBlob...)
 		} else if opts.RequireConfigBlob {
 			return nil, validationError("PackageVolumeToStore", "config blob is required by options", nil)
+		}
+		if len(opts.DatasetMetadata) > 0 {
+			if err := ValidateDatasetMetadataJSON(opts.DatasetMetadata); err != nil {
+				return nil, err
+			}
 		}
 		return packageVolumeChunked(ctx, localStorePath, req, opts, configBlob, now)
 	}

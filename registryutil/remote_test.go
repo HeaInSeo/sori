@@ -70,6 +70,50 @@ func TestNewRepository_UsesAuthProviderAndCapability(t *testing.T) {
 	}
 }
 
+func TestNewRepository_UsernameTokenUsesBasicPassword(t *testing.T) {
+	repo, err := NewRepository("example.com/project/repo", RemoteConfig{
+		Username: "user",
+		Token:    "pat",
+	})
+	if err != nil {
+		t.Fatalf("NewRepository: %v", err)
+	}
+	authClient, ok := repo.Client.(*auth.Client)
+	if !ok {
+		t.Fatalf("expected auth.Client, got %T", repo.Client)
+	}
+	cred, err := authClient.Credential(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("credential provider returned error: %v", err)
+	}
+	if cred.Username != "user" || cred.Password != "pat" {
+		t.Fatalf("credential = %+v, want username user with token as password", cred)
+	}
+	if cred.AccessToken != "" {
+		t.Fatalf("expected no bearer access token, got %q", cred.AccessToken)
+	}
+}
+
+func TestNewRepository_TokenWithoutUsernameUsesBearer(t *testing.T) {
+	repo, err := NewRepository("example.com/project/repo", RemoteConfig{
+		Token: "bearer",
+	})
+	if err != nil {
+		t.Fatalf("NewRepository: %v", err)
+	}
+	authClient, ok := repo.Client.(*auth.Client)
+	if !ok {
+		t.Fatalf("expected auth.Client, got %T", repo.Client)
+	}
+	cred, err := authClient.Credential(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("credential provider returned error: %v", err)
+	}
+	if cred.AccessToken != "bearer" {
+		t.Fatalf("AccessToken = %q, want bearer", cred.AccessToken)
+	}
+}
+
 func TestNewRetryHTTPClient_PlainHTTPLeavesTLSUnset(t *testing.T) {
 	client, err := NewRetryHTTPClient(RemoteConfig{
 		PlainHTTP: true,

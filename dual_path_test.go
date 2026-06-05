@@ -278,6 +278,9 @@ func TestDualPath_AtomicOverwrite_ChunkedCAS(t *testing.T) {
 		t.Fatalf("FetchVolume v1 (AtomicOverwrite, chunked): %v", err)
 	}
 	assertDirContentsEqual(t, srcV1, destDir)
+	if _, err := os.Stat(filepath.Join(destDir, "volume-index.json")); err != nil {
+		t.Fatalf("expected volume-index.json after chunked atomic fetch: %v", err)
+	}
 
 	// Second fetch: overwrite destDir with v2.
 	vi, err := client.FetchVolume(ctx, destDir, storePath, "aow:v2", sori.FetchOptions{AtomicOverwrite: true})
@@ -288,6 +291,9 @@ func TestDualPath_AtomicOverwrite_ChunkedCAS(t *testing.T) {
 		t.Fatal("VolumeRef must not be empty after overwrite")
 	}
 	assertDirContentsEqual(t, srcV2, destDir)
+	if _, err := os.Stat(filepath.Join(destDir, "volume-index.json")); err != nil {
+		t.Fatalf("expected volume-index.json after chunked overwrite: %v", err)
+	}
 }
 
 // TestDualPath_RequireConfigBlob_Chunked verifies that RequireConfigBlob
@@ -302,6 +308,38 @@ func TestDualPath_RequireConfigBlob_Chunked(t *testing.T) {
 	}, sori.PackageOptions{
 		Format:            sori.ArtifactFormatChunkedCAS,
 		RequireConfigBlob: true,
+	})
+	if !errors.Is(err, sori.ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
+
+func TestDualPath_InvalidConfigBlob_Chunked(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newChunkedClient(t)
+	_, err := client.PackageVolumeWithOptions(ctx, sori.PackageRequest{
+		SourceDir:   newChunkedSrcDir(t),
+		DisplayName: "Test",
+		Tag:         "bad-config:v1",
+	}, sori.PackageOptions{
+		Format:     sori.ArtifactFormatChunkedCAS,
+		ConfigBlob: []byte("{invalid"),
+	})
+	if !errors.Is(err, sori.ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
+
+func TestDualPath_InvalidDatasetMetadata_Chunked(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newChunkedClient(t)
+	_, err := client.PackageVolumeWithOptions(ctx, sori.PackageRequest{
+		SourceDir:   newChunkedSrcDir(t),
+		DisplayName: "Test",
+		Tag:         "bad-metadata:v1",
+	}, sori.PackageOptions{
+		Format:          sori.ArtifactFormatChunkedCAS,
+		DatasetMetadata: []byte(`{"schemaVersion":"wrong"}`),
 	})
 	if !errors.Is(err, sori.ErrValidation) {
 		t.Fatalf("expected ErrValidation, got %v", err)
