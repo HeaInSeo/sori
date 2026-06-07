@@ -2,6 +2,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
 LOCALBIN    := $(CURDIR)/bin
+DIST_DIR    := $(CURDIR)/dist
 REPORT_DIR  := $(CURDIR)/reports
 GOCACHE_DIR := /tmp/sori-gocache
 GOTMPDIR    := /tmp/sori-gotmp
@@ -13,6 +14,7 @@ GOVULNCHECK         := $(LOCALBIN)/govulncheck
 GOVULNCHECK_VERSION := v1.1.4
 
 GOENV := GOCACHE="$(GOCACHE_DIR)" GOTMPDIR="$(GOTMPDIR)"
+SORICTL_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
 # All packages. Integration tests (those requiring a live registry) are
 # excluded by the -short flag at test time, not by package scope.
@@ -25,7 +27,7 @@ PKGS_SECURITY := ./...
 PKGS_COVERAGE := $(shell go list ./... | grep -v 'internal/bench')
 
 .PHONY: test coverage fmt vet lint lint-depguard lint-fix lint-security \
-        vuln vuln-all golangci-lint govulncheck
+        vuln vuln-all build-sorictl release-dist golangci-lint govulncheck
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -49,6 +51,27 @@ fmt:
 vet:
 	@mkdir -p "$(GOCACHE_DIR)" "$(GOTMPDIR)"
 	$(GOENV) go vet $(PKGS_ALL)
+
+# ── Builds ───────────────────────────────────────────────────────────────────
+
+build-sorictl:
+	@mkdir -p "$(LOCALBIN)" "$(GOCACHE_DIR)" "$(GOTMPDIR)"
+	$(GOENV) go build -trimpath -o "$(LOCALBIN)/sorictl" ./cmd/sorictl
+
+release-dist:
+	@rm -rf "$(DIST_DIR)"
+	@mkdir -p "$(DIST_DIR)" "$(GOCACHE_DIR)" "$(GOTMPDIR)"
+	@set -e; \
+	for target in $(SORICTL_TARGETS); do \
+		os="$${target%/*}"; \
+		arch="$${target#*/}"; \
+		ext=""; \
+		if [[ "$$os" == "windows" ]]; then ext=".exe"; fi; \
+		out="$(DIST_DIR)/sorictl_$${os}_$${arch}$${ext}"; \
+		echo "building $$out"; \
+		CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" $(GOENV) go build -trimpath -o "$$out" ./cmd/sorictl; \
+	done
+	@(cd "$(DIST_DIR)" && sha256sum * > checksums.txt)
 
 # ── Lint ──────────────────────────────────────────────────────────────────────
 

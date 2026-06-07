@@ -20,6 +20,7 @@ OCI 이미지 형식으로 패키징하는 Go 라이브러리다.
 | [docs/stable-api-promotion.md](docs/stable-api-promotion.md) | stable API 승격 검토 항목 |
 | [docs/followup-sprint-plan.md](docs/followup-sprint-plan.md) | 후속 스프린트 계획 |
 | [docs/registry-integration.md](docs/registry-integration.md) | registry 통합 테스트 골격 |
+| [docs/sorictl-quickstart.md](docs/sorictl-quickstart.md) | sorictl 초보자용 registry publish/fetch 가이드 |
 | [docs/operations.md](docs/operations.md) | 운영 환경 체크리스트 |
 | [docs/stub-status.md](docs/stub-status.md) | 과거 stub 처리 내역 |
 | [docs/test-strategy.md](docs/test-strategy.md) | 테스트 범주 정의 · 패턴 · 다른 프로젝트 적용 가이드 |
@@ -150,6 +151,7 @@ if err != nil { ... }
 
 `cmd/sorictl`은 `sori` 라이브러리를 사용하는 범용 OCI registry CLI 초안이다.  
 GHCR, Harbor, local registry 등 특정 registry에 고정하지 않고 `--registry`와 `--repository`로 대상을 지정한다.
+처음 사용하는 경우에는 [docs/sorictl-quickstart.md](docs/sorictl-quickstart.md)를 먼저 따라가는 것을 권장한다.
 
 ```bash
 # 1) dataset-metadata.json 초안 생성
