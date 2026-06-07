@@ -43,10 +43,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          release_args=(--title "sori $tag" --notes "Automated sorictl release assets for $tag.")
+          if [[ "$tag" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
+
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
+            if [[ "$tag" == *-* ]]; then
+              gh release edit "$tag" --prerelease
+            fi
           else
-            gh release create "$tag" dist/* \
-              --title "sori $tag" \
-              --notes "Automated sorictl release assets for $tag."
+            gh release create "$tag" dist/* "${release_args[@]}"
           fi
