@@ -16,6 +16,7 @@ OCI 이미지 형식으로 패키징하는 Go 라이브러리다.
 | [docs/research/results-summary.md](docs/research/results-summary.md) | 벤치마크 결과 (v0.7.0-stable 실측값) |
 | [docs/public-api.md](docs/public-api.md) | 공개 API 안정도 분류 |
 | [docs/v1-readiness.md](docs/v1-readiness.md) | v1.0.0 준비 체크리스트와 release gate |
+| [docs/v1-test-plan.md](docs/v1-test-plan.md) | v1 smoke/integration/real dataset/release acceptance 테스트 계획 |
 | [docs/dataset-metadata-v1.md](docs/dataset-metadata-v1.md) | dataset-metadata.json v1 schema 계약 |
 | [docs/sorictl-contract.md](docs/sorictl-contract.md) | sorictl v1 CLI 명령/출력 계약 |
 | [docs/generalization-sprint-plan.md](docs/generalization-sprint-plan.md) | 범용 라이브러리화 로드맵 |

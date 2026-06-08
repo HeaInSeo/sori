@@ -1,5 +1,27 @@
 # Test Strategy
 
+`sori`의 v1 테스트 전략은 smoke를 첫 관문으로 두되, smoke만으로
+release 결정을 하지 않는다. 전체 v1 release gate는
+[v1-test-plan.md](v1-test-plan.md)와 [v1-readiness.md](v1-readiness.md)를 따른다.
+
+## v1 테스트 계층
+
+| 계층 | 목적 | 실행 |
+|---|---|---|
+| Unit / short | 빠른 correctness, typed error, local safety | `make test` |
+| Coverage | 주요 패키지 coverage 확인 | `make coverage` |
+| Vulnerability | reachable vuln 확인 | `make vuln` |
+| CLI smoke | 실제 registry에서 첫 사용자 흐름 확인 | `make smoke-cli` |
+| Registry integration | Go library registry path 확인 | `make test-registry-integration` |
+| Real dataset | 실제 유전체 fixture push/fetch 확인 | `make test-real-dataset` |
+| Scale / performance | 대용량 chunked CAS 시간/RSS 확인 | benchmark |
+| Reliability / failure | corrupt/cancel/rollback/retry 확인 | local tests + targeted integration |
+| Release acceptance | release binary/checksum/asset 확인 | tag-triggered release + binary smoke |
+
+smoke 통과 기준은 `metadata init -> push -> inspect -> fetch`가 실제
+registry에서 성공하고, fetched directory가 source와 byte-level로 동일하며,
+`--overwrite --skip-if-current`가 기대대로 동작하는 것이다.
+
 ## 테스트 범주 정의
 
 | 범주 | 정의 | 핵심 검증 포인트 |

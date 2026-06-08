@@ -86,6 +86,20 @@ env \
   go test -run TestRegistryIntegration_PackagePushOnly ./...
 ```
 
+Makefile target으로는 아래처럼 실행할 수 있다.
+
+```bash
+env \
+  SORI_RUN_REGISTRY_INTEGRATION=1 \
+  SORI_REGISTRY_HOST=harbor.example.com \
+  SORI_REGISTRY_REPOSITORY=project/dataset \
+  SORI_REGISTRY_USERNAME=admin \
+  SORI_REGISTRY_TOKEN=secret \
+  make test-registry-integration
+```
+
+CLI smoke와 real dataset 검증은 [v1-test-plan.md](v1-test-plan.md)를 따른다.
+
 ## Registry capability 해석
 
 - `ReferrersCapability=nil`

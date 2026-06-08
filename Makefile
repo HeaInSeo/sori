@@ -26,8 +26,9 @@ PKGS_SECURITY := ./...
 # regular test files, so its 0% coverage would drag down the combined total.
 PKGS_COVERAGE := $(shell go list ./... | grep -v 'internal/bench')
 
-.PHONY: test coverage fmt vet lint lint-depguard lint-fix lint-security \
-        vuln vuln-all build-sorictl release-dist golangci-lint govulncheck
+.PHONY: test coverage test-registry-integration smoke-cli test-real-dataset \
+        fmt vet lint lint-depguard lint-fix lint-security vuln vuln-all \
+        build-sorictl release-dist golangci-lint govulncheck
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,16 @@ PKGS_COVERAGE := $(shell go list ./... | grep -v 'internal/bench')
 test:
 	@mkdir -p "$(GOCACHE_DIR)" "$(GOTMPDIR)"
 	$(GOENV) go test -v -race -cover -short $(PKGS_ALL)
+
+test-registry-integration:
+	@mkdir -p "$(GOCACHE_DIR)" "$(GOTMPDIR)"
+	$(GOENV) go test -v -run TestRegistryIntegration ./...
+
+smoke-cli: build-sorictl
+	SORICTL_BIN="$(LOCALBIN)/sorictl" ./scripts/sorictl-registry-smoke.sh small
+
+test-real-dataset: build-sorictl
+	SORICTL_BIN="$(LOCALBIN)/sorictl" ./scripts/sorictl-registry-smoke.sh real
 
 # ── Coverage ──────────────────────────────────────────────────────────────────
 

@@ -16,6 +16,8 @@ registry 운영 신뢰성을 고정하는 것이다.
   충분히 예측 가능하다. 기준은 [sorictl-contract.md](sorictl-contract.md)이다.
 - GHCR과 Harbor에서 작은 fixture와 실제 genomics fixture를 push, inspect,
   fetch까지 검증했다.
+- [v1-test-plan.md](v1-test-plan.md)의 smoke, integration, real dataset,
+  release acceptance 기준을 통과했다.
 - `make lint`, `make test`, `make coverage`, `make vuln`이 통과한다.
 - GitHub Actions `Lint`, `Tests`, `Release`가 green이다.
 - GitHub Release asset과 checksum이 정상 생성된다.
@@ -40,6 +42,24 @@ registry 운영 신뢰성을 고정하는 것이다.
 남은 항목은 아래 checklist를 기준으로 닫는다.
 
 ## Checklist
+
+### 0. Test Layer Gate
+
+Status: open
+
+Required before `v1.0.0-rc1`:
+
+- [x] v1 테스트 계층이 [v1-test-plan.md](v1-test-plan.md)에 문서화되어 있다.
+- [x] CLI smoke를 반복 실행할 수 있는 `make smoke-cli` 타깃이 있다.
+- [x] real dataset CLI test를 반복 실행할 수 있는 `make test-real-dataset`
+      타깃이 있다.
+- [x] registry integration을 반복 실행할 수 있는 `make test-registry-integration`
+      타깃이 있다.
+- [ ] GHCR smoke result가 기록되어 있다.
+- [ ] Harbor smoke result가 기록되어 있다.
+- [ ] GHCR real dataset result가 기록되어 있다.
+- [ ] Harbor real dataset result가 기록되어 있다.
+- [ ] release binary acceptance result가 기록되어 있다.
 
 ### 1. Stable API Freeze
 
@@ -187,12 +207,14 @@ Exit criteria:
 ## Suggested Sequence
 
 1. Freeze public API and metadata schema docs.
-2. Run GHCR and Harbor small-fixture smoke with `sorictl`.
-3. Run GHCR and Harbor genomics-fixture smoke with size-conscious fixtures.
-4. Update registry compatibility notes with exact results.
-5. Create `v1.0.0-rc1`.
-6. Verify GitHub Actions and Release assets for `v1.0.0-rc1`.
-7. If no blocking UX or compatibility issues remain, create `v1.0.0`.
+2. Run GHCR and Harbor small-fixture smoke with `make smoke-cli`.
+3. Run registry integration with `make test-registry-integration`.
+4. Run GHCR and Harbor real-dataset tests with `make test-real-dataset`.
+5. Update registry compatibility notes with exact results.
+6. Create `v1.0.0-rc1`.
+7. Verify GitHub Actions and Release assets for `v1.0.0-rc1`.
+8. Run release binary acceptance against GHCR and Harbor.
+9. If no blocking UX or compatibility issues remain, create `v1.0.0`.
 
 ## Non-goals for v1.0.0
 
