@@ -1,6 +1,6 @@
 # sori
 
-**v0.7.0-stable** — OCI 기반 참조 데이터(볼륨) 패키징 및 referrer push 라이브러리.  
+**v0.8.0-rc4** — OCI 기반 참조 데이터(볼륨) 패키징 및 registry-neutral `sorictl` CLI.
 디렉터리를 OCI 아티팩트로 변환하고, 로컬 OCI 스토어와 원격 레지스트리(Harbor 등) 사이의 push/fetch를 담당한다.
 
 ## 개요
@@ -15,6 +15,9 @@ OCI 이미지 형식으로 패키징하는 Go 라이브러리다.
 |------|------|
 | [docs/research/results-summary.md](docs/research/results-summary.md) | 벤치마크 결과 (v0.7.0-stable 실측값) |
 | [docs/public-api.md](docs/public-api.md) | 공개 API 안정도 분류 |
+| [docs/v1-readiness.md](docs/v1-readiness.md) | v1.0.0 준비 체크리스트와 release gate |
+| [docs/dataset-metadata-v1.md](docs/dataset-metadata-v1.md) | dataset-metadata.json v1 schema 계약 |
+| [docs/sorictl-contract.md](docs/sorictl-contract.md) | sorictl v1 CLI 명령/출력 계약 |
 | [docs/generalization-sprint-plan.md](docs/generalization-sprint-plan.md) | 범용 라이브러리화 로드맵 |
 | [docs/maturity-sprint-plan.md](docs/maturity-sprint-plan.md) | 성숙화 계획 |
 | [docs/stable-api-promotion.md](docs/stable-api-promotion.md) | stable API 승격 검토 항목 |

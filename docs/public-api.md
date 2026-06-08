@@ -1,6 +1,7 @@
 # Sori Public API Status
 
 이 문서는 `sori`의 public API를 안정도 기준으로 분류한다.
+`v1.0.0`의 안정 계약은 이 문서의 Stable API 목록을 기준으로 한다.
 
 분류 기준:
 
@@ -130,9 +131,18 @@
 
 ## Compatibility Promise
 
-- Stable API는 patch/minor 수준에서 시그니처를 불필요하게 바꾸지 않는다.
+- Stable API는 v1 이후 patch/minor 수준에서 시그니처를 불필요하게 바꾸지 않는다.
+- Stable API의 exported type field는 documented meaning을 유지한다.
 - Compatibility API는 유지하되, 새 기능은 Stable API 중심으로 추가한다.
 - Experimental API는 필요 시 breaking change가 가능하다. 변경 시 README와 이 문서에 먼저 반영한다.
+
+## v1.0.0 Gate
+
+`v1.0.0`을 태그하기 전에는 [v1-readiness.md](v1-readiness.md)의
+Stable API, metadata, CLI, registry compatibility 항목을 닫아야 한다.
+특히 `PackageOptions`, `PushOptions`, `FetchOptions`, `RemoteTarget`,
+`DatasetMetadata`, `ChunkIndex`는 v1 이후 사용자가 직접 의존할 가능성이 큰
+계약으로 보고 최종 검토한다.
 
 ## Breaking Change 후보
 

@@ -206,6 +206,62 @@ func TestLoadOrBuildMetadata_File(t *testing.T) {
 	}
 }
 
+func TestMetadataInitOutput_ValidatesAsDatasetMetadata(t *testing.T) {
+	out, err := captureStdout(func() error {
+		return runMetadataInit([]string{
+			"--ref", "registry.example.com/bio/refdata:grch38-bwa-v1",
+			"--name", "grch38-bwa",
+			"--display-name", "GRCh38 BWA Index",
+			"--description", "Human GRCh38 BWA index.",
+			"--organism", "Homo sapiens",
+			"--taxonomy-id", "9606",
+			"--reference", "GRCh38",
+			"--reference-version", "v1",
+			"--format", "BWA index",
+			"--tool", "bwa,bwa-mem2",
+		})
+	})
+	if err != nil {
+		t.Fatalf("runMetadataInit: %v", err)
+	}
+	if err := sori.ValidateDatasetMetadataJSON(out); err != nil {
+		t.Fatalf("ValidateDatasetMetadataJSON: %v\n%s", err, string(out))
+	}
+	var meta sori.DatasetMetadata
+	if err := json.Unmarshal(out, &meta); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if meta.ArtifactRef != "registry.example.com/bio/refdata:grch38-bwa-v1" {
+		t.Fatalf("artifactRef = %q", meta.ArtifactRef)
+	}
+	if len(meta.CompatibleTools) != 2 {
+		t.Fatalf("compatibleTools = %#v", meta.CompatibleTools)
+	}
+}
+
+func captureStdout(fn func() error) ([]byte, error) {
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = orig
+	}()
+
+	fnErr := fn()
+	closeErr := w.Close()
+	out, readErr := io.ReadAll(r)
+	if readErr != nil {
+		return nil, readErr
+	}
+	if fnErr != nil {
+		return nil, fnErr
+	}
+	return out, closeErr
+}
+
 func writeTestFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0o644)
 }
