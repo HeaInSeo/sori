@@ -75,6 +75,9 @@ func NewRetryHTTPClient(cfg RemoteConfig) (*http.Client, error) {
 	if cfg.Transport != nil {
 		base = cfg.Transport
 	}
+	if base == nil {
+		base = http.DefaultTransport
+	}
 	baseTransport, ok := base.(*http.Transport)
 	if ok {
 		clonedTransport := baseTransport.Clone()
