@@ -18,6 +18,7 @@ type registryIntegrationConfig struct {
 	tag                 string
 	plainHTTP           bool
 	insecureTLS         bool
+	caFile              string
 	referrersCapability *bool
 }
 
@@ -142,6 +143,7 @@ func loadRegistryIntegrationConfig(t *testing.T) registryIntegrationConfig {
 
 	plainHTTP := os.Getenv("SORI_REGISTRY_PLAIN_HTTP") == "1"
 	insecureTLS := os.Getenv("SORI_REGISTRY_INSECURE_TLS") == "1"
+	caFile := os.Getenv("SORI_REGISTRY_CA_FILE")
 	var referrersCapability *bool
 	if raw := os.Getenv("SORI_REGISTRY_REFERRERS_CAPABLE"); raw != "" {
 		v := raw == "1" || raw == "true"
@@ -157,6 +159,7 @@ func loadRegistryIntegrationConfig(t *testing.T) registryIntegrationConfig {
 		tag:                 tag,
 		plainHTTP:           plainHTTP,
 		insecureTLS:         insecureTLS,
+		caFile:              caFile,
 		referrersCapability: referrersCapability,
 	}
 }
@@ -167,6 +170,7 @@ func (c registryIntegrationConfig) target() RemoteTarget {
 		Repository:          c.repository,
 		PlainHTTP:           c.plainHTTP,
 		InsecureTLS:         c.insecureTLS,
+		CAFile:              c.caFile,
 		Username:            c.username,
 		Password:            c.password,
 		Token:               c.token,
