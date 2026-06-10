@@ -107,6 +107,7 @@ func assertRegistryResolveMatchesPush(t *testing.T, ctx context.Context, cfg reg
 		Username:            cfg.username,
 		Password:            cfg.password,
 		Token:               cfg.token,
+		CAFile:              cfg.caFile,
 		ReferrersCapability: cfg.referrersCapability,
 	})
 	if err != nil {

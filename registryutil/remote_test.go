@@ -2,12 +2,20 @@ package registryutil
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
@@ -35,6 +43,61 @@ func TestNewRetryHTTPClient_InsecureTLSAndCustomTransport(t *testing.T) {
 		return
 	}
 	t.Fatalf("expected retry transport, got %T", client.Transport)
+}
+
+func TestNewRetryHTTPClient_CAFileAppliesToDefaultRetryTransport(t *testing.T) {
+	certPEM := testCACertPEM(t)
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, certPEM, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	client, err := NewRetryHTTPClient(RemoteConfig{CAFile: caFile})
+	if err != nil {
+		t.Fatalf("NewRetryHTTPClient: %v", err)
+	}
+
+	retryTransport, ok := client.Transport.(*retry.Transport)
+	if !ok {
+		t.Fatalf("expected retry transport, got %T", client.Transport)
+	}
+	base, ok := retryTransport.Base.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected default base transport clone, got %T", retryTransport.Base)
+	}
+	if base == http.DefaultTransport {
+		t.Fatal("expected cloned default transport, got http.DefaultTransport")
+	}
+	if base.TLSClientConfig == nil || base.TLSClientConfig.RootCAs == nil {
+		t.Fatal("expected CA file to configure TLS root CAs")
+	}
+	subjects := base.TLSClientConfig.RootCAs.Subjects()
+	if len(subjects) == 0 {
+		t.Fatal("expected at least one root CA subject")
+	}
+}
+
+func testCACertPEM(t *testing.T) []byte {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "sori-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 func TestNewRepository_UsesAuthProviderAndCapability(t *testing.T) {
