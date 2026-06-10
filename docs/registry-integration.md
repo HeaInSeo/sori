@@ -30,8 +30,11 @@
 - `SORI_REGISTRY_TOKEN`
 - `SORI_REGISTRY_PLAIN_HTTP`
   `1`이면 HTTP 사용
+- `SORI_REGISTRY_CA_FILE`
+  사설 CA PEM 파일 경로. 사설 CA 기반 HTTPS registry(Harbor 등)에서는 이 방식을 권장한다.
+  예: `~/.config/infra-lab/certs/harbor-ca.crt`
 - `SORI_REGISTRY_INSECURE_TLS`
-  `1`이면 TLS 검증 완화
+  `1`이면 TLS 검증 완화. 로컬 개발 편의용이며, 사설 CA 환경에서는 `SORI_REGISTRY_CA_FILE`을 쓰는 것이 맞다.
 - `SORI_REGISTRY_REFERRERS_CAPABLE`
   지정하지 않으면 oras-go 자동 감지
   `1` 또는 `true`: Referrers API 강제
@@ -64,6 +67,8 @@
 
 ## 권장 실행 예시
 
+사설 CA 기반 Harbor(권장):
+
 ```bash
 env \
   SORI_RUN_REGISTRY_INTEGRATION=1 \
@@ -71,7 +76,7 @@ env \
   SORI_REGISTRY_REPOSITORY=project/dataset \
   SORI_REGISTRY_USERNAME=admin \
   SORI_REGISTRY_PASSWORD=secret \
-  SORI_REGISTRY_PLAIN_HTTP=0 \
+  SORI_REGISTRY_CA_FILE=~/.config/infra-lab/certs/harbor-ca.crt \
   SORI_REGISTRY_REFERRERS_CAPABLE=true \
   go test -run TestRegistryIntegration_PackagePushReferrer ./...
 ```
@@ -83,6 +88,7 @@ env \
   SORI_RUN_REGISTRY_INTEGRATION=1 \
   SORI_REGISTRY_HOST=harbor.example.com \
   SORI_REGISTRY_REPOSITORY=project/dataset \
+  SORI_REGISTRY_CA_FILE=~/.config/infra-lab/certs/harbor-ca.crt \
   go test -run TestRegistryIntegration_PackagePushOnly ./...
 ```
 
