@@ -36,6 +36,7 @@ func NewCollectionManager(rootDir string, initial ...VolumeEntry) (*CollectionMa
 
 func LoadOrNewCollection(rootDir string, initialEntries ...VolumeEntry) (*VolumeCollection, error) {
 	path := filepath.Join(rootDir, CollectionJson)
+	// #nosec G304 -- collection root is a caller-configured local store path.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -243,7 +244,7 @@ func (vc *VolumeCollection) RemoveVolume(idx int) error {
 }
 
 func saveCollection(rootDir string, coll VolumeCollection) error {
-	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+	if err := os.MkdirAll(rootDir, 0o750); err != nil {
 		return transportError("saveCollection", fmt.Sprintf("create collection dir %q", rootDir), err)
 	}
 	path := filepath.Join(rootDir, CollectionJson)

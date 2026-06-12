@@ -19,28 +19,35 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		os.Remove(tmpName)
+		removeAtomicTempFile(tmpName)
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		os.Remove(tmpName)
+		removeAtomicTempFile(tmpName)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		removeAtomicTempFile(tmpName)
 		return err
 	}
 
 	if err := os.Chmod(tmpName, perm); err != nil {
-		os.Remove(tmpName)
+		removeAtomicTempFile(tmpName)
 		return err
 	}
 
 	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
+		removeAtomicTempFile(tmpName)
 		return err
 	}
 
 	return nil
+}
+
+func removeAtomicTempFile(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		// Best-effort cleanup only; preserve the original write/rename error.
+		return
+	}
 }

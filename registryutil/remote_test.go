@@ -71,9 +71,21 @@ func TestNewRetryHTTPClient_CAFileAppliesToDefaultRetryTransport(t *testing.T) {
 	if base.TLSClientConfig == nil || base.TLSClientConfig.RootCAs == nil {
 		t.Fatal("expected CA file to configure TLS root CAs")
 	}
-	subjects := base.TLSClientConfig.RootCAs.Subjects()
-	if len(subjects) == 0 {
-		t.Fatal("expected at least one root CA subject")
+
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("expected test CA PEM block")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots:       base.TLSClientConfig.RootCAs,
+		CurrentTime: time.Now(),
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}); err != nil {
+		t.Fatalf("expected CA file to be trusted by configured root pool: %v", err)
 	}
 }
 

@@ -101,13 +101,13 @@ func (c *Client) PushPackagedVolumeWithOptions(ctx context.Context, pkg *Package
 // FetchVolumeSequential fetches a packaged dataset using the preferred client
 // path with sequential extraction.
 func (c *Client) FetchVolumeSequential(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex, error) {
-	return c.FetchVolume(ctx, destRoot, repo, tag, FetchOptions{Concurrency: 1})
+	return FetchVolSeq(ctx, destRoot, repo, tag)
 }
 
 // FetchVolumeParallel fetches a packaged dataset using the preferred client
 // path with explicit parallelism.
 func (c *Client) FetchVolumeParallel(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
-	return c.FetchVolume(ctx, destRoot, repo, tag, FetchOptions{Concurrency: concurrency})
+	return FetchVolParallel(ctx, destRoot, repo, tag, concurrency)
 }
 
 // FetchVolumeFresh fetches a packaged dataset into destRoot using the staging
@@ -123,11 +123,13 @@ func (c *Client) FetchVolumeFresh(ctx context.Context, destRoot, repo, tag strin
 }
 
 // FetchVolume fetches a packaged dataset using the preferred client-based core
-// path and core fetch options.
+// path and core fetch options. By default, extraction uses a staging directory
+// and requires destRoot to be absent, preventing partial-extraction states.
 //
 // When RequireEmptyDestination is true, extraction uses a staging directory so
 // that destRoot is either left untouched (on failure) or fully populated (on
-// success), preventing partial-extraction states.
+// success). This is also the default behavior when neither RequireEmptyDestination
+// nor AtomicOverwrite is set.
 //
 // When AtomicOverwrite is true, the 3-phase overwrite path is used: the new
 // content is extracted to a staging sibling, the existing destRoot is renamed
@@ -145,10 +147,10 @@ func (c *Client) FetchVolume(ctx context.Context, destRoot, repo, tag string, op
 		}
 		return fetchVolWithStaging(ctx, destRoot, repo, tag, opts.Concurrency)
 	}
-	if opts.Concurrency <= 1 {
-		return FetchVolSeq(ctx, destRoot, repo, tag)
+	if err := ensureDestinationAbsent(destRoot); err != nil {
+		return nil, err
 	}
-	return FetchVolParallel(ctx, destRoot, repo, tag, opts.Concurrency)
+	return fetchVolWithStaging(ctx, destRoot, repo, tag, opts.Concurrency)
 }
 
 func ensureDestinationAbsent(path string) error {

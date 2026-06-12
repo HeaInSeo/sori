@@ -899,6 +899,18 @@ func TestClientFetchVolume_RequireEmptyDestination_EmptyDir(t *testing.T) {
 	}
 }
 
+func TestClientFetchVolume_DefaultRejectsExistingDestination(t *testing.T) {
+	dest := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dest, "existing.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	client := NewClient()
+	_, err := client.FetchVolume(context.Background(), dest, "./repo", "v1.0.0", FetchOptions{})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict for existing dest with default fetch options, got %v", err)
+	}
+}
+
 func TestBuildDataSpec(t *testing.T) {
 	req := PackageRequest{
 		SourceDir:   "./test-vol",

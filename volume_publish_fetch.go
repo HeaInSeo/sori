@@ -527,7 +527,7 @@ func fetchVolSeqFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarg
 			}
 			return nil, transportError("fetchVolSeqFrom", fmt.Sprintf("fetch layer %s", vl.desc.Digest), err)
 		}
-		if err := os.MkdirAll(destRoot, 0o755); err != nil {
+		if err := os.MkdirAll(destRoot, 0o750); err != nil {
 			_ = layerRC.Close()
 			return nil, transportError("fetchVolSeqFrom", fmt.Sprintf("create destination root %s", destRoot), err)
 		}
@@ -690,7 +690,7 @@ func fetchVolParallelFrom(ctx context.Context, destRoot string, src oras.ReadOnl
 				cancel()
 				continue
 			}
-			if err := os.MkdirAll(destRoot, 0o755); err != nil {
+			if err := os.MkdirAll(destRoot, 0o750); err != nil {
 				_ = layerRC.Close()
 				results <- jobResult{idx: meta.idx, err: transportError("fetchVolParallelFrom", fmt.Sprintf("mkdir %s", destRoot), err)}
 				cancel()
@@ -813,6 +813,7 @@ func validateStagingDir(caller, stagingDir string, vi *VolumeIndex) error {
 		}
 		if rootBase != "" {
 			configPath := filepath.Join(stagingDir, rootBase, ConfigBlobJson)
+			// #nosec G304 -- configPath is under the private staging directory created by this fetch.
 			if data, readFileErr := os.ReadFile(configPath); readFileErr == nil {
 				if !json.Valid(data) {
 					return integrityError(caller, "configblob.json is not valid JSON", nil)
@@ -869,7 +870,7 @@ func fetchVolWithStaging(ctx context.Context, destRoot, repo, tag string, concur
 // of destRoot and renames it to destRoot on success.
 func fetchChunkedWithStaging(ctx context.Context, destRoot, storePath, tag, manifestDigest string) (*VolumeIndex, error) {
 	parent := filepath.Dir(destRoot)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return nil, transportError("fetchChunkedWithStaging", "create parent directory", err)
 	}
 	base := filepath.Base(destRoot)
@@ -880,7 +881,7 @@ func fetchChunkedWithStaging(ctx context.Context, destRoot, storePath, tag, mani
 	cleanup := true
 	defer func() {
 		if cleanup {
-			os.RemoveAll(stagingDir)
+			removeStagingDir(stagingDir)
 		}
 	}()
 	if err := chunked.Fetch(ctx, storePath, stagingDir, tag, chunked.FetchOptions{}); err != nil {
@@ -903,7 +904,7 @@ func fetchChunkedWithStaging(ctx context.Context, destRoot, storePath, tag, mani
 // Precondition: destRoot must not exist (call ensureDestinationAbsent first).
 func fetchVolWithStagingFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag string, concurrency int) (*VolumeIndex, error) {
 	parent := filepath.Dir(destRoot)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return nil, transportError("fetchVolWithStagingFrom", "create parent directory", err)
 	}
 	base := filepath.Base(destRoot)
@@ -914,7 +915,7 @@ func fetchVolWithStagingFrom(ctx context.Context, destRoot string, src oras.Read
 	cleanup := true
 	defer func() {
 		if cleanup {
-			os.RemoveAll(stagingDir)
+			removeStagingDir(stagingDir)
 		}
 	}()
 
@@ -1057,7 +1058,7 @@ func fetchRemoteWithDualPath(ctx context.Context, caller, destRoot string, src o
 //	Cleanup — remove backup (best-effort; warning logged on failure)
 func fetchChunkedWithAtomicOverwrite(ctx context.Context, destRoot, storePath, tag, manifestDigest string) (*VolumeIndex, error) {
 	parent := filepath.Dir(destRoot)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return nil, transportError("fetchChunkedWithAtomicOverwrite", "create parent directory", err)
 	}
 	base := filepath.Base(destRoot)
@@ -1068,7 +1069,7 @@ func fetchChunkedWithAtomicOverwrite(ctx context.Context, destRoot, storePath, t
 	cleanupStaging := true
 	defer func() {
 		if cleanupStaging {
-			os.RemoveAll(stagingDir)
+			removeStagingDir(stagingDir)
 		}
 	}()
 
@@ -1140,7 +1141,7 @@ func fetchChunkedWithAtomicOverwrite(ctx context.Context, destRoot, storePath, t
 // the staging and backup paths for manual recovery.
 func fetchVolWithAtomicOverwriteFrom(ctx context.Context, destRoot string, src oras.ReadOnlyTarget, tag string, concurrency int) (*VolumeIndex, error) {
 	parent := filepath.Dir(destRoot)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return nil, transportError("fetchVolWithAtomicOverwriteFrom", "create parent directory", err)
 	}
 	base := filepath.Base(destRoot)
@@ -1151,7 +1152,7 @@ func fetchVolWithAtomicOverwriteFrom(ctx context.Context, destRoot string, src o
 	cleanupStaging := true
 	defer func() {
 		if cleanupStaging {
-			os.RemoveAll(stagingDir)
+			removeStagingDir(stagingDir)
 		}
 	}()
 
@@ -1265,6 +1266,13 @@ func partitionPathsOverlap(a, b string) bool {
 	a = filepath.ToSlash(a)
 	b = filepath.ToSlash(b)
 	return strings.HasPrefix(b+"/", a+"/") || strings.HasPrefix(a+"/", b+"/")
+}
+
+func removeStagingDir(path string) {
+	if err := os.RemoveAll(path); err != nil {
+		// Best-effort cleanup only; callers return the primary fetch error.
+		return
+	}
 }
 
 func pushDataSpecManifest(ctx context.Context, target content.Pusher, subjectDesc ocispec.Descriptor, spec *DataSpec) (*ReferrerPushResult, error) {

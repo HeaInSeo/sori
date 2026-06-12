@@ -103,6 +103,7 @@ func NewRetryHTTPClient(cfg RemoteConfig) (*http.Client, error) {
 }
 
 func LoadCertPool(caFile string) (*x509.CertPool, error) {
+	// #nosec G304 -- caFile is an explicit user-configured trust anchor path.
 	pemBytes, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, transportError("LoadCertPool", "read CA file "+caFile, err)

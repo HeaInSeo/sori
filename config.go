@@ -79,6 +79,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, validationError("LoadConfig", fmt.Sprintf("config is not a regular file: %s", abs), nil)
 	}
 
+	// #nosec G304 -- config path is supplied explicitly by the caller.
 	f, err := os.Open(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

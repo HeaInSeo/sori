@@ -314,6 +314,7 @@ func runDatasetFetch(args []string) error {
 }
 
 func parsePushConfig(args []string) (pushConfig, error) {
+	// #nosec G101 -- these are environment variable names, not embedded credentials.
 	cfg := pushConfig{
 		storePath:       filepath.Join(os.TempDir(), defaultStoreName),
 		kind:            "dataset",

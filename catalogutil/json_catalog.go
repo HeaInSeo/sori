@@ -20,34 +20,42 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		os.Remove(tmpName)
+		removeTempFile(tmpName)
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		os.Remove(tmpName)
+		removeTempFile(tmpName)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		removeTempFile(tmpName)
 		return err
 	}
 
 	if err := os.Chmod(tmpName, perm); err != nil {
-		os.Remove(tmpName)
+		removeTempFile(tmpName)
 		return err
 	}
 
 	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
+		removeTempFile(tmpName)
 		return err
 	}
 
 	return nil
 }
 
+func removeTempFile(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		// Best-effort cleanup only; the original IO error remains more useful.
+		return
+	}
+}
+
 func LoadOrInit[T any](rootDir, fileName string, zero T) (*T, error) {
 	path := filepath.Join(rootDir, fileName)
+	// #nosec G304 -- catalog paths are supplied by the caller of this utility.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -64,7 +72,7 @@ func LoadOrInit[T any](rootDir, fileName string, zero T) (*T, error) {
 }
 
 func Save(rootDir, fileName string, value any) error {
-	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+	if err := os.MkdirAll(rootDir, 0o750); err != nil {
 		return transportError("Save", "create catalog dir "+rootDir, err)
 	}
 	path := filepath.Join(rootDir, fileName)

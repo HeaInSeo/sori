@@ -15,6 +15,7 @@ import (
 )
 
 func loadMetadataJSON(path string) ([]byte, error) {
+	// #nosec G304 -- metadata path is supplied by packaging/fetch callers and validated by higher-level flows.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -126,6 +127,7 @@ func ValidateVolumeDir(volDir string) ([]byte, error) {
 // caller should treat a non-nil error as "no valid local index" and proceed
 // with a full fetch.
 func readLocalVolumeIndex(destRoot string) (*VolumeIndex, error) {
+	// #nosec G304 -- reads the fixed volume-index.json under caller-selected destRoot.
 	data, err := os.ReadFile(filepath.Join(destRoot, VolumeIndexJson))
 	if err != nil {
 		return nil, err
@@ -138,7 +140,7 @@ func readLocalVolumeIndex(destRoot string) (*VolumeIndex, error) {
 }
 
 func writeVolumeIndex(destRoot string, vi *VolumeIndex) error {
-	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+	if err := os.MkdirAll(destRoot, 0o750); err != nil {
 		return transportError("writeVolumeIndex", fmt.Sprintf("create destination root %s", destRoot), err)
 	}
 

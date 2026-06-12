@@ -79,6 +79,7 @@ func TarGzDirTo(w io.Writer, fsDir, prefixPath string) error {
 			return transportError("TarGzDirTo", "write tar header for "+path, err)
 		}
 		if info.Mode().IsRegular() {
+			// #nosec G304 -- path comes from filepath.WalkDir over caller-provided fsDir and was Lstat-checked above.
 			f, err := os.Open(path)
 			if err != nil {
 				return transportError("TarGzDirTo", "open source file "+path, err)
@@ -169,6 +170,7 @@ func TarGzDirFilesTo(w io.Writer, fsDir, prefixPath string, skipNames map[string
 			return false, transportError("TarGzDirFilesTo", "write tar header for "+path, err)
 		}
 		if info.Mode().IsRegular() {
+			// #nosec G304 -- path is a caller-provided source file and was Lstat-checked above.
 			f, err := os.Open(path)
 			if err != nil {
 				return false, transportError("TarGzDirFilesTo", "open "+path, err)
@@ -350,9 +352,10 @@ func extractTarEntry(caller string, tr *tar.Reader, hdr *tar.Header, target stri
 		}
 	case tar.TypeReg:
 		parentDir := filepath.Dir(target)
-		if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		if err := os.MkdirAll(parentDir, 0o750); err != nil {
 			return transportError(caller, "mkdir parent "+parentDir, err)
 		}
+		// #nosec G304 -- target is derived from SecureJoinArchivePath after rejecting absolute, traversal, and symlink entries.
 		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
 		if err != nil {
 			return transportError(caller, "open file "+target, err)

@@ -23,10 +23,10 @@ jobs:
           go-version-file: go.mod
 
       - name: Run security lint observation
-        run: make lint-security
+        run: make lint-security-observe
 
       - name: Run vuln observation
-        run: make vuln
+        run: make vuln-observe
 
       - name: Upload reports
         uses: actions/upload-artifact@v7

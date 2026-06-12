@@ -398,8 +398,8 @@ func (p *Publisher) pushChunk(
 			if delay > 8*time.Second {
 				delay = 8 * time.Second
 			}
-			// ±10% jitter: multiply by a factor in [0.9, 1.1].
-			factor := 0.9 + rand.Float64()*0.2
+			// ±10% retry jitter only; not used for security decisions.
+			factor := 0.9 + rand.Float64()*0.2 // #nosec G404
 			jitter := time.Duration(float64(delay) * factor)
 			select {
 			case <-time.After(jitter):
