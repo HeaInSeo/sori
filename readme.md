@@ -537,8 +537,9 @@ var (
 | **AtomicOverwrite** | `FetchOptions{AtomicOverwrite: true}` | staging 추출 → 기존 `destRoot` 백업 → staging rename. 갱신 워크플로에 권장. |
 | **FetchVolumeFresh** | `Client.FetchVolumeFresh(...)` | `RequireEmptyDestination:true` 묵시적 wrapper. 최초 설치용 zero-config API. |
 | **Safe fetch** | `FetchOptions{RequireEmptyDestination: true}` | `destRoot`가 없어야 시작. staging 추출 후 성공 시 rename. |
+| **FetchVolume 기본값** | `Client.FetchVolume(..., FetchOptions{})` | safe fetch와 동일하게 staging을 사용하고 기존 `destRoot`를 거부. |
 | **Remote fetch** | `Client.FetchVolumeFromRemote` | 기본값이 safe fetch. `AtomicOverwrite` opt-in 지원. |
-| **Legacy direct** | `FetchOptions{}` (기본) | `destRoot`에 직접 추출. 중간 실패 시 부분 상태 가능. 하위 호환용만. |
+| **Legacy direct** | `FetchVolumeSequential` / `FetchVolumeParallel` | `destRoot`에 직접 추출. 중간 실패 시 부분 상태 가능. 하위 호환용만. |
 
 `RequireEmptyDestination`과 `AtomicOverwrite`를 동시에 설정하면 `ErrValidation`을 반환한다.
 

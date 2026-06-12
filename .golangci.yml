@@ -163,7 +163,15 @@ linters:
           - unparam
           - prealloc
           - depguard
+          - gosec
         path: ".*_test\\.go"
+
+      # internal/bench generates local benchmark fixtures and reports from
+      # caller-provided paths; its file-permission and path-variable patterns
+      # are intentionally outside the product security surface.
+      - linters:
+          - gosec
+        path: "internal/bench/.*\\.go"
 
       # The parallel fetch worker closure and publish loop are intentionally
       # dense — complexity warnings on these specific functions are accepted.

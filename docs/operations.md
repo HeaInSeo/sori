@@ -31,8 +31,9 @@
 
 ## Fetch Safety
 
-- `FetchOptions.RequireEmptyDestination=true`를 사용하면 기존 파일 위에 덮어쓰는 복원을 막을 수 있다
+- `Client.FetchVolume(..., FetchOptions{})`와 `FetchOptions.RequireEmptyDestination=true`는 staging을 사용하고 기존 `destRoot`를 거부한다
 - 복원 대상은 temp dir 아래에서 검증 후 이동하는 방식이 가장 안전하다
+- 직접 추출이 필요한 하위 호환 경로는 `FetchVolumeSequential` 또는 `FetchVolumeParallel`을 명시적으로 사용한다
 
 ## Packaging Policy
 

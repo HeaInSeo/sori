@@ -123,7 +123,7 @@ func (f *Fetcher) fetch(ctx context.Context, destRoot, volName string) error {
 	}
 
 	// Step 5: create destRoot if needed.
-	if err := os.MkdirAll(destRoot, 0o755); err != nil {
+	if err := os.MkdirAll(destRoot, 0o750); err != nil {
 		return fmt.Errorf("%s: create destRoot: %w", caller, err)
 	}
 
@@ -160,11 +160,11 @@ func (f *Fetcher) fetch(ctx context.Context, destRoot, volName string) error {
 				return fmt.Errorf("%s: fetch dataset-metadata: %w", caller, err)
 			}
 			soriDir := filepath.Join(destRoot, ".sori")
-			if err := os.MkdirAll(soriDir, 0o755); err != nil {
+			if err := os.MkdirAll(soriDir, 0o750); err != nil {
 				return fmt.Errorf("%s: create .sori dir: %w", caller, err)
 			}
 			metaPath := filepath.Join(soriDir, "dataset-metadata.json")
-			if err := os.WriteFile(metaPath, data, 0o644); err != nil {
+			if err := os.WriteFile(metaPath, data, 0o600); err != nil {
 				return fmt.Errorf("%s: write dataset-metadata: %w", caller, err)
 			}
 			break
@@ -179,7 +179,7 @@ func (f *Fetcher) fetch(ctx context.Context, destRoot, volName string) error {
 				return fmt.Errorf("%s: fetch configblob: %w", caller, err)
 			}
 			cfgPath := filepath.Join(destRoot, "configblob.json")
-			if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+			if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
 				return fmt.Errorf("%s: write configblob: %w", caller, err)
 			}
 			break
@@ -198,6 +198,7 @@ func VerifyDestTree(destRoot string, files []ChunkIndexFile) (durationMs int64, 
 	start := time.Now()
 	for i := range files {
 		destPath := filepath.Join(destRoot, filepath.FromSlash(files[i].Path))
+		// #nosec G304 -- files are expected to have passed ValidateIndex before fetch/verify.
 		f, openErr := os.Open(destPath)
 		if openErr != nil {
 			return 0, fmt.Errorf("chunked.VerifyDestTree: open %s: %w", files[i].Path, openErr)
@@ -224,11 +225,12 @@ func (f *Fetcher) reconstructFile(ctx context.Context, destRoot string, idxFile 
 	destPath := filepath.Join(destRoot, filepath.FromSlash(idxFile.Path))
 
 	// Step 1: create parent directories.
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o750); err != nil {
 		return fmt.Errorf("%s: create parent dirs for %s: %w", caller, idxFile.Path, err)
 	}
 
 	// Step 2: pre-allocate file.
+	// #nosec G304 -- idxFile.Path is validated by ValidateIndex before reconstruction.
 	file, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fs.FileMode(idxFile.Mode))
 	if err != nil {
 		return fmt.Errorf("%s: create file %s: %w", caller, idxFile.Path, err)
@@ -290,6 +292,7 @@ func (f *Fetcher) reconstructFile(ctx context.Context, destRoot string, idxFile 
 	}
 
 	// Step 5: verify whole-file sha256.
+	// #nosec G304 -- destPath is the same ValidateIndex-derived path written above.
 	rf, err := os.Open(destPath)
 	if err != nil {
 		return fmt.Errorf("%s: open file for verification %s: %w", caller, idxFile.Path, err)

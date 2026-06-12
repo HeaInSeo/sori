@@ -166,10 +166,11 @@ for fresh installs:
 - `destRoot` must not exist. Extracts to staging, commits on full success.
   `destRoot` is either absent (failure) or fully populated (success).
 
-**Remote fetch** (`Client.FetchVolumeFromRemote`) — always uses safe fetch by
-default; `AtomicOverwrite` opt-in supported.
+**Default local/remote fetch** (`Client.FetchVolume` /
+`Client.FetchVolumeFromRemote`) — uses safe fetch by default; `AtomicOverwrite`
+opt-in supported.
 
-**Legacy direct fetch** (`RequireEmptyDestination: false`, default):
+**Legacy direct fetch** (`FetchVolumeSequential` / `FetchVolumeParallel`):
 - Extracts directly into `destRoot`. A mid-fetch failure leaves a partial
   state. Retained for backward compatibility with existing callers only.
 
