@@ -71,6 +71,11 @@ stable로 올리려면 필드 의미와 유지 범위를 먼저 고정해야 한
 - `Display` 구조를 이대로 유지할지
 - `LifecyclePhase`, `IntegrityHealth`를 core 타입으로 둘지
 
+> **Deprecated**: `DataCatalog`, `NewDataCatalog`, `RegisterPackagedData`는 이 저장소와 알려진
+> 다운스트림 소비자(NodeKit, NodeVault) 어디에도 프로덕션 호출자가 없다 — 이 패키지 자체의 단위
+> 테스트에서만 쓰인다. stable 승격 검토 대상 목록에는 남아 있지만, 향후 릴리스에서 제거되거나
+> 실제 소비자에 연결될 수 있다. 자세한 내용은 sori#3 참고.
+
 ### 3. referrer API의 책임 범위를 고정할지 결정
 
 현재 referrer helper는 실용적이지만, stable 계약으로 보기엔 아직 질문이 남아 있다.

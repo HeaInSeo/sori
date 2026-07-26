@@ -124,6 +124,11 @@
 - NodeVault / Catalog 경계에 더 가깝다.
 - Sprint 8에서 generic metadata 아래 adapter로 내렸지만, 향후 `adapters/nodevault`로 이동할 가능성이 남아 있다.
 
+> **Deprecated**: `DataCatalog`, `NewDataCatalog`, `RegisterPackagedData`는 이 저장소와 알려진
+> 다운스트림 소비자(NodeKit, NodeVault) 어디에도 프로덕션 호출자가 없다 — 이 패키지 자체의 단위
+> 테스트에서만 쓰인다. 위 Experimental 목록에는 여전히 남아 있지만(외부 importer가 쓸 가능성 때문),
+> 향후 릴리스에서 제거되거나 실제 소비자에 연결될 수 있다. 자세한 내용은 sori#3 참고.
+
 추가 기준:
 
 - 새 코드는 가능하면 `ArtifactMetadata`까지만 core 계약으로 사용한다.

@@ -585,6 +585,11 @@ func (c *DataCatalog) List(stableRef string) ([]RegisteredDataDefinition, error)
 이 계층은 `NodeKit`의 `DataRegisterRequest`와 `Catalog`의 `AdminDataList` 사이를 잇는 최소 로컬 구현이다.  
 현재는 `rootDir/registered-data.json`에 저장한다.
 
+> **Deprecated**: `DataCatalog`, `NewDataCatalog`, `RegisterPackagedData`(및 그 메서드 `Get`/`List`/`Register`)는
+> 이 저장소(sorictl, adapters/nodevault)와 알려진 다운스트림 소비자(NodeKit, NodeVault) 어디에서도
+> 프로덕션 호출자가 없다 — 이 패키지 자체의 단위 테스트에서만 쓰인다. 향후 릴리스에서 제거되거나
+> 실제 소비자에 연결될 수 있다. 자세한 내용은 sori#3 참고.
+
 ### tar.gz 유틸리티
 
 ```go
