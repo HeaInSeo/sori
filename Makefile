@@ -35,7 +35,7 @@ PKGS_COVERAGE := $(shell go list ./... | grep -v 'internal/bench')
 # -short skips tests that require an external registry (Harbor etc.).
 test:
 	@mkdir -p "$(GOCACHE_DIR)" "$(GOTMPDIR)"
-	$(GOENV) go test -v -race -cover -short $(PKGS_ALL)
+	$(GOENV) go test -v -race -cover -short -shuffle=on -count=1 $(PKGS_ALL)
 
 test-registry-integration:
 	@mkdir -p "$(GOCACHE_DIR)" "$(GOTMPDIR)"
@@ -51,7 +51,7 @@ test-real-dataset: build-sorictl
 
 coverage:
 	@mkdir -p "$(REPORT_DIR)" "$(GOCACHE_DIR)" "$(GOTMPDIR)"
-	$(GOENV) go test -short $(PKGS_COVERAGE) -coverprofile="$(REPORT_DIR)/cover.out" -covermode=atomic
+	$(GOENV) go test -short -shuffle=on -count=1 $(PKGS_COVERAGE) -coverprofile="$(REPORT_DIR)/cover.out" -covermode=atomic
 	go tool cover -func="$(REPORT_DIR)/cover.out" | tee "$(REPORT_DIR)/coverage.txt"
 
 # ── Format / Vet ──────────────────────────────────────────────────────────────
