@@ -30,6 +30,7 @@ jobs:
 
       - name: Upload reports
         uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: sori-security-reports
           path: reports/
