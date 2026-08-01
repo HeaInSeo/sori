@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	digest "github.com/opencontainers/go-digest"
@@ -123,36 +124,64 @@ func TestFetch_ChunkDigestMismatch(t *testing.T) {
 		t.Fatalf("Publish: %v", err)
 	}
 
-	// Corrupt one blob in the OCI store by overwriting with wrong content.
-	blobsDir := filepath.Join(storePath, "blobs", "sha256")
-	entries, err := os.ReadDir(blobsDir)
-	if err != nil {
-		t.Fatalf("read blobs dir: %v", err)
-	}
-	corrupted := false
-	for _, e := range entries {
-		// Only corrupt a non-manifest, non-index file (the chunk blob).
-		blobPath := filepath.Join(blobsDir, e.Name())
-		info, _ := e.Info()
-		// Chunk blobs are medium-sized; skip tiny blobs (config, index, manifest).
-		if info.Size() > 100 {
-			if err := os.Chmod(blobPath, 0o644); err != nil {
-				t.Fatalf("chmod blob: %v", err)
-			}
-			if err := os.WriteFile(blobPath, []byte("corrupted content"), 0o644); err != nil {
-				t.Fatalf("corrupt blob: %v", err)
-			}
-			corrupted = true
+	// Corrupt an actual chunk blob, identified via the manifest layer list
+	// rather than a size heuristic. The original size-based heuristic
+	// (skip blobs <=100 bytes) could - and did, when this test was
+	// tightened - land on the chunk-index.json blob (MediaTypeChunkIndex)
+	// or another non-chunk blob instead, which fails store
+	// initialization/manifest parsing entirely before Fetch's per-chunk
+	// digest loop (fetch.go step 3) ever runs. That produces a non-nil
+	// error too, so the original bare "err != nil" assertion passed
+	// without ever actually exercising the per-chunk check this test is
+	// named for.
+	manifest := fetchManifest(t, storePath, "corrupt:v1")
+	var chunkDigest digest.Digest
+	for _, layer := range manifest.Layers {
+		if layer.MediaType == chunked.MediaTypeChunk {
+			chunkDigest = layer.Digest
 			break
 		}
 	}
-	if !corrupted {
-		t.Skip("no suitable blob found to corrupt")
+	if chunkDigest == "" {
+		t.Fatal("manifest has no MediaTypeChunk layer to corrupt")
+	}
+	blobPath := filepath.Join(storePath, "blobs", chunkDigest.Algorithm().String(), chunkDigest.Encoded())
+	if err := os.Chmod(blobPath, 0o644); err != nil {
+		t.Fatalf("chmod blob: %v", err)
+	}
+	if err := os.WriteFile(blobPath, []byte("corrupted content"), 0o644); err != nil {
+		t.Fatalf("corrupt blob: %v", err)
 	}
 
-	fetchErr := chunked.Fetch(ctx, storePath, t.TempDir(), "corrupt:v1", chunked.FetchOptions{})
+	// Record every progress event so the assertions below can prove the
+	// *per-chunk* digest check (fetch.go's Step 3 loop) is what actually
+	// caught the corruption, not the separate whole-file sha256 check
+	// (Step 5) - a corrupted chunk blob would independently fail *both*
+	// checks, since the final reconstructed file's bytes are wrong either
+	// way, so a bare err != nil assertion can't distinguish which branch
+	// fired. If the per-chunk check ran and failed, no ChunkFetched event
+	// for the corrupted chunk (or FileDone) should ever be emitted, since
+	// Fetch returns immediately on that error.
+	var events []chunked.ChunkProgress
+	fetchErr := chunked.Fetch(ctx, storePath, t.TempDir(), "corrupt:v1", chunked.FetchOptions{
+		Progress: func(cp chunked.ChunkProgress) { events = append(events, cp) },
+	})
 	if fetchErr == nil {
 		t.Fatal("expected error for corrupted chunk, got nil")
+	}
+	if !errors.Is(fetchErr, chunked.ErrIntegrity) {
+		t.Fatalf("expected ErrIntegrity, got %T: %v", fetchErr, fetchErr)
+	}
+	// The per-chunk message format is "...: chunk %d of %s: digest mismatch...";
+	// the whole-file format is "...: file %s: digest mismatch..." (no "chunk "
+	// substring). Only the per-chunk branch produces this exact shape.
+	if !strings.Contains(fetchErr.Error(), "chunk ") {
+		t.Fatalf("error does not look like the per-chunk digest-mismatch branch (fetch.go step 3): %v", fetchErr)
+	}
+	for _, ev := range events {
+		if ev.Event == "FileDone" {
+			t.Fatalf("FileDone was emitted despite a corrupted chunk - the per-chunk check did not stop Fetch before file completion: %+v", events)
+		}
 	}
 }
 
