@@ -76,6 +76,12 @@ func (r *blobFailAfterNRegistry) manifestWasWritten() bool {
 	return r.sawManifestWrite
 }
 
+func (r *blobFailAfterNRegistry) uploadAttempts() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.uploadInitiates
+}
+
 // TestPushLocalToRemote_PartialFailureDoesNotCommitManifest publishes a
 // chunked artifact (config blob + chunk-index blob + at least one chunk
 // blob, so at least 3 separate blob uploads precede the manifest write),
@@ -109,6 +115,13 @@ func TestPushLocalToRemote_PartialFailureDoesNotCommitManifest(t *testing.T) {
 	_, err := PushLocalToRemote(ctx, storePath, "partial-fail.v1", remoteRepo, "", "", true)
 	if err == nil {
 		t.Fatal("expected error from a push interrupted mid-sequence, got nil")
+	}
+	// Prove the failure actually happened on the second upload attempt
+	// (the one this test is designed to exercise), not on the first -
+	// otherwise this would pass just as well against a push that fails
+	// immediately, without ever exercising the partial-upload branch.
+	if attempts := registry.uploadAttempts(); attempts <= registry.n {
+		t.Fatalf("only %d upload attempt(s) were made, want more than %d - the second blob upload was never reached", attempts, registry.n)
 	}
 	if registry.manifestWasWritten() {
 		t.Fatal("manifest was written despite an interrupted blob upload - push is not all-or-nothing")
