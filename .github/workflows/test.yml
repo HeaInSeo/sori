@@ -59,3 +59,36 @@ jobs:
         with:
           name: sori-coverage
           path: reports/
+
+  registry-smoke:
+    name: Registry Push/Pull Smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      # A real OCI registry implementation running in-job (no extra billed
+      # runner time - services share the job's own runner allocation) so
+      # the full push -> inspect -> fetch -> overwrite/skip-if-current
+      # cycle (scripts/sorictl-registry-smoke.sh) exercises real registry
+      # HTTP semantics on every PR, without needing live Harbor/GHCR/ECR
+      # credentials. Auth-specific behavior (credential forwarding, real
+      # cloud registry quirks) stays covered by the existing env-gated
+      # integration tests, which this does not replace.
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run registry smoke cycle
+        env:
+          SORI_SMOKE_REF: "localhost:5000/sori-smoke:v1"
+          SORI_SMOKE_EXTRA_FLAGS: "--plain-http"
+        run: make smoke-cli
