@@ -11,7 +11,9 @@ repo/
 
 # IDE and tooling
 .codex
-.claude/
+.claude/*
+!.claude/skills/
+.claude/settings.local.json
 
 # spec-kit ephemeral feature state
 .specify/feature.json

@@ -7,16 +7,17 @@
   this prose.
 -->
 
-## Cross-repo invariants live in the Platform Spec Wiki (canonical)
+## Cross-repo invariants live in the platform canonical (NodeVault §4)
 
 Cross-repo invariants — reproducibility, `casHash`, `stableRef`, the artifact
-dual-axis (`lifecycle_phase` / `integrity_health`), the sori boundary, and
-"do not record what you did not observe" (§1.10) — are owned solely by the
-**Platform Spec Wiki `1. constitution`**. This document does not restate or fork
-them; on any conflict, the wiki §1 wins.
+dual-axis (`lifecycle_phase` / `integrity_health`), the sori boundary, and the
+image-build / ResolveRecipe rules — are owned solely by the platform canonical:
+**`github.com/HeaInSeo/NodeVault` — `docs/PLATFORM_MASTER_DESIGN.md` §4**
+(immutable architecture decisions). This document does not restate or fork
+them; on any conflict, §4 wins.
 
 Note: sori is the OCI-protocol library that the platform's **sori boundary**
-invariant is written about. That boundary is cross-repo and wiki-owned; it is
+invariant is written about. That boundary is cross-repo and owned by the platform canonical (NodeVault §4); it is
 therefore **not** restated or scoped here — this constitution indexes only
 sori's own repo-local enforcement.
 
@@ -66,7 +67,7 @@ sori's own repo-local enforcement.
 ## §1.10 — "do not record what you did not observe"
 
 **Status: PROPOSED (not enforced in this repo).** §1.10 is a cross-repo
-invariant owned by the wiki; sori has **no deterministic rule** enforcing it
+rule (not yet part of NodeVault §4); sori has **no deterministic rule** enforcing it
 today. Marked PROPOSED, not IMPLEMENTED, until such a gate exists.
 
 **Version**: 1.0.0 | **Ratified**: 2026-08-02 | **Last Amended**: 2026-08-02
