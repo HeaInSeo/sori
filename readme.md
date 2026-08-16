@@ -121,8 +121,8 @@ referrerResult, err := sori.PushRemoteDataSpecReferrer(ctx, pushResult, sori.Rem
 if err != nil { ... }
 fmt.Println(referrerResult.ManifestDigest)
 
-// 9) Experimental: NodeVault/Catalog 친화적인 등록 객체 생성 및 저장
-registerResp, err := sori.RegisterPackagedData(ctx, cfg.Local.Path, sori.DataRegisterRequest{
+// 9) Experimental: NodeVault/Catalog 친화적인 등록 객체 생성
+registered, err := sori.BuildRegisteredDataDefinition(sori.DataRegisterRequest{
   DataName:    "grch38-reference",
   Version:     "v1.0.0",
   Description: "Human reference genome",
@@ -130,7 +130,7 @@ registerResp, err := sori.RegisterPackagedData(ctx, cfg.Local.Path, sori.DataReg
   SourceURI:   "s3://example/grch38.fa.gz",
 }, pkg, pushResult)
 if err != nil { ... }
-fmt.Println(registerResp.CASHash)
+fmt.Println(registered.CASHash)
 
 // 10) Stable core API: 원격 레지스트리에서 직접 fetch (safe fetch 기본)
 vi, err := client.FetchVolumeFromRemote(ctx, "./dest-dir", sori.RemoteTarget{
@@ -543,7 +543,7 @@ var (
 
 `RequireEmptyDestination`과 `AtomicOverwrite`를 동시에 설정하면 `ErrValidation`을 반환한다.
 
-### 등록 / Catalog API
+### 등록 API
 
 ```go
 type DataRegisterRequest struct {
@@ -576,19 +576,19 @@ type RegisteredDataDefinition struct {
 }
 
 func BuildRegisteredDataDefinition(req DataRegisterRequest, pkg *PackageResult, push *PushResult) (*RegisteredDataDefinition, error)
-func RegisterPackagedData(ctx context.Context, rootDir string, req DataRegisterRequest, pkg *PackageResult, push *PushResult) (*DataRegisterResponse, error)
-func NewDataCatalog(rootDir string) *DataCatalog
-func (c *DataCatalog) Get(casHash string) (*RegisteredDataDefinition, error)
-func (c *DataCatalog) List(stableRef string) ([]RegisteredDataDefinition, error)
+func ArtifactMetadataToRegisteredDataDefinition(meta *ArtifactMetadata, req DataRegisterRequest) *RegisteredDataDefinition
 ```
 
-이 계층은 `NodeKit`의 `DataRegisterRequest`와 `Catalog`의 `AdminDataList` 사이를 잇는 최소 로컬 구현이다.  
-현재는 `rootDir/registered-data.json`에 저장한다.
+이 계층은 `NodeKit`의 `DataRegisterRequest`와 `Catalog`의 `AdminDataList` 사이를 잇는
+순수 변환(adapter) 계층이다. sori는 등록 객체를 만들어 반환할 뿐 저장하지 않는다 —
+영속화는 호출자(NodeVault/Catalog)의 책임이다.
 
-> **Deprecated**: `DataCatalog`, `NewDataCatalog`, `RegisterPackagedData`(및 그 메서드 `Get`/`List`/`Register`)는
-> 이 저장소(sorictl, adapters/nodevault)와 알려진 다운스트림 소비자(NodeKit, NodeVault) 어디에서도
-> 프로덕션 호출자가 없다 — 이 패키지 자체의 단위 테스트에서만 쓰인다. 향후 릴리스에서 제거되거나
-> 실제 소비자에 연결될 수 있다. 자세한 내용은 sori#3 참고.
+> **Removed**: 로컬 JSON 카탈로그였던 `DataCatalog`, `NewDataCatalog`, `RegisterPackagedData`
+> (및 메서드 `Register`/`Get`/`List`)와 `DataRegisterResponse`는 제거되었다. 이 저장소
+> (sorictl, adapters/nodevault)와 알려진 다운스트림 소비자(NodeKit, NodeVault) 어디에서도
+> 프로덕션 호출자가 없었고, `rootDir/registered-data.json` 파일도 더 이상 쓰이지 않는다.
+> 등록 객체가 필요하면 `BuildRegisteredDataDefinition`을 쓰고 결과를 직접 보관하면 된다.
+> 자세한 내용은 sori#3 참고.
 
 ### tar.gz 유틸리티
 
@@ -607,7 +607,7 @@ func UntarGzDir(gzipStream io.Reader, dest string) error   // tar.gz 해제 (pat
 |------|-----------|
 | **Stable** | `Config.NewClient`, `Client` 기반 package/push/fetch, `ArtifactFormatChunkedCAS`, `chunked.Publish` / `chunked.Fetch`, `FetchOptions.VerifyTree`, `BuildArtifactMetadata`, typed error, option 모델 |
 | **Compatibility** | `InitConfig`, `PackageVolume`, `PushLocalToRemote`, `VolumeIndex.PublishVolume` |
-| **Experimental** | `DataSpec`, referrer API (`PushToolSpecReferrer` / `PushToolProfileReferrer` / `PushSecurityReferrer` / `PushDataSpecReferrer`), registration/catalog API |
+| **Experimental** | `DataSpec`, referrer API (`PushToolSpecReferrer` / `PushToolProfileReferrer` / `PushSecurityReferrer` / `PushDataSpecReferrer`), registration API |
 
 자세한 목록은 [docs/public-api.md](docs/public-api.md)를 따른다.
 

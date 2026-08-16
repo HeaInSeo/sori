@@ -31,9 +31,6 @@ stable API로 올리기 전에 검토해야 할 항목을 정리한 문서다.
 - `PushDataSpecReferrer`
 - `DataRegisterRequest`
 - `RegisteredDataDefinition`
-- `DataRegisterResponse`
-- `DataCatalog`
-- `RegisterPackagedData`
 - `BuildRegisteredDataDefinition`
 - `ArtifactMetadataToDataSpec`
 - `ArtifactMetadataToRegisteredDataDefinition`
@@ -46,7 +43,7 @@ stable API로 올리기 전에 검토해야 할 항목을 정리한 문서다.
 
 질문:
 - `DataSpec`
-- registration / catalog 타입
+- registration 타입
 - referrer helper
 
 이들을 계속 root package의 public contract로 둘 것인지,
@@ -71,10 +68,11 @@ stable로 올리려면 필드 의미와 유지 범위를 먼저 고정해야 한
 - `Display` 구조를 이대로 유지할지
 - `LifecyclePhase`, `IntegrityHealth`를 core 타입으로 둘지
 
-> **Deprecated**: `DataCatalog`, `NewDataCatalog`, `RegisterPackagedData`는 이 저장소와 알려진
-> 다운스트림 소비자(NodeKit, NodeVault) 어디에도 프로덕션 호출자가 없다 — 이 패키지 자체의 단위
-> 테스트에서만 쓰인다. stable 승격 검토 대상 목록에는 남아 있지만, 향후 릴리스에서 제거되거나
-> 실제 소비자에 연결될 수 있다. 자세한 내용은 sori#3 참고.
+> **Removed**: 로컬 JSON 카탈로그(`DataCatalog`, `NewDataCatalog`, `RegisterPackagedData`,
+> `DataRegisterResponse`)는 프로덕션 호출자가 없어 제거되었다(sori#3). 따라서 stable 승격
+> 검토는 순수 변환 계층(`BuildRegisteredDataDefinition`,
+> `ArtifactMetadataToRegisteredDataDefinition`)과 그 데이터 모델만 대상으로 한다 —
+> 등록 레코드의 영속화는 sori의 책임이 아니다.
 
 ### 3. referrer API의 책임 범위를 고정할지 결정
 
