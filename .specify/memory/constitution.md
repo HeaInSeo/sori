@@ -1,25 +1,33 @@
 # sori Constitution
 
 <!--
-  ②-form (D-12): this file does NOT own cross-repo invariants. It references the
-  platform canonical constitution and indexes only THIS repo's own enforced
-  constraints. SoT for those is the rules themselves (Makefile gates / CI), not
-  this prose.
+  ②-form (D-12), authority revision AR-2026-08-17.1: this file does NOT own
+  cross-repo invariants. It consumes the task Authority Snapshot and indexes
+  only THIS repo's own enforced constraints. SoT for those is the rules
+  themselves (Makefile gates / CI), not this prose.
 -->
 
-## Cross-repo invariants live in the platform canonical (NodeVault §4)
+## Cross-repo authority — revision-pinned repository mirror
 
-Cross-repo invariants — reproducibility, `casHash`, `stableRef`, the artifact
-dual-axis (`lifecycle_phase` / `integrity_health`), the sori boundary, and the
-image-build / ResolveRecipe rules — are owned solely by the platform canonical:
-**`github.com/HeaInSeo/NodeVault` — `docs/PLATFORM_MASTER_DESIGN.md` §4**
-(immutable architecture decisions). This document does not restate or fork
-them; on any conflict, §4 wins.
+Cross-repo platform meaning is selected by the external Authority Router. For
+`AR-2026-08-17.1` the scoped authority chain is:
+
+- platform invariants: `Platform Spec Wiki — CURRENT / 1. constitution`
+- platform structure / responsibility / call direction:
+  `Platform Spec Wiki — CURRENT / 2. architecture`
+- repository-portable mirror: `HeaInSeo/NodeVault` —
+  `docs/PLATFORM_MASTER_DESIGN.md` at the same authority revision
+
+sori does **not** treat NodeVault §4 as an independent platform canonical. A
+task may consume that repository mirror only when its `Authority Snapshot`
+declares `AR-2026-08-17.1`. Missing/mismatched/conflicting snapshots must stop
+with `AUTHORITY_CONFLICT`; do not choose a source by timestamp, filename, or
+search rank.
 
 Note: sori is the OCI-protocol library that the platform's **sori boundary**
-invariant is written about. That boundary is cross-repo and owned by the platform canonical (NodeVault §4); it is
-therefore **not** restated or scoped here — this constitution indexes only
-sori's own repo-local enforcement.
+invariant is written about. That boundary is cross-repo and is selected by the
+current platform authority chain; it is therefore **not** restated or scoped
+here — this constitution indexes only sori's own repo-local enforcement.
 
 ## Process discipline (repo-operational — owned by this repo)
 
@@ -66,8 +74,10 @@ sori's own repo-local enforcement.
 
 ## §1.10 — "do not record what you did not observe"
 
-**Status: PROPOSED (not enforced in this repo).** §1.10 is a cross-repo
-rule (not yet part of NodeVault §4); sori has **no deterministic rule** enforcing it
-today. Marked PROPOSED, not IMPLEMENTED, until such a gate exists.
+**Authority: CURRENT platform invariant under `AR-2026-08-17.1`. Enforcement in
+this repo: PROPOSED where no deterministic local gate exists.** sori has no
+deterministic rule that generally enforces this invariant today. The platform
+invariant's authority status and this repo's local enforcement status are
+separate axes.
 
-**Version**: 1.0.0 | **Ratified**: 2026-08-02 | **Last Amended**: 2026-08-02
+**Version**: 2.0.0 | **Ratified**: 2026-08-02 | **Last Amended**: 2026-08-17
