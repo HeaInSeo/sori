@@ -16,8 +16,9 @@ import (
 //   - the origin-required identity-bearing provenance/lineage.
 //
 // Presentation/discovery metadata (SemanticManifest.Presentation) is deliberately
-// excluded, so a presentation-only change never alters the fingerprint. Members and
-// input lineage are order-normalized so member ordering is not identity-bearing.
+// excluded, so a presentation-only change never alters the fingerprint. Members are
+// order-normalized so member ordering is not identity-bearing; input lineage order is
+// preserved (identity-bearing) so order-distinct derived lineages stay distinct.
 //
 // This value is INTERNAL acceptance/comparison evidence only. It is not exported as,
 // and must not be frozen into, the public Revision-ID or a public hash algorithm.

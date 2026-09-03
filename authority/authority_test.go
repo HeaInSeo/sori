@@ -352,3 +352,21 @@ func TestI1M_BindAliasRejectsCrossAsset(t *testing.T) {
 		t.Fatalf("cross-asset alias binding must be rejected, got %v", err)
 	}
 }
+
+// A non-nil EMPTY Presentation map must also be isolated: index-assignment mutates a
+// map in place, so a shared empty map would let the caller reach stored truth.
+func TestI1M_EmptyPresentationMapIsIsolated(t *testing.T) {
+	a, _ := newAuthority()
+	ctx := context.Background()
+	m := externalManifest(demoDigest)
+	m.Presentation = map[string]string{} // non-nil, empty
+	rev, err := a.AcceptRevision(ctx, AcceptRequest{RequestID: "req-1", AssetID: "asset-1", Manifest: m})
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	m.Presentation["x"] = "tampered" // would write into a shared stored map
+	got, _, _ := a.GetRevision(ctx, rev.RevisionID)
+	if _, tampered := got.Manifest.Presentation["x"]; tampered {
+		t.Fatalf("stored presentation was mutated via a shared empty map")
+	}
+}

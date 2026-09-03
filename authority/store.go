@@ -171,7 +171,10 @@ func cloneManifest(m SemanticManifest) SemanticManifest {
 		copy(lineage, m.Provenance.InputLineage)
 		m.Provenance.InputLineage = lineage
 	}
-	if len(m.Presentation) > 0 {
+	// Clone whenever the map is non-nil (not just len>0): a non-nil EMPTY map is
+	// still index-mutable in place, so sharing it would leave the stored/returned
+	// manifest's presentation reachable by the caller.
+	if m.Presentation != nil {
 		presentation := make(map[string]string, len(m.Presentation))
 		for k, v := range m.Presentation {
 			presentation[k] = v
