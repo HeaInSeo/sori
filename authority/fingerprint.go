@@ -49,8 +49,11 @@ func computeFingerprint(assetID AssetID, m SemanticManifest) string {
 		return members[i].Digest < members[j].Digest
 	})
 
+	// Input lineage order is treated as identity-bearing: it is NOT sorted, so
+	// order-distinct derived lineages ([A,B] vs [B,A]) produce distinct fingerprints
+	// (fail-closed — never silently merge two genuinely different derived manifests).
+	// Providing a canonical input order is the caller's responsibility.
 	lineage := append([]string(nil), m.Provenance.InputLineage...)
-	sort.Strings(lineage)
 
 	payload := struct {
 		Asset   string     `json:"asset"`

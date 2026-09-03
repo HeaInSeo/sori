@@ -274,3 +274,81 @@ func TestI1M_10_PackagingCannotSubstituteForAuthority(t *testing.T) {
 	}
 	_ = fmt.Sprint(rev)
 }
+
+// Immutability regression (SORI-I1M §8): an accepted Revision's identity-bearing
+// member set / provenance / presentation must not be mutable through the caller's
+// input slices/maps or through a value returned by GetRevision.
+func TestI1M_AcceptedRevisionIsImmutable(t *testing.T) {
+	a, _ := newAuthority()
+	ctx := context.Background()
+	m := derivedManifest("builder-X", "orig-digest")
+	m.Presentation = map[string]string{"displayName": "Orig"}
+	req := AcceptRequest{RequestID: "req-1", AssetID: "asset-1", Manifest: m}
+
+	rev, err := a.AcceptRevision(ctx, req)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	// (a) Mutate the caller's input AFTER acceptance.
+	m.Members[0].Proof.Digest = "TAMPERED"
+	m.Members[0].Role = "TAMPERED"
+	m.Provenance.InputLineage[0] = "TAMPERED"
+	m.Presentation["displayName"] = "TAMPERED"
+
+	// (b) Mutate a value returned from GetRevision.
+	got, ok, _ := a.GetRevision(ctx, rev.RevisionID)
+	if !ok {
+		t.Fatalf("revision missing")
+	}
+	got.Manifest.Members[0].Proof.Digest = "TAMPERED-VIA-GET"
+	got.Manifest.Provenance.InputLineage[0] = "TAMPERED-VIA-GET"
+
+	// The stored authority truth must be unchanged.
+	fresh, _, _ := a.GetRevision(ctx, rev.RevisionID)
+	if fresh.Manifest.Members[0].Proof.Digest != "orig-digest" || fresh.Manifest.Members[0].Role != roleData {
+		t.Fatalf("stored member set was mutated: %+v", fresh.Manifest.Members[0])
+	}
+	if fresh.Manifest.Provenance.InputLineage[0] != "input-a" {
+		t.Fatalf("stored input lineage was mutated: %v", fresh.Manifest.Provenance.InputLineage)
+	}
+	if fresh.Manifest.Presentation["displayName"] != "Orig" {
+		t.Fatalf("stored presentation was mutated: %v", fresh.Manifest.Presentation)
+	}
+	// The retry idempotency still holds despite the caller's post-accept mutation of m:
+	// the accepted fingerprint was computed and frozen at acceptance time.
+	if _, err := a.AcceptRevision(ctx, AcceptRequest{RequestID: "req-1", AssetID: "asset-1", Manifest: derivedManifest("builder-X", "orig-digest")}); err != nil {
+		t.Fatalf("retry after caller mutation should still reconcile, got %v", err)
+	}
+}
+
+// Input lineage order is identity-bearing (§5): the same request id meaning two
+// order-distinct derived lineages must conflict, never silently merge.
+func TestI1M_InputLineageOrderIsIdentityBearing(t *testing.T) {
+	a, _ := newAuthority()
+	ctx := context.Background()
+	ab := derivedManifest("builder-X", demoDigest)
+	ab.Provenance.InputLineage = []string{"A", "B"}
+	if _, err := a.AcceptRevision(ctx, AcceptRequest{RequestID: "req-1", AssetID: "asset-1", Manifest: ab}); err != nil {
+		t.Fatalf("accept [A,B]: %v", err)
+	}
+	ba := derivedManifest("builder-X", demoDigest)
+	ba.Provenance.InputLineage = []string{"B", "A"}
+	if _, err := a.AcceptRevision(ctx, AcceptRequest{RequestID: "req-1", AssetID: "asset-1", Manifest: ba}); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("order-distinct lineage under same request id must conflict, got %v", err)
+	}
+}
+
+// BindAlias must reject binding an alias to a Revision owned by a different asset.
+func TestI1M_BindAliasRejectsCrossAsset(t *testing.T) {
+	a, _ := newAuthority()
+	ctx := context.Background()
+	rev, err := a.AcceptRevision(ctx, AcceptRequest{RequestID: "req-1", AssetID: "asset-1", Manifest: externalManifest(demoDigest)})
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	_, err = a.BindAlias(ctx, BindRequest{BindRequestID: "bind-x", Alias: "latest", AssetID: "asset-2", RevisionID: rev.RevisionID})
+	if !errors.Is(err, ErrAliasBindingConflict) {
+		t.Fatalf("cross-asset alias binding must be rejected, got %v", err)
+	}
+}

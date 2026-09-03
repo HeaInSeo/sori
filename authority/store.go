@@ -72,7 +72,7 @@ func (s *MemoryStore) AcceptRevision(_ context.Context, req AcceptRequest, finge
 	if existingID, ok := s.byRequest[req.RequestID]; ok {
 		existing := s.revisions[existingID]
 		if existing.AssetID == req.AssetID && existing.Fingerprint == fingerprint {
-			return existing, nil // idempotent reconcile: same request, same content
+			return cloneRevision(existing), nil // idempotent reconcile: same request, same content
 		}
 		return Revision{}, fmt.Errorf("%w: request %q", ErrRequestConflict, req.RequestID)
 	}
@@ -90,14 +90,19 @@ func (s *MemoryStore) AcceptRevision(_ context.Context, req AcceptRequest, finge
 		AssetID:     req.AssetID,
 		RequestID:   req.RequestID,
 		Fingerprint: fingerprint,
-		Manifest:    req.Manifest,
-		AcceptedAt:  s.now(),
+		// Deep-copy the manifest so the accepted Revision's identity-bearing member
+		// set / provenance is isolated from the caller's input: mutating the request
+		// after acceptance must not rewrite committed authority truth (SORI-I1M §8).
+		Manifest:   cloneManifest(req.Manifest),
+		AcceptedAt: s.now(),
 	}
 	// Atomic commit: both writes happen together under the lock, so the Revision is
 	// observable only as a complete accepted unit.
 	s.revisions[rev.RevisionID] = rev
 	s.byRequest[req.RequestID] = rev.RevisionID
-	return rev, nil
+	// Return an independent copy so a caller mutating the result cannot reach the
+	// committed record either.
+	return cloneRevision(rev), nil
 }
 
 // BindAlias implements Store.
@@ -111,8 +116,12 @@ func (s *MemoryStore) BindAlias(_ context.Context, req BindRequest) (BindEvent, 
 		}
 		return BindEvent{}, fmt.Errorf("%w: bind request %q", ErrAliasBindingConflict, req.BindRequestID)
 	}
-	if _, ok := s.revisions[req.RevisionID]; !ok {
+	target, ok := s.revisions[req.RevisionID]
+	if !ok {
 		return BindEvent{}, fmt.Errorf("%w: %q", ErrRevisionNotFound, req.RevisionID)
+	}
+	if target.AssetID != req.AssetID {
+		return BindEvent{}, fmt.Errorf("%w: revision %q belongs to a different asset", ErrAliasBindingConflict, req.RevisionID)
 	}
 
 	s.bindSeq++
@@ -134,7 +143,42 @@ func (s *MemoryStore) GetRevision(_ context.Context, id RevisionID) (Revision, b
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rev, ok := s.revisions[id]
-	return rev, ok, nil
+	if !ok {
+		return Revision{}, false, nil
+	}
+	// Hand every reader an independent copy so a consumer mutating the returned
+	// manifest cannot corrupt committed authority truth for other readers (§8).
+	return cloneRevision(rev), true, nil
+}
+
+// cloneRevision returns a deep copy of rev whose reference-typed manifest fields
+// (Members, Provenance.InputLineage, Presentation) share no backing storage with the
+// original, so the accepted Revision is effectively immutable across callers.
+func cloneRevision(rev Revision) Revision {
+	rev.Manifest = cloneManifest(rev.Manifest)
+	return rev
+}
+
+// cloneManifest deep-copies the reference-typed fields of a SemanticManifest.
+func cloneManifest(m SemanticManifest) SemanticManifest {
+	if len(m.Members) > 0 {
+		members := make([]Member, len(m.Members))
+		copy(members, m.Members) // Member is a value type (ContentProof is a value)
+		m.Members = members
+	}
+	if len(m.Provenance.InputLineage) > 0 {
+		lineage := make([]string, len(m.Provenance.InputLineage))
+		copy(lineage, m.Provenance.InputLineage)
+		m.Provenance.InputLineage = lineage
+	}
+	if len(m.Presentation) > 0 {
+		presentation := make(map[string]string, len(m.Presentation))
+		for k, v := range m.Presentation {
+			presentation[k] = v
+		}
+		m.Presentation = presentation
+	}
+	return m
 }
 
 // AliasHistory implements Store.

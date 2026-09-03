@@ -1,6 +1,9 @@
 package authority
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // OriginKind is the typed publication origin (SORI-I1M §6). Internal only — the exact
 // public enum names remain OPEN and this is not a public schema.
@@ -45,7 +48,7 @@ type ContentProof struct {
 }
 
 func (p ContentProof) present() bool {
-	return p.Digest != ""
+	return strings.TrimSpace(p.Digest) != ""
 }
 
 // Member is one logical member of the Asset Revision: an opaque-but-stable semantic
@@ -118,7 +121,7 @@ func validateMembers(members []Member) error {
 	seen := make(map[string]struct{}, len(members))
 	for i := range members {
 		mem := members[i]
-		if mem.SemanticKey == "" || mem.Role == "" {
+		if strings.TrimSpace(mem.SemanticKey) == "" || strings.TrimSpace(mem.Role) == "" {
 			return fmt.Errorf("%w: member %d missing semantic key/role", ErrInvalidManifest, i)
 		}
 		if !mem.Proof.present() {
@@ -150,6 +153,11 @@ func validateProvenance(origin OriginKind, p Provenance) error {
 		}
 		if len(p.InputLineage) == 0 {
 			return fmt.Errorf("%w: derived asset requires identity-bearing input lineage", ErrInvalidManifest)
+		}
+		for i, in := range p.InputLineage {
+			if strings.TrimSpace(in) == "" {
+				return fmt.Errorf("%w: derived asset input lineage entry %d is empty", ErrInvalidManifest, i)
+			}
 		}
 		return nil
 	case OriginProducedPromotion:
