@@ -19,6 +19,7 @@ package authority
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -137,4 +138,57 @@ func (a *Authority) GetRevision(ctx context.Context, id RevisionID) (Revision, b
 // AliasHistory returns the append-only binding history for an alias, oldest first.
 func (a *Authority) AliasHistory(ctx context.Context, alias string) ([]BindEvent, error) {
 	return a.store.AliasHistory(ctx, alias)
+}
+
+// AttachRepresentation (SORI-I2R) attaches a physical Representation to an accepted
+// immutable Revision as a durable append-only relation. It is idempotent by
+// AttachOperationID; the same operation re-used with a different immutable relation
+// (representation) semantics fails closed (ErrAttachConflict) rather than rewriting.
+//
+// The Revision must already be accepted (authority truth is never inferred from a
+// physical push), and the representation MUST prove semantic member equivalence to the
+// Revision's logical member contract (same semantic keys + same authoritative
+// content-proof digests) — a path/tag/locator alone is insufficient. The accepted
+// Revision is never mutated by an attach.
+func (a *Authority) AttachRepresentation(ctx context.Context, req AttachRequest) (Representation, error) {
+	if err := validateAttachRequest(req); err != nil {
+		return Representation{}, err
+	}
+	rev, ok, err := a.store.GetRevision(ctx, req.RevisionID)
+	if err != nil {
+		return Representation{}, err
+	}
+	if !ok || rev.AssetID != req.AssetID {
+		return Representation{}, fmt.Errorf("%w: %q", ErrRevisionNotFound, req.RevisionID)
+	}
+	// Member equivalence is validated inside the store, AFTER the attach-operation-id
+	// reconcile, so a reused operation id is diagnosed as an idempotent hit/conflict
+	// rather than a validation error.
+	fingerprint := computeRepresentationFingerprint(req.Format, req.MemberProofs)
+	return a.store.AttachRepresentation(ctx, req, fingerprint, rev.Manifest.Members)
+}
+
+// SetRepresentationLocators replaces a Representation's mutable availability
+// coordinates (registry/tag/path/replica). This never changes the Representation's or
+// the Revision's semantic identity.
+func (a *Authority) SetRepresentationLocators(ctx context.Context, id RepresentationID, locators []Locator) error {
+	return a.store.SetRepresentationLocators(ctx, id, locators)
+}
+
+// SetRepresentationHealth sets a Representation's mutable availability flag. Losing or
+// degrading a representation never mutates or retracts the accepted Revision.
+func (a *Authority) SetRepresentationHealth(ctx context.Context, id RepresentationID, healthy bool) error {
+	return a.store.SetRepresentationHealth(ctx, id, healthy)
+}
+
+// GetRepresentation returns an attached Representation by id.
+func (a *Authority) GetRepresentation(ctx context.Context, id RepresentationID) (Representation, bool, error) {
+	return a.store.GetRepresentation(ctx, id)
+}
+
+// ListRepresentations returns the Representations attached to a Revision, in attach
+// order. A Revision with zero Representations remains valid authority truth (it is
+// simply not implied runnable/available).
+func (a *Authority) ListRepresentations(ctx context.Context, revID RevisionID) ([]Representation, error) {
+	return a.store.ListRepresentations(ctx, revID)
 }

@@ -30,6 +30,29 @@ type Store interface {
 	GetRevision(ctx context.Context, id RevisionID) (Revision, bool, error)
 	// AliasHistory returns the append-only binding history for an alias, oldest first.
 	AliasHistory(ctx context.Context, alias string) ([]BindEvent, error)
+
+	// --- SORI-I2R: Representation relation ---
+
+	// AttachRepresentation atomically appends a durable Revision↔Representation
+	// relation, idempotent by AttachOperationID. The AttachOperationID reconcile is
+	// applied BEFORE member equivalence, so a reused operation id is diagnosed as an
+	// idempotent hit or a conflict rather than a validation error:
+	//   - existing op id + same (RevisionID, fingerprint) → the existing Representation;
+	//   - existing op id + a different immutable relation semantics → ErrAttachConflict;
+	//   - new op id → validate member equivalence against revMembers (the accepted
+	//     Revision's members); on mismatch ErrMemberEquivalence, else a new Representation.
+	AttachRepresentation(ctx context.Context, req AttachRequest, fingerprint string, revMembers []Member) (Representation, error)
+	// SetRepresentationLocators replaces a Representation's mutable availability
+	// coordinates. It never changes the Representation's or Revision's semantic identity.
+	SetRepresentationLocators(ctx context.Context, id RepresentationID, locators []Locator) error
+	// SetRepresentationHealth sets a Representation's mutable availability flag. It never
+	// mutates or retracts the accepted Revision.
+	SetRepresentationHealth(ctx context.Context, id RepresentationID, healthy bool) error
+	// GetRepresentation returns an attached Representation by id.
+	GetRepresentation(ctx context.Context, id RepresentationID) (Representation, bool, error)
+	// ListRepresentations returns the Representations attached to a Revision, in attach
+	// order.
+	ListRepresentations(ctx context.Context, revID RevisionID) ([]Representation, error)
 }
 
 // MemoryStore is an in-memory reference Store. It is not itself a durability
@@ -43,11 +66,19 @@ type MemoryStore struct {
 	revSeq        int
 	bindSeq       int
 
+	// SORI-I2R representation state.
+	representations map[RepresentationID]Representation
+	attachByOp      map[RequestID]RepresentationID
+	revRepresents   map[RevisionID][]RepresentationID
+	repSeq          int
+
 	// beforeCommit, when non-nil, runs just before the atomic AcceptRevision commit.
 	// A non-nil error simulates a crash at the commit boundary: it returns without
 	// mutating any visible state, so a half-accepted Revision can never be observed.
 	// Test-only.
 	beforeCommit func() error
+	// beforeAttachCommit is the analogous crash hook for AttachRepresentation. Test-only.
+	beforeAttachCommit func() error
 
 	// now supplies the acceptance/binding timestamp; overridable in tests.
 	now func() time.Time
@@ -56,11 +87,14 @@ type MemoryStore struct {
 // NewMemoryStore constructs an empty reference Store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		revisions:     make(map[RevisionID]Revision),
-		byRequest:     make(map[RequestID]RevisionID),
-		bindByRequest: make(map[RequestID]BindEvent),
-		aliasHistory:  make(map[string][]BindEvent),
-		now:           func() time.Time { return time.Now().UTC() },
+		revisions:       make(map[RevisionID]Revision),
+		byRequest:       make(map[RequestID]RevisionID),
+		bindByRequest:   make(map[RequestID]BindEvent),
+		aliasHistory:    make(map[string][]BindEvent),
+		representations: make(map[RepresentationID]Representation),
+		attachByOp:      make(map[RequestID]RepresentationID),
+		revRepresents:   make(map[RevisionID][]RepresentationID),
+		now:             func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -149,6 +183,126 @@ func (s *MemoryStore) GetRevision(_ context.Context, id RevisionID) (Revision, b
 	// Hand every reader an independent copy so a consumer mutating the returned
 	// manifest cannot corrupt committed authority truth for other readers (§8).
 	return cloneRevision(rev), true, nil
+}
+
+// AttachRepresentation implements Store.
+func (s *MemoryStore) AttachRepresentation(_ context.Context, req AttachRequest, fingerprint string, revMembers []Member) (Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Reconcile the attach operation id FIRST, before member equivalence, so a reused
+	// operation id is diagnosed as an idempotent hit or a conflict rather than a
+	// validation error.
+	if existingID, ok := s.attachByOp[req.AttachOperationID]; ok {
+		existing := s.representations[existingID]
+		if existing.RevisionID == req.RevisionID && existing.Fingerprint == fingerprint {
+			return cloneRepresentation(existing), nil // idempotent: same op, same relation
+		}
+		return Representation{}, fmt.Errorf("%w: attach operation %q", ErrAttachConflict, req.AttachOperationID)
+	}
+
+	// A genuinely new operation must prove member equivalence to the accepted Revision.
+	if !membersEquivalent(req.MemberProofs, revMembers) {
+		return Representation{}, ErrMemberEquivalence
+	}
+
+	// Crash boundary: nothing below has mutated state yet.
+	if s.beforeAttachCommit != nil {
+		if err := s.beforeAttachCommit(); err != nil {
+			return Representation{}, err
+		}
+	}
+
+	s.repSeq++
+	rep := Representation{
+		RepresentationID:  RepresentationID(fmt.Sprintf("sori-rep-%d", s.repSeq)),
+		RevisionID:        req.RevisionID,
+		AssetID:           req.AssetID,
+		Format:            req.Format,
+		Fingerprint:       fingerprint,
+		MemberProofs:      cloneMembers(req.MemberProofs),
+		Locators:          cloneLocators(req.Locators),
+		Healthy:           true,
+		AttachOperationID: req.AttachOperationID,
+		AttachedAt:        s.now(),
+	}
+	// Atomic append: representation record, op index, and the Revision's append-only
+	// relation list are committed together under the lock.
+	s.representations[rep.RepresentationID] = rep
+	s.attachByOp[req.AttachOperationID] = rep.RepresentationID
+	s.revRepresents[req.RevisionID] = append(s.revRepresents[req.RevisionID], rep.RepresentationID)
+	return cloneRepresentation(rep), nil
+}
+
+// SetRepresentationLocators implements Store.
+func (s *MemoryStore) SetRepresentationLocators(_ context.Context, id RepresentationID, locators []Locator) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rep, ok := s.representations[id]
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrRepresentationNotFound, id)
+	}
+	// Only the mutable availability coordinates change; identity/fingerprint/revision
+	// are untouched.
+	rep.Locators = cloneLocators(locators)
+	s.representations[id] = rep
+	return nil
+}
+
+// SetRepresentationHealth implements Store.
+func (s *MemoryStore) SetRepresentationHealth(_ context.Context, id RepresentationID, healthy bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rep, ok := s.representations[id]
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrRepresentationNotFound, id)
+	}
+	rep.Healthy = healthy
+	s.representations[id] = rep
+	return nil
+}
+
+// GetRepresentation implements Store.
+func (s *MemoryStore) GetRepresentation(_ context.Context, id RepresentationID) (Representation, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rep, ok := s.representations[id]
+	if !ok {
+		return Representation{}, false, nil
+	}
+	return cloneRepresentation(rep), true, nil
+}
+
+// ListRepresentations implements Store.
+func (s *MemoryStore) ListRepresentations(_ context.Context, revID RevisionID) ([]Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := s.revRepresents[revID]
+	out := make([]Representation, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, cloneRepresentation(s.representations[id]))
+	}
+	return out, nil
+}
+
+// cloneMembers returns an independent copy of a member slice (Member is a value type).
+func cloneMembers(in []Member) []Member {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Member, len(in))
+	copy(out, in)
+	return out
+}
+
+// cloneLocators returns an independent copy of a locator slice (Locator is a value type).
+func cloneLocators(in []Locator) []Locator {
+	if in == nil {
+		return nil
+	}
+	out := make([]Locator, len(in))
+	copy(out, in)
+	return out
 }
 
 // cloneRevision returns a deep copy of rev whose reference-typed manifest fields
