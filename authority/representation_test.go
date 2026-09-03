@@ -307,3 +307,20 @@ func TestI2R_MutateUnknownRepresentation(t *testing.T) {
 		t.Fatalf("set health unknown: want ErrRepresentationNotFound, got %v", err)
 	}
 }
+
+// A malformed attach member set is reported in the representation error class
+// (ErrInvalidRepresentation), not the I1M ErrInvalidManifest.
+func TestI2R_MalformedMembersAreRepresentationErrors(t *testing.T) {
+	a, _ := newAuthority()
+	ctx := context.Background()
+	rev := acceptOneRevision(t, a)
+	req := equivalentAttach("attach-1", rev, formatChunked)
+	req.MemberProofs = nil // empty member set
+	_, e := a.AttachRepresentation(ctx, req)
+	if !errors.Is(e, ErrInvalidRepresentation) {
+		t.Fatalf("malformed members: want ErrInvalidRepresentation, got %v", e)
+	}
+	if errors.Is(e, ErrInvalidManifest) {
+		t.Fatalf("malformed attach should not surface as an I1M manifest error: %v", e)
+	}
+}

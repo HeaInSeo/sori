@@ -96,8 +96,13 @@ func validateAttachRequest(req AttachRequest) error {
 		return fmt.Errorf("%w: empty representation format", ErrInvalidRepresentation)
 	}
 	// The representation's member set must itself be structurally valid (non-empty,
-	// keyed, proof-bearing) before equivalence can be meaningful.
-	return validateMembers(req.MemberProofs)
+	// keyed, proof-bearing) before equivalence can be meaningful. Re-wrap the shared
+	// member validator's error as a representation error (not the I1M ErrInvalidManifest)
+	// so a malformed attach is reported in the representation error class.
+	if err := validateMembers(req.MemberProofs); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRepresentation, err)
+	}
+	return nil
 }
 
 // membersEquivalent reports whether a representation's member set proves semantic

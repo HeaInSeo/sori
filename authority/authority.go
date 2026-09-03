@@ -161,11 +161,11 @@ func (a *Authority) AttachRepresentation(ctx context.Context, req AttachRequest)
 	if !ok || rev.AssetID != req.AssetID {
 		return Representation{}, fmt.Errorf("%w: %q", ErrRevisionNotFound, req.RevisionID)
 	}
-	if !membersEquivalent(req.MemberProofs, rev.Manifest.Members) {
-		return Representation{}, ErrMemberEquivalence
-	}
+	// Member equivalence is validated inside the store, AFTER the attach-operation-id
+	// reconcile, so a reused operation id is diagnosed as an idempotent hit/conflict
+	// rather than a validation error.
 	fingerprint := computeRepresentationFingerprint(req.Format, req.MemberProofs)
-	return a.store.AttachRepresentation(ctx, req, fingerprint)
+	return a.store.AttachRepresentation(ctx, req, fingerprint, rev.Manifest.Members)
 }
 
 // SetRepresentationLocators replaces a Representation's mutable availability

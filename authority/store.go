@@ -34,12 +34,14 @@ type Store interface {
 	// --- SORI-I2R: Representation relation ---
 
 	// AttachRepresentation atomically appends a durable Revision↔Representation
-	// relation, idempotent by AttachOperationID:
+	// relation, idempotent by AttachOperationID. The AttachOperationID reconcile is
+	// applied BEFORE member equivalence, so a reused operation id is diagnosed as an
+	// idempotent hit or a conflict rather than a validation error:
 	//   - existing op id + same (RevisionID, fingerprint) → the existing Representation;
 	//   - existing op id + a different immutable relation semantics → ErrAttachConflict;
-	//   - new op id → a new attached Representation.
-	// It does not validate member equivalence (the caller does, with the Revision).
-	AttachRepresentation(ctx context.Context, req AttachRequest, fingerprint string) (Representation, error)
+	//   - new op id → validate member equivalence against revMembers (the accepted
+	//     Revision's members); on mismatch ErrMemberEquivalence, else a new Representation.
+	AttachRepresentation(ctx context.Context, req AttachRequest, fingerprint string, revMembers []Member) (Representation, error)
 	// SetRepresentationLocators replaces a Representation's mutable availability
 	// coordinates. It never changes the Representation's or Revision's semantic identity.
 	SetRepresentationLocators(ctx context.Context, id RepresentationID, locators []Locator) error
@@ -184,16 +186,24 @@ func (s *MemoryStore) GetRevision(_ context.Context, id RevisionID) (Revision, b
 }
 
 // AttachRepresentation implements Store.
-func (s *MemoryStore) AttachRepresentation(_ context.Context, req AttachRequest, fingerprint string) (Representation, error) {
+func (s *MemoryStore) AttachRepresentation(_ context.Context, req AttachRequest, fingerprint string, revMembers []Member) (Representation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Reconcile the attach operation id FIRST, before member equivalence, so a reused
+	// operation id is diagnosed as an idempotent hit or a conflict rather than a
+	// validation error.
 	if existingID, ok := s.attachByOp[req.AttachOperationID]; ok {
 		existing := s.representations[existingID]
 		if existing.RevisionID == req.RevisionID && existing.Fingerprint == fingerprint {
 			return cloneRepresentation(existing), nil // idempotent: same op, same relation
 		}
 		return Representation{}, fmt.Errorf("%w: attach operation %q", ErrAttachConflict, req.AttachOperationID)
+	}
+
+	// A genuinely new operation must prove member equivalence to the accepted Revision.
+	if !membersEquivalent(req.MemberProofs, revMembers) {
+		return Representation{}, ErrMemberEquivalence
 	}
 
 	// Crash boundary: nothing below has mutated state yet.
