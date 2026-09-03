@@ -269,3 +269,41 @@ func TestI2R_AttachedRepresentationIsImmutable(t *testing.T) {
 		t.Fatalf("stored representation was mutated via a shared slice: %+v", fresh)
 	}
 }
+
+// A representation proof under a different algorithm (same digest string) is NOT
+// member-equivalent — consistent with SORI-I1M treating ContentProof.Algorithm as
+// identity-bearing.
+func TestI2R_AlgorithmMismatchRejected(t *testing.T) {
+	a, _ := newAuthority()
+	ctx := context.Background()
+	rev := acceptOneRevision(t, a)
+	req := equivalentAttach("attach-1", rev, formatChunked)
+	req.MemberProofs = []Member{{SemanticKey: "m1", Role: roleData, Proof: ContentProof{Algorithm: "blake3", Digest: demoDigest}}}
+	if _, err := a.AttachRepresentation(ctx, req); !errors.Is(err, ErrMemberEquivalence) {
+		t.Fatalf("algorithm mismatch: want ErrMemberEquivalence, got %v", err)
+	}
+}
+
+// A representation with the right member count but a wrong semantic key is rejected.
+func TestI2R_WrongSemanticKeyRejected(t *testing.T) {
+	a, _ := newAuthority()
+	ctx := context.Background()
+	rev := acceptOneRevision(t, a)
+	req := equivalentAttach("attach-1", rev, formatChunked)
+	req.MemberProofs = []Member{member("wrong-key", demoDigest)} // same count, wrong key
+	if _, err := a.AttachRepresentation(ctx, req); !errors.Is(err, ErrMemberEquivalence) {
+		t.Fatalf("wrong key: want ErrMemberEquivalence, got %v", err)
+	}
+}
+
+// Mutating locators/health of an unknown representation returns ErrRepresentationNotFound.
+func TestI2R_MutateUnknownRepresentation(t *testing.T) {
+	a, _ := newAuthority()
+	ctx := context.Background()
+	if err := a.SetRepresentationLocators(ctx, "sori-rep-999", nil); !errors.Is(err, ErrRepresentationNotFound) {
+		t.Fatalf("set locators unknown: want ErrRepresentationNotFound, got %v", err)
+	}
+	if err := a.SetRepresentationHealth(ctx, "sori-rep-999", false); !errors.Is(err, ErrRepresentationNotFound) {
+		t.Fatalf("set health unknown: want ErrRepresentationNotFound, got %v", err)
+	}
+}

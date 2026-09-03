@@ -102,20 +102,28 @@ func validateAttachRequest(req AttachRequest) error {
 
 // membersEquivalent reports whether a representation's member set proves semantic
 // equivalence to the accepted Revision's members: identical set of semantic keys, each
-// carrying the same authoritative content-proof digest. Roles and presentation are not
+// carrying the same authoritative content proof (algorithm AND digest). The algorithm
+// is identity-bearing here to stay consistent with SORI-I1M's revision fingerprint,
+// which also treats ContentProof.Algorithm as identity-bearing — two proofs under
+// different algorithms are not the same content proof. Roles and presentation are not
 // part of content equivalence.
+//
+// Precondition: revMembers has unique semantic keys (enforced by validateMembers at
+// acceptance) and repMembers likewise (enforced by validateAttachRequest before this
+// is called); the len + matched-count check relies on that uniqueness.
 func membersEquivalent(repMembers, revMembers []Member) bool {
 	if len(repMembers) != len(revMembers) {
 		return false
 	}
-	want := make(map[string]string, len(revMembers))
+	type proof struct{ algorithm, digest string }
+	want := make(map[string]proof, len(revMembers))
 	for i := range revMembers {
-		want[revMembers[i].SemanticKey] = revMembers[i].Proof.Digest
+		want[revMembers[i].SemanticKey] = proof{revMembers[i].Proof.Algorithm, revMembers[i].Proof.Digest}
 	}
 	matched := 0
 	for i := range repMembers {
-		d, ok := want[repMembers[i].SemanticKey]
-		if !ok || d != repMembers[i].Proof.Digest {
+		p, ok := want[repMembers[i].SemanticKey]
+		if !ok || p.algorithm != repMembers[i].Proof.Algorithm || p.digest != repMembers[i].Proof.Digest {
 			return false
 		}
 		matched++
@@ -130,16 +138,20 @@ func membersEquivalent(repMembers, revMembers []Member) bool {
 // Representation-ID or hash algorithm.
 func computeRepresentationFingerprint(format string, members []Member) string {
 	type fm struct {
-		Key    string `json:"key"`
-		Digest string `json:"digest"`
+		Key       string `json:"key"`
+		Algorithm string `json:"algorithm"`
+		Digest    string `json:"digest"`
 	}
 	list := make([]fm, 0, len(members))
 	for i := range members {
-		list = append(list, fm{Key: members[i].SemanticKey, Digest: members[i].Proof.Digest})
+		list = append(list, fm{Key: members[i].SemanticKey, Algorithm: members[i].Proof.Algorithm, Digest: members[i].Proof.Digest})
 	}
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].Key != list[j].Key {
 			return list[i].Key < list[j].Key
+		}
+		if list[i].Algorithm != list[j].Algorithm {
+			return list[i].Algorithm < list[j].Algorithm
 		}
 		return list[i].Digest < list[j].Digest
 	})
