@@ -1039,6 +1039,30 @@ func TestPushDataSpecManifest(t *testing.T) {
 	if manifest.Config.MediaType != MediaTypeDataSpec {
 		t.Fatalf("unexpected config media type: %q", manifest.Config.MediaType)
 	}
+	// P-A: the second DataSpec producer path records the semantic kind as the
+	// top-level artifactType (typed discovery), matching config.mediaType and the
+	// pushSpecReferrer path — not the generic image-manifest media type.
+	if manifest.ArtifactType != MediaTypeDataSpec {
+		t.Fatalf("top-level artifactType must be the semantic DataSpec type; got %q", manifest.ArtifactType)
+	}
+	if manifest.ArtifactType != manifest.Config.MediaType {
+		t.Fatalf("artifactType %q and config.mediaType %q must both be the semantic kind", manifest.ArtifactType, manifest.Config.MediaType)
+	}
+
+	// P-A regression: the PRIMARY volume artifact (the subject) is NOT a referrer and
+	// must keep its non-semantic artifactType — the fix must not touch that path.
+	subjRC, err := store.Fetch(ctx, subjectDesc)
+	if err != nil {
+		t.Fatalf("fetch subject manifest: %v", err)
+	}
+	defer subjRC.Close()
+	var subjManifest ocispec.Manifest
+	if err := json.NewDecoder(subjRC).Decode(&subjManifest); err != nil {
+		t.Fatalf("decode subject manifest: %v", err)
+	}
+	if subjManifest.ArtifactType == MediaTypeDataSpec {
+		t.Fatalf("primary volume artifactType must not be a referrer semantic type; got %q", subjManifest.ArtifactType)
+	}
 }
 
 func TestUntarGzDir_RejectsPathTraversal(t *testing.T) {
