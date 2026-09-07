@@ -1286,8 +1286,14 @@ func pushDataSpecManifest(ctx context.Context, target content.Pusher, subjectDes
 		return nil, transportError("pushDataSpecManifest", "push data spec blob", err)
 	}
 
+	// Record the DataSpec semantic kind as the OCI top-level artifactType (matching
+	// the config.mediaType) so this referrer is discoverable by its exact semantic
+	// type, not merely as "some referrer exists". This mirrors pushSpecReferrer so
+	// both DataSpec producer paths emit identical typed semantics; config.mediaType is
+	// unchanged, so legacy generic-artifactType objects stay readable via
+	// config.mediaType during migration.
 	manifestDesc, err := oras.PackManifest(ctx, target, oras.PackManifestVersion1_1,
-		ocispec.MediaTypeImageManifest,
+		MediaTypeDataSpec,
 		oras.PackManifestOptions{
 			Subject:          &subjectDesc,
 			ConfigDescriptor: &configDesc,

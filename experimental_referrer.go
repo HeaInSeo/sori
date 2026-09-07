@@ -165,10 +165,17 @@ func pushSpecReferrer(
 		MediaType: ocispec.MediaTypeImageManifest,
 		Digest:    godigest.Digest(subjectDigest),
 	}
+	// Record the semantic referrer kind as the OCI top-level artifactType so a
+	// referrer is discoverable by its exact semantic type (referrers API descriptor
+	// + ?artifactType= filter), not merely as "some referrer exists". config.mediaType
+	// keeps the same semantic value (dual-record), so legacy referrers that carry the
+	// generic top-level artifactType with a semantic config.mediaType remain readable
+	// via config.mediaType during migration. (ORAS v2.6.1 packManifestV1_1 records
+	// this argument verbatim as manifest.ArtifactType.)
 	manifestDesc, err := orasoras.PackManifest(
 		ctx, target,
 		orasoras.PackManifestVersion1_1,
-		ocispec.MediaTypeImageManifest,
+		mediaType,
 		orasoras.PackManifestOptions{
 			Subject:          &subjectDesc,
 			ConfigDescriptor: &configDesc,
