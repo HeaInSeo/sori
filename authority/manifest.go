@@ -51,12 +51,42 @@ func (p ContentProof) present() bool {
 	return strings.TrimSpace(p.Digest) != ""
 }
 
+// Cardinality is the authoritative member cardinality (SORI-I3P Q2). The values
+// mirror the platform port-cardinality vocabulary; which values a consumer supports is
+// the consumer's profile decision, not Sori's.
+type Cardinality string
+
+const (
+	// CardinalityUnspecified is the zero value and is never a valid accepted cardinality.
+	CardinalityUnspecified Cardinality = ""
+	CardinalitySingle      Cardinality = "SINGLE"
+	CardinalityMultiple    Cardinality = "MULTIPLE"
+	CardinalityComposite   Cardinality = "COMPOSITE"
+	CardinalityScatter     Cardinality = "SCATTER"
+)
+
+func (c Cardinality) valid() bool {
+	switch c {
+	case CardinalitySingle, CardinalityMultiple, CardinalityComposite, CardinalityScatter:
+		return true
+	default:
+		return false
+	}
+}
+
 // Member is one logical member of the Asset Revision: an opaque-but-stable semantic
 // key + role plus an authoritative content-proof reference.
+//
+// DataFormat and Cardinality are the member's authoritative, immutable semantic
+// declarations (SORI-I3P Q2). They are identity-bearing, are required at acceptance,
+// and are never inferred from Presentation, representation locators or health.
+// DataFormat is an opaque format identifier; its vocabulary is not fixed here.
 type Member struct {
 	SemanticKey string
 	Role        string
 	Proof       ContentProof
+	DataFormat  string
+	Cardinality Cardinality
 }
 
 // Provenance carries origin-required, identity-bearing provenance/lineage. Only the
@@ -111,7 +141,27 @@ func validateAcceptRequest(req AcceptRequest) error {
 	if err := validateMembers(m.Members); err != nil {
 		return err
 	}
+	if err := validateMemberDeclarations(m.Members); err != nil {
+		return err
+	}
 	return validateProvenance(m.Origin, m.Provenance)
+}
+
+// validateMemberDeclarations requires every accepted member to declare its
+// authoritative DataFormat and Cardinality (SORI-I3P Q2). It applies to acceptance
+// only: a representation's member proofs establish content equivalence and do not
+// restate the declarations.
+func validateMemberDeclarations(members []Member) error {
+	for i := range members {
+		mem := members[i]
+		if strings.TrimSpace(mem.DataFormat) == "" {
+			return fmt.Errorf("%w: member %q missing data format", ErrInvalidManifest, mem.SemanticKey)
+		}
+		if !mem.Cardinality.valid() {
+			return fmt.Errorf("%w: member %q has invalid cardinality %q", ErrInvalidManifest, mem.SemanticKey, string(mem.Cardinality))
+		}
+	}
+	return nil
 }
 
 func validateMembers(members []Member) error {

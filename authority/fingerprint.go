@@ -12,7 +12,8 @@ import (
 // ONLY identity-bearing facts:
 //   - the asset the revision belongs to;
 //   - the typed publication origin;
-//   - the members {semantic key + role + authoritative content-proof reference};
+//   - the members {semantic key + role + authoritative content-proof reference +
+//     data format + cardinality};
 //   - the origin-required identity-bearing provenance/lineage.
 //
 // Presentation/discovery metadata (SemanticManifest.Presentation) is deliberately
@@ -24,20 +25,24 @@ import (
 // and must not be frozen into, the public Revision-ID or a public hash algorithm.
 func computeFingerprint(assetID AssetID, m SemanticManifest) string {
 	type fpMember struct {
-		Key       string `json:"key"`
-		Role      string `json:"role"`
-		Algorithm string `json:"algorithm"`
-		Digest    string `json:"digest"`
+		Key         string `json:"key"`
+		Role        string `json:"role"`
+		Algorithm   string `json:"algorithm"`
+		Digest      string `json:"digest"`
+		DataFormat  string `json:"dataFormat"`
+		Cardinality string `json:"cardinality"`
 	}
 
 	members := make([]fpMember, 0, len(m.Members))
 	for i := range m.Members {
 		mem := m.Members[i]
 		members = append(members, fpMember{
-			Key:       mem.SemanticKey,
-			Role:      mem.Role,
-			Algorithm: mem.Proof.Algorithm,
-			Digest:    mem.Proof.Digest,
+			Key:         mem.SemanticKey,
+			Role:        mem.Role,
+			Algorithm:   mem.Proof.Algorithm,
+			Digest:      mem.Proof.Digest,
+			DataFormat:  mem.DataFormat,
+			Cardinality: string(mem.Cardinality),
 		})
 	}
 	sort.Slice(members, func(i, j int) bool {

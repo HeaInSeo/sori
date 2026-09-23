@@ -14,6 +14,7 @@ const (
 	roleData   = "primary"
 	proofAlgo  = "sha256"
 	demoDigest = "aaaa1111"
+	demoFormat = "fastq"
 )
 
 func newAuthority() (*Authority, *MemoryStore) {
@@ -22,7 +23,13 @@ func newAuthority() (*Authority, *MemoryStore) {
 }
 
 func member(key, digest string) Member {
-	return Member{SemanticKey: key, Role: roleData, Proof: ContentProof{Algorithm: proofAlgo, Digest: digest}}
+	return Member{
+		SemanticKey: key,
+		Role:        roleData,
+		Proof:       ContentProof{Algorithm: proofAlgo, Digest: digest},
+		DataFormat:  demoFormat,
+		Cardinality: CardinalitySingle,
+	}
 }
 
 func externalManifest(digest string) SemanticManifest {
