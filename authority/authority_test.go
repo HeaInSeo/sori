@@ -32,6 +32,16 @@ func member(key, digest string) Member {
 	}
 }
 
+// proofMember is a proof-only representation member: key + role + content proof, with
+// no DataFormat/Cardinality declaration (those belong to the accepted Revision only).
+func proofMember(key, digest string) Member {
+	return Member{
+		SemanticKey: key,
+		Role:        roleData,
+		Proof:       ContentProof{Algorithm: proofAlgo, Digest: digest},
+	}
+}
+
 func externalManifest(digest string) SemanticManifest {
 	return SemanticManifest{
 		Origin:  OriginExternalImport,

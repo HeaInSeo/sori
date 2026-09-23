@@ -35,7 +35,7 @@ func equivalentAttach(op RequestID, rev Revision, format string, locators ...Loc
 		AssetID:           rev.AssetID,
 		RevisionID:        rev.RevisionID,
 		Format:            format,
-		MemberProofs:      []Member{member("m1", demoDigest)},
+		MemberProofs:      []Member{proofMember("m1", demoDigest)},
 		Locators:          locators,
 	}
 }
@@ -86,13 +86,13 @@ func TestI2R_3_MemberProofMismatchRejected(t *testing.T) {
 
 	// Wrong digest for m1.
 	bad := equivalentAttach("attach-1", rev, formatChunked)
-	bad.MemberProofs = []Member{member("m1", "WRONG-DIGEST")}
+	bad.MemberProofs = []Member{proofMember("m1", "WRONG-DIGEST")}
 	if _, err := a.AttachRepresentation(ctx, bad); !errors.Is(err, ErrMemberEquivalence) {
 		t.Fatalf("wrong digest: want ErrMemberEquivalence, got %v", err)
 	}
 	// Extra member not in the Revision.
 	extra := equivalentAttach("attach-2", rev, formatChunked)
-	extra.MemberProofs = []Member{member("m1", demoDigest), member("m2", demoDigest)}
+	extra.MemberProofs = []Member{proofMember("m1", demoDigest), proofMember("m2", demoDigest)}
 	if _, err := a.AttachRepresentation(ctx, extra); !errors.Is(err, ErrMemberEquivalence) {
 		t.Fatalf("extra member: want ErrMemberEquivalence, got %v", err)
 	}
@@ -290,7 +290,7 @@ func TestI2R_WrongSemanticKeyRejected(t *testing.T) {
 	ctx := context.Background()
 	rev := acceptOneRevision(t, a)
 	req := equivalentAttach("attach-1", rev, formatChunked)
-	req.MemberProofs = []Member{member("wrong-key", demoDigest)} // same count, wrong key
+	req.MemberProofs = []Member{proofMember("wrong-key", demoDigest)} // same count, wrong key
 	if _, err := a.AttachRepresentation(ctx, req); !errors.Is(err, ErrMemberEquivalence) {
 		t.Fatalf("wrong key: want ErrMemberEquivalence, got %v", err)
 	}

@@ -61,6 +61,8 @@ type AttachRequest struct {
 	// MemberProofs is the representation's realized member set; it MUST prove semantic
 	// equivalence to the accepted Revision's logical members (same semantic keys + same
 	// authoritative content-proof digests). Path/tag/location alone is insufficient.
+	// Proofs are proof-only: DataFormat and Cardinality MUST be left unset (the accepted
+	// Revision's Member is their sole authority); a proof carrying either is rejected.
 	MemberProofs []Member
 	// Locators are 0..N mutable availability coordinates; NOT identity-bearing.
 	Locators []Locator
@@ -101,6 +103,16 @@ func validateAttachRequest(req AttachRequest) error {
 	// so a malformed attach is reported in the representation error class.
 	if err := validateMembers(req.MemberProofs); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRepresentation, err)
+	}
+	// Member proofs prove content equivalence only (key + proof). DataFormat and
+	// Cardinality are owned by the accepted Revision's Member; a proof carrying its own
+	// declaration could contradict that authority, so any declaration is rejected
+	// fail-closed rather than ignored.
+	for i := range req.MemberProofs {
+		m := req.MemberProofs[i]
+		if m.DataFormat != "" || m.Cardinality != CardinalityUnspecified {
+			return fmt.Errorf("%w: member proof %q must not carry DataFormat/Cardinality declarations", ErrInvalidRepresentation, m.SemanticKey)
+		}
 	}
 	return nil
 }

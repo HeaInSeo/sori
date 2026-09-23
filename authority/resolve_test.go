@@ -189,3 +189,58 @@ func TestI3P_9_DeclarationsAreIdentityBearing(t *testing.T) {
 		})
 	}
 }
+
+// I3P-10: a representation proof that carries its own DataFormat/Cardinality is
+// rejected fail-closed, even when key + proof are otherwise equivalent, so a
+// contradictory declaration (e.g. bam/MULTIPLE on a fastq/SINGLE revision) can never
+// be attached. A matching declaration is rejected too: proofs are proof-only.
+func TestI3P_10_DeclarationBearingProofRejected(t *testing.T) {
+	cases := map[string]func(*Member){
+		"conflicting data format":  func(m *Member) { m.DataFormat = "bam" },
+		"conflicting cardinality":  func(m *Member) { m.Cardinality = CardinalityMultiple },
+		"matching declarations":    func(m *Member) { m.DataFormat, m.Cardinality = demoFormat, CardinalitySingle },
+		"unknown cardinality only": func(m *Member) { m.Cardinality = "MANY" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			a, _ := newAuthority()
+			ctx := context.Background()
+			rev := acceptOneRevision(t, a)
+			req := equivalentAttach("attach-1", rev, formatChunked)
+			mutate(&req.MemberProofs[0])
+			if _, err := a.AttachRepresentation(ctx, req); !errors.Is(err, ErrInvalidRepresentation) {
+				t.Fatalf("want ErrInvalidRepresentation, got %v", err)
+			}
+			if reps, _ := a.ListRepresentations(ctx, rev.RevisionID); len(reps) != 0 {
+				t.Fatalf("rejected proof was attached: %+v", reps)
+			}
+		})
+	}
+}
+
+// I3P-11: a resolved representation never carries member declarations; the only
+// DataFormat/Cardinality a consumer sees is the accepted Revision's Member.
+func TestI3P_11_ResolvedRepresentationCarriesNoDeclarations(t *testing.T) {
+	a, _ := newAuthority()
+	ctx := context.Background()
+	rev := acceptOneRevision(t, a)
+	if _, err := a.AttachRepresentation(ctx, equivalentAttach("attach-1", rev, formatChunked)); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	mem, reps, err := a.ResolveRevisionMember(ctx, rev.AssetID, rev.RevisionID, "m1")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if mem.DataFormat != demoFormat || mem.Cardinality != CardinalitySingle {
+		t.Fatalf("resolved member = %+v, want %s/%s", mem, demoFormat, CardinalitySingle)
+	}
+	if len(reps) != 1 {
+		t.Fatalf("representations = %+v, want one", reps)
+	}
+	for _, p := range reps[0].MemberProofs {
+		if p.DataFormat != "" || p.Cardinality != CardinalityUnspecified {
+			t.Fatalf("representation proof %q carries declarations: %+v", p.SemanticKey, p)
+		}
+	}
+}
