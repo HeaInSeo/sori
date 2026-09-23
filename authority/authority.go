@@ -46,8 +46,12 @@ var (
 	// ErrAliasBindingConflict reports the same alias-binding operation id re-used
 	// for a different logical binding.
 	ErrAliasBindingConflict = errors.New("authority: alias binding operation id conflicts with a prior binding")
-	// ErrRevisionNotFound reports an unknown RevisionID.
+	// ErrRevisionNotFound reports an unknown RevisionID, or a RevisionID that does
+	// not belong to the requested AssetID.
 	ErrRevisionNotFound = errors.New("authority: revision not found")
+	// ErrMemberNotFound reports a semantic key that is not a member of the resolved
+	// Revision.
+	ErrMemberNotFound = errors.New("authority: member not found")
 )
 
 // AcceptRequest is one publication operation requesting acceptance of an immutable
