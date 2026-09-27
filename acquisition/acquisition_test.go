@@ -484,6 +484,133 @@ func TestI4A_ResumedStagedCopyIsReverified(t *testing.T) {
 	}
 }
 
+// G1: two attempts of the same operation race from PINNED. Both publish a verified
+// staged copy before either checkpoints; the first then wins the STAGED CAS. The
+// winner's recorded copy is never replaced or removed by the loser, which removes only
+// its own unreferenced copy after a definitive CAS rejection. There is no PINNED reset
+// and no extra transfer.
+func TestI4A_ConcurrentSameOperationKeepsWinnerCopy(t *testing.T) {
+	h := newHarness(t)
+	fx := newSubjectFixture(t, defaultMembers())
+	reg := newFakeRegistry(t, fx)
+	ctx := context.Background()
+	req := request("acq-race", fx.digest, reg.endpoint(""))
+
+	type arrival struct {
+		path string
+		info os.FileInfo
+	}
+	var (
+		mu       sync.Mutex
+		arrivals []arrival
+	)
+	secondPublished := make(chan struct{})
+	firstDone := make(chan struct{})
+	order := make([]int, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			a := h.acquirer()
+			a.beforeStagedCheckpoint = func(path string) {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Errorf("attempt %d: published copy missing: %v", i, err)
+				}
+				mu.Lock()
+				arrivals = append(arrivals, arrival{path: path, info: info})
+				order[i] = len(arrivals)
+				mu.Unlock()
+				if order[i] == 1 {
+					<-secondPublished // both copies exist before any checkpoint
+					return
+				}
+				close(secondPublished)
+				<-firstDone // the first publisher checkpoints first and wins the CAS
+			}
+			_, errs[i] = a.Acquire(ctx, req)
+			if order[i] == 1 {
+				close(firstDone)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	first, second := 0, 1
+	if order[0] != 1 {
+		first, second = 1, 0
+	}
+	if errs[first] != nil {
+		t.Fatalf("winner: %v", errs[first])
+	}
+	if !errors.Is(errs[second], ErrCheckpointStale) {
+		t.Fatalf("loser: err = %v, want ErrCheckpointStale", errs[second])
+	}
+
+	op := mustGetOp(t, h, "acq-race")
+	if op.Phase != PhaseAccepted || op.LastError != "" || op.StagedPath != arrivals[0].path {
+		t.Fatalf("checkpoint = %+v, want ACCEPTED at the winner's path %q", op, arrivals[0].path)
+	}
+	cur, err := os.Stat(op.StagedPath)
+	if err != nil || !os.SameFile(arrivals[0].info, cur) {
+		t.Fatalf("winner's recorded copy was replaced or removed by the loser (err %v)", err)
+	}
+	members, err := verifyStaged(op.StagedPath, op.Subject, op.Members)
+	if err != nil || !sameMembers(members, op.StagedMembers) {
+		t.Fatalf("winner's recorded copy no longer verifies: %v", err)
+	}
+	if arrivals[1].path == arrivals[0].path {
+		t.Fatal("both attempts published to the same staged path")
+	}
+	if _, err := os.Stat(arrivals[1].path); !os.IsNotExist(err) {
+		t.Fatalf("loser's unreferenced copy was kept: %v", err)
+	}
+	if revisionCount(t, h) != 1 {
+		t.Fatal("expected exactly one revision")
+	}
+
+	hits := reg.hits()
+	again, err := h.acquirer().Acquire(ctx, req)
+	if err != nil || again.Revision.RevisionID != "sori-rev-1" || reg.hits() != hits {
+		t.Fatalf("retry after the race: rev=%q err=%v (re-transferred=%v)", again.Revision.RevisionID, err, reg.hits() != hits)
+	}
+}
+
+// G1: an ambiguous STAGED checkpoint failure (not a definitive CAS rejection) keeps the
+// published copy, because it may be referenced. The retry stages its own copy; the
+// earlier one stays as an unreferenced orphan (no broad cleanup in this slice).
+func TestI4A_AmbiguousStagedCheckpointKeepsCopy(t *testing.T) {
+	h := newHarness(t)
+	h.cps = &crashStore{CheckpointStore: h.mem, crashOn: PhaseStaged}
+	fx := newSubjectFixture(t, defaultMembers())
+	reg := newFakeRegistry(t, fx)
+	ctx := context.Background()
+	req := request("acq-ambiguous", fx.digest, reg.endpoint(""))
+
+	var published string
+	a := h.acquirer()
+	a.beforeStagedCheckpoint = func(path string) { published = path }
+	if _, err := a.Acquire(ctx, req); !errors.Is(err, errCrash) {
+		t.Fatalf("expected simulated crash, got %v", err)
+	}
+	if _, err := os.Stat(published); err != nil {
+		t.Fatalf("copy removed although its checkpoint outcome was unknown: %v", err)
+	}
+
+	res, err := h.acquirer().Acquire(ctx, req)
+	if err != nil || !res.Accepted() {
+		t.Fatalf("retry: accepted=%v err=%v", res.Accepted(), err)
+	}
+	if res.Operation.StagedPath == published {
+		t.Fatal("retry reused the copy whose checkpoint was never recorded")
+	}
+	if _, err := os.Stat(published); err != nil {
+		t.Fatalf("earlier copy: %v (expected to remain as a documented orphan)", err)
+	}
+}
+
 // AC7(publication retry identity separation): the publication RequestID is minted
 // once per acquisition operation, is distinct from the acquisition OperationID and
 // from other operations, and a publication retry reconciles to the same Revision.

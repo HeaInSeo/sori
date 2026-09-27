@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -30,8 +31,9 @@ const maxManifestBytes = 4 << 20
 const stagingDirPerm = 0o750
 
 // transfer pulls the pinned subject from ep into a fresh temporary OCI layout,
-// verifies it against the pinned digests, and atomically renames it into the
-// operation's staged path. Nothing is published on any failure.
+// verifies it against the pinned digests, and atomically renames it into a staged
+// path unique to this attempt. Nothing is published on any failure, and no other
+// attempt's staged copy is replaced or removed.
 func (a *Acquirer) transfer(ctx context.Context, op Operation, ep Endpoint) (string, []authority.Member, error) {
 	repo, err := a.repository(ep)
 	if err != nil {
@@ -67,10 +69,11 @@ func (a *Acquirer) transfer(ctx context.Context, op Operation, ep Endpoint) (str
 	if err != nil {
 		return "", nil, err
 	}
-	final := filepath.Join(a.StagingRoot, key)
-	// A previous attempt may have published final and crashed before its
-	// checkpoint; that copy is not recorded, so it is replaced.
-	removeStaged(final)
+	// Publish under a per-attempt path that reuses the unique suffix of tmp. A
+	// concurrent attempt of the same operation may already have recorded its own
+	// staged copy; that copy is never touched here. os.Rename refuses an existing
+	// directory, so a name clash fails this attempt instead of replacing a copy.
+	final := filepath.Join(a.StagingRoot, key+".staged-"+strings.TrimPrefix(filepath.Base(tmp), key+".staging-"))
 	if err := os.Rename(tmp, final); err != nil {
 		return "", nil, fmt.Errorf("acquisition: publish staged copy: %w", err)
 	}

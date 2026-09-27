@@ -27,6 +27,10 @@ type Acquirer struct {
 	// HTTPClient optionally overrides the registry HTTP client (tests). When nil
 	// the registryutil retrying client is used.
 	HTTPClient *http.Client
+
+	// beforeStagedCheckpoint is a test hook run after a verified staged copy is
+	// published and before its STAGED checkpoint is written.
+	beforeStagedCheckpoint func(stagedPath string)
 }
 
 // Result reports the operation checkpoint and, once accepted, the Revision.
@@ -128,17 +132,26 @@ func (a *Acquirer) stage(ctx context.Context, op Operation, ep Endpoint) (Operat
 	op.StagedPath = stagedPath
 	op.StagedMembers = members
 	op.LastError = ""
-	return a.saveOr(recordCtx, op)
-}
-
-// saveOr persists op and returns the stored record; on failure it returns op
-// unchanged (the durable checkpoint is still the previous one) with the error.
-func (a *Acquirer) saveOr(ctx context.Context, op Operation) (Operation, error) {
-	saved, err := a.Checkpoints.Update(ctx, op)
+	if a.beforeStagedCheckpoint != nil {
+		a.beforeStagedCheckpoint(stagedPath)
+	}
+	saved, err := a.Checkpoints.Update(recordCtx, op)
 	if err != nil {
+		if checkpointRejected(err) {
+			// The CAS definitely did not record this copy (another attempt of the
+			// same operation won): it is ours and unreferenced, so remove it.
+			removeStaged(stagedPath)
+		}
+		// Otherwise the outcome is UNKNOWN and the copy may be referenced: keep it.
 		return op, err
 	}
 	return saved, nil
+}
+
+// checkpointRejected reports whether a failed Update is a definitive rejection (the
+// record was not changed), as opposed to an ambiguous persistence failure.
+func checkpointRejected(err error) bool {
+	return errors.Is(err, ErrCheckpointStale) || errors.Is(err, ErrOperationConflict)
 }
 
 // handoff moves a staged operation to PhaseAcceptPending. A resumed staged copy is
@@ -151,13 +164,15 @@ func (a *Acquirer) handoff(ctx context.Context, op Operation, reverify bool) (Op
 			err = fmt.Errorf("%w: staged member proofs changed", ErrDigestMismatch)
 		}
 		if err != nil {
-			removeStaged(op.StagedPath)
+			invalid := op.StagedPath
 			op.Phase = PhasePinned
 			op.StagedPath = ""
 			op.StagedMembers = nil
 			op.LastError = err.Error()
 			if saved, uerr := a.Checkpoints.Update(context.WithoutCancel(ctx), op); uerr == nil {
 				op = saved
+				// Only once the checkpoint no longer references the invalid copy.
+				removeStaged(invalid)
 			}
 			return op, fmt.Errorf("%w: %w", ErrStagedInvalid, err)
 		}

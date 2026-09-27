@@ -21,6 +21,12 @@
 //   - Transfer success alone is never an accepted Revision: only the authority's
 //     atomic AcceptRevision produces one, under a publication RequestID that is minted
 //     once per operation and kept distinct from the acquisition OperationID.
+//   - Each transfer attempt publishes its own staged path; the STAGED checkpoint CAS
+//     decides which copy is recorded. An attempt removes its copy only when its CAS is
+//     definitively rejected (ErrCheckpointStale/ErrOperationConflict); after an
+//     ambiguous checkpoint failure the copy is kept because it may be referenced. A
+//     crash between publish and checkpoint leaves an unreferenced copy behind; this
+//     slice does not garbage-collect such orphans.
 //
 // Scope boundary: this slice deliberately does NOT add HTTPS/FTP/object-store/
 // shared-FS transports, UI, or any production DB/topology choice. CheckpointStore is
