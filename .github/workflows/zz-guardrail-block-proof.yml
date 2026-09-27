@@ -1,0 +1,15 @@
+# THROWAWAY: Guardrail ruleset block proof (GR-SORI-REQUIRED-20260927). Must never be merged.
+# The undefined `foo` context below is an intentional actionlint error.
+name: Guardrail Block Proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ foo.bar }}"
