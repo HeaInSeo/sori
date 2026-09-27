@@ -44,6 +44,13 @@ type subjectFixture struct {
 
 func newSubjectFixture(t *testing.T, members map[string]string) subjectFixture {
 	t.Helper()
+	return newSubjectFixtureWith(t, members, nil)
+}
+
+// newSubjectFixtureWith builds a fixture whose manifest is edited by mutate before it
+// is serialized and pinned, modelling a digest-valid but malformed subject.
+func newSubjectFixtureWith(t *testing.T, members map[string]string, mutate func(*ocispec.Manifest)) subjectFixture {
+	t.Helper()
 	blobs := map[digest.Digest][]byte{ocispec.DescriptorEmptyJSON.Digest: ocispec.DescriptorEmptyJSON.Data}
 	layers := make([]ocispec.Descriptor, 0, len(members))
 	// Deterministic layer order.
@@ -71,6 +78,9 @@ func newSubjectFixture(t *testing.T, members map[string]string) subjectFixture {
 		ArtifactType: "application/vnd.sori.test.dataset",
 		Config:       cfg,
 		Layers:       layers,
+	}
+	if mutate != nil {
+		mutate(&m)
 	}
 	raw, err := json.Marshal(m)
 	if err != nil {

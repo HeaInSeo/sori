@@ -137,13 +137,33 @@ func parsePinnedManifest(body []byte, subject digest.Digest) ([]byte, ocispec.Ma
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		return nil, ocispec.Manifest{}, fmt.Errorf("%w: decode manifest: %v", ErrSubjectInvalid, err)
 	}
+	if manifest.SchemaVersion != 2 {
+		return nil, ocispec.Manifest{}, fmt.Errorf("%w: unsupported manifest schemaVersion %d", ErrSubjectInvalid, manifest.SchemaVersion)
+	}
 	if manifest.MediaType != ocispec.MediaTypeImageManifest {
 		return nil, ocispec.Manifest{}, fmt.Errorf("%w: unsupported manifest media type %q", ErrSubjectInvalid, manifest.MediaType)
 	}
 	if err := manifest.Config.Digest.Validate(); err != nil || manifest.Config.Size < 0 {
 		return nil, ocispec.Manifest{}, fmt.Errorf("%w: invalid config descriptor", ErrSubjectInvalid)
 	}
+	if err := checkDescriptorSizes(manifest); err != nil {
+		return nil, ocispec.Manifest{}, err
+	}
 	return body, manifest, nil
+}
+
+// checkDescriptorSizes rejects a manifest whose config/layer descriptors reference
+// the same digest with different declared sizes. subjectBlobs transfers and verifies
+// a shared digest once, so every other descriptor for it must declare the same size.
+func checkDescriptorSizes(manifest ocispec.Manifest) error {
+	sizes := make(map[digest.Digest]int64, len(manifest.Layers)+1)
+	for _, d := range append([]ocispec.Descriptor{manifest.Config}, manifest.Layers...) {
+		if size, seen := sizes[d.Digest]; seen && size != d.Size {
+			return fmt.Errorf("%w: descriptors for %s declare sizes %d and %d", ErrSubjectInvalid, d.Digest, size, d.Size)
+		}
+		sizes[d.Digest] = d.Size
+	}
+	return nil
 }
 
 // matchMembers requires the manifest layers to close exactly over the declared
@@ -252,7 +272,8 @@ func verifyStaged(dir string, subject digest.Digest, decls []MemberDecl) ([]auth
 
 // subjectBlobs lists every blob the pinned manifest references (config + layers), so
 // the staged copy is the complete frozen subject. Blobs are content-addressed, so a
-// digest referenced more than once is listed once.
+// digest referenced more than once is listed once; parsePinnedManifest has already
+// rejected descriptors that disagree on the size of a shared digest.
 func subjectBlobs(manifest ocispec.Manifest) []ocispec.Descriptor {
 	all := append([]ocispec.Descriptor{manifest.Config}, manifest.Layers...)
 	seen := make(map[digest.Digest]struct{}, len(all))

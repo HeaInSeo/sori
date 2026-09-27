@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/registry/remote/auth"
 
 	"github.com/HeaInSeo/sori/authority"
@@ -275,6 +276,69 @@ func TestI4A_MemberClosureMismatchFailsClosed(t *testing.T) {
 		t.Fatalf("expected ErrSubjectInvalid, got %v", err)
 	}
 	assertNothingAccepted(t, h, "acq-c")
+}
+
+// AC3: a digest-valid document with the image-manifest media type but a missing or
+// unsupported schemaVersion is not an OCI image manifest and fails closed.
+func TestI4A_UnsupportedSchemaVersionFailsClosed(t *testing.T) {
+	for _, version := range []int{0, 1, 3} {
+		t.Run("schemaVersion="+strconv.Itoa(version), func(t *testing.T) {
+			h := newHarness(t)
+			fx := newSubjectFixtureWith(t, defaultMembers(), func(m *ocispec.Manifest) { m.SchemaVersion = version })
+			reg := newFakeRegistry(t, fx)
+
+			_, err := h.acquirer().Acquire(context.Background(), request("acq-sv", fx.digest, reg.endpoint("")))
+			if !errors.Is(err, ErrSubjectInvalid) || !IsFailClosed(err) {
+				t.Fatalf("expected fail-closed ErrSubjectInvalid, got %v", err)
+			}
+			assertNothingAccepted(t, h, "acq-sv")
+		})
+	}
+}
+
+// AC3: descriptors that share a digest but declare different sizes fail closed, even
+// though the blob is transferred and verified only once.
+func TestI4A_ConflictingDuplicateDescriptorFailsClosed(t *testing.T) {
+	cases := map[string]struct {
+		members map[string]string
+		mutate  func(*ocispec.Manifest)
+	}{
+		// Layers are ordered by title: genome.fa, genome.fa.fai.
+		"layer-layer": {
+			members: map[string]string{"genome.fa": "ACGT", "genome.fa.fai": "ACGT"},
+			mutate:  func(m *ocispec.Manifest) { m.Layers[1].Size++ },
+		},
+		"config-layer": {
+			members: map[string]string{"genome.fa": "{}", "genome.fa.fai": "chr1\t4\n"},
+			mutate:  func(m *ocispec.Manifest) { m.Layers[0].Size++ },
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			fx := newSubjectFixtureWith(t, tc.members, tc.mutate)
+			reg := newFakeRegistry(t, fx)
+
+			_, err := h.acquirer().Acquire(context.Background(), request("acq-dup", fx.digest, reg.endpoint("")))
+			if !errors.Is(err, ErrSubjectInvalid) || !IsFailClosed(err) {
+				t.Fatalf("expected fail-closed ErrSubjectInvalid, got %v", err)
+			}
+			assertNothingAccepted(t, h, "acq-dup")
+		})
+	}
+}
+
+// A digest shared by consistent descriptors is still accepted; only the transfer is
+// deduplicated.
+func TestI4A_ConsistentDuplicateDescriptorAccepted(t *testing.T) {
+	h := newHarness(t)
+	fx := newSubjectFixture(t, map[string]string{"genome.fa": "ACGT", "genome.fa.fai": "ACGT"})
+	reg := newFakeRegistry(t, fx)
+
+	res, err := h.acquirer().Acquire(context.Background(), request("acq-dup-ok", fx.digest, reg.endpoint("")))
+	if err != nil || !res.Accepted() {
+		t.Fatalf("consistent duplicate descriptors: accepted=%v err=%v", res.Accepted(), err)
+	}
 }
 
 func assertNothingAccepted(t *testing.T, h *harness, id OperationID) {
