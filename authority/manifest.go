@@ -144,7 +144,10 @@ func validateAcceptRequest(req AcceptRequest) error {
 	if err := validateMemberDeclarations(m.Members); err != nil {
 		return err
 	}
-	return validateProvenance(m.Origin, m.Provenance)
+	if err := validateProvenance(m.Origin, m.Provenance); err != nil {
+		return err
+	}
+	return validateProfile(req.Profile, m)
 }
 
 // validateMemberDeclarations requires every accepted member to declare its

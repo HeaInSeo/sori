@@ -60,6 +60,12 @@ type AcceptRequest struct {
 	RequestID RequestID
 	AssetID   AssetID
 	Manifest  SemanticManifest
+	// Profile names the producer path whose stricter acceptance gate applies
+	// (SORI-I4A). The zero value (ProfileUnspecified) keeps the I1M contract
+	// unchanged, so previously accepted revisions and legacy requests are never
+	// retroactively invalidated. Profile is a validation gate only and is NOT
+	// identity-bearing (it is excluded from the fingerprint).
+	Profile AcceptProfile
 }
 
 // Revision is an accepted, immutable Asset Revision. Its fields are never mutated
