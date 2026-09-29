@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -248,6 +249,12 @@ func classifyVerifyError(what string, err error) error {
 func verifyStaged(dir string, subject digest.Digest, decls []MemberDecl) ([]authority.Member, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("%w: no staged path recorded", ErrDigestMismatch)
+	}
+	// A staged directory that does not exist at all was never staged on this
+	// replica: that is unavailability, not a content verdict. A directory that
+	// exists but is incomplete or wrong still fails closed below.
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: staged path %s does not exist here", ErrStagedUnavailable, dir)
 	}
 	// #nosec G304 -- path is built from the operation's own staging dir and a validated digest.
 	body, err := os.ReadFile(blobPath(dir, subject))
