@@ -155,8 +155,10 @@ func checkpointRejected(err error) bool {
 }
 
 // handoff moves a staged operation to PhaseAcceptPending. A resumed staged copy is
-// re-verified first; if it no longer matches the pinned digests the operation is
-// reset to PhasePinned (fail closed) so a retry re-transfers.
+// re-verified first. If it no longer matches the pinned digests the operation is
+// reset to PhasePinned (fail closed) so a retry re-transfers. If it does not exist
+// on this replica at all, the operation is reset the same way but the error is
+// ErrStagedUnavailable, which is retryable and not a fail-closed verdict.
 func (a *Acquirer) handoff(ctx context.Context, op Operation, reverify bool) (Operation, error) {
 	if reverify {
 		members, err := verifyStaged(op.StagedPath, op.Subject, op.Members)
@@ -164,7 +166,10 @@ func (a *Acquirer) handoff(ctx context.Context, op Operation, reverify bool) (Op
 			err = fmt.Errorf("%w: staged member proofs changed", ErrDigestMismatch)
 		}
 		if err != nil {
+			unavailable := errors.Is(err, ErrStagedUnavailable)
 			invalid := op.StagedPath
+			// Identity (ID, Fingerprint, Subject, PublicationRequestID) is kept;
+			// only the staged locator is dropped.
 			op.Phase = PhasePinned
 			op.StagedPath = ""
 			op.StagedMembers = nil
@@ -172,7 +177,13 @@ func (a *Acquirer) handoff(ctx context.Context, op Operation, reverify bool) (Op
 			if saved, uerr := a.Checkpoints.Update(context.WithoutCancel(ctx), op); uerr == nil {
 				op = saved
 				// Only once the checkpoint no longer references the invalid copy.
-				removeStaged(invalid)
+				// An unavailable copy is not here to remove.
+				if !unavailable {
+					removeStaged(invalid)
+				}
+			}
+			if unavailable {
+				return op, err
 			}
 			return op, fmt.Errorf("%w: %w", ErrStagedInvalid, err)
 		}
@@ -246,7 +257,9 @@ func sameMembers(a, b []authority.Member) bool {
 }
 
 // IsFailClosed reports whether err is an integrity failure (the subject could not be
-// proven), as opposed to a transient transfer/availability failure.
+// proven), as opposed to a transient transfer/availability failure. A staged copy
+// that is merely unavailable on this replica (ErrStagedUnavailable) is not
+// fail-closed.
 func IsFailClosed(err error) bool {
 	return errors.Is(err, ErrDigestMismatch) || errors.Is(err, ErrSubjectInvalid) || errors.Is(err, ErrStagedInvalid)
 }

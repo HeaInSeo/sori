@@ -27,6 +27,9 @@
 //     ambiguous checkpoint failure the copy is kept because it may be referenced. A
 //     crash between publish and checkpoint leaves an unreferenced copy behind; this
 //     slice does not garbage-collect such orphans.
+//   - Staged copies are replica-local. A resumed STAGED checkpoint whose staged path
+//     does not exist here is ErrStagedUnavailable (retryable), not an integrity
+//     failure; only staged content that is present but wrong fails closed.
 //
 // Scope boundary: this slice deliberately does NOT add HTTPS/FTP/object-store/
 // shared-FS transports, UI, or any production DB/topology choice. CheckpointStore is
@@ -71,6 +74,12 @@ var (
 	// ErrStagedInvalid reports that a previously staged copy failed re-verification on
 	// resume. The operation is reset to PhasePinned so a retry re-transfers.
 	ErrStagedInvalid = errors.New("acquisition: staged copy failed re-verification")
+	// ErrStagedUnavailable reports that the staged copy recorded by the STAGED
+	// checkpoint does not exist on this replica — typically another replica staged
+	// it under its own StagingRoot. Nothing about the subject's content was proven
+	// wrong, so this is NOT a fail-closed integrity verdict: the operation is reset
+	// to PhasePinned with its identity kept, and a retry re-transfers.
+	ErrStagedUnavailable = errors.New("acquisition: staged copy is unavailable on this replica")
 	// ErrCheckpointStale reports an optimistic-concurrency conflict on a checkpoint
 	// update (another worker advanced the operation).
 	ErrCheckpointStale = errors.New("acquisition: checkpoint version is stale")
