@@ -23,7 +23,7 @@ func acceptAndAttach(a *authority.Authority) (authority.Revision, authority.Repr
 	if err != nil {
 		return authority.Revision{}, authority.Representation{}, err
 	}
-	rep, err := a.AttachRepresentation(context.Background(), attachReq("attach-1", rev, formatOne, locatorA))
+	rep, err := attachAs(a, attachReq("attach-1", rev, formatOne, locatorA))
 	if err != nil {
 		return authority.Revision{}, authority.Representation{}, fmt.Errorf("attach: %w", err)
 	}
@@ -127,7 +127,7 @@ func attachConcurrentSameOperation(t *testing.T, h Harness) error {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			reps[i], errs[i] = a.AttachRepresentation(context.Background(), attachReq("attach-race", rev, formatOne, locatorA))
+			reps[i], errs[i] = attachAs(a, attachReq("attach-race", rev, formatOne, locatorA))
 		}(i)
 	}
 	wg.Wait()
@@ -168,7 +168,7 @@ func attachConcurrentConflictingOperation(t *testing.T, h Harness) error {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			reps[i], errs[i] = a.AttachRepresentation(context.Background(), attachReq("attach-race", rev, formats[i%2], locatorA))
+			reps[i], errs[i] = attachAs(a, attachReq("attach-race", rev, formats[i%2], locatorA))
 		}(i)
 	}
 	wg.Wait()
@@ -226,7 +226,7 @@ func attachListOrder(t *testing.T, h Harness) error {
 	if err != nil {
 		return err
 	}
-	second, err := a.AttachRepresentation(context.Background(), attachReq("attach-2", rev, formatTwo))
+	second, err := attachAs(a, attachReq("attach-2", rev, formatTwo))
 	if err != nil {
 		return fmt.Errorf("second attach: %w", err)
 	}

@@ -74,7 +74,7 @@ func deepCopyRepresentation(t *testing.T, h Harness) error {
 		return err
 	}
 	req := attachReq("attach-1", rev, formatOne, locatorA)
-	rep, err := a.AttachRepresentation(ctx, req)
+	rep, err := attachAs(a, req)
 	if err != nil {
 		return fmt.Errorf("attach: %w", err)
 	}

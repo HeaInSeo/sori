@@ -180,6 +180,102 @@ func omitRequestID(authority.RequestID) authority.RequestID { return "" }
 
 func corruptRequestID(id authority.RequestID) authority.RequestID { return id + "-corrupt" }
 
+// bindEventRewriting binds and records correctly but reports every BindEvent, on bind and
+// on history reads alike, rewritten. The responses stay self-consistent, so only a check
+// against the submitted BindRequest catches it.
+type bindEventRewriting struct {
+	*authority.MemoryStore
+	rewrite func(*authority.BindEvent)
+}
+
+func newBindEventRewriting(rewrite func(*authority.BindEvent)) func(*authority.MemoryStore) authority.Store {
+	return func(m *authority.MemoryStore) authority.Store {
+		return bindEventRewriting{MemoryStore: m, rewrite: rewrite}
+	}
+}
+
+func (s bindEventRewriting) BindAlias(ctx context.Context, req authority.BindRequest) (authority.BindEvent, error) {
+	ev, err := s.MemoryStore.BindAlias(ctx, req)
+	if err == nil {
+		s.rewrite(&ev)
+	}
+	return ev, err
+}
+
+func (s bindEventRewriting) AliasHistory(ctx context.Context, alias string) ([]authority.BindEvent, error) {
+	evs, err := s.MemoryStore.AliasHistory(ctx, alias)
+	for i := range evs {
+		s.rewrite(&evs[i])
+	}
+	return evs, err
+}
+
+func omitBindRequestID(ev *authority.BindEvent) { ev.BindRequestID = "" }
+
+func corruptBindAsset(ev *authority.BindEvent) { ev.AssetID += "-corrupt" }
+
+// representationRewriting attaches and stores correctly but reports every
+// Representation, on attach, get and list alike, rewritten.
+type representationRewriting struct {
+	*authority.MemoryStore
+	rewrite func(*authority.Representation)
+}
+
+func newRepresentationRewriting(rewrite func(*authority.Representation)) func(*authority.MemoryStore) authority.Store {
+	return func(m *authority.MemoryStore) authority.Store {
+		return representationRewriting{MemoryStore: m, rewrite: rewrite}
+	}
+}
+
+func (s representationRewriting) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, members []authority.Member) (authority.Representation, error) {
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, members)
+	if err == nil {
+		s.rewrite(&rep)
+	}
+	return rep, err
+}
+
+func (s representationRewriting) GetRepresentation(ctx context.Context, id authority.RepresentationID) (authority.Representation, bool, error) {
+	rep, ok, err := s.MemoryStore.GetRepresentation(ctx, id)
+	if ok {
+		s.rewrite(&rep)
+	}
+	return rep, ok, err
+}
+
+func (s representationRewriting) ListRepresentations(ctx context.Context, revID authority.RevisionID) ([]authority.Representation, error) {
+	reps, err := s.MemoryStore.ListRepresentations(ctx, revID)
+	for i := range reps {
+		s.rewrite(&reps[i])
+	}
+	return reps, err
+}
+
+func corruptRepresentationAsset(rep *authority.Representation) { rep.AssetID += "-corrupt" }
+
+func corruptRepresentationRevision(rep *authority.Representation) { rep.RevisionID += "-corrupt" }
+
+// bindOracleCases are the cases whose first BindEvent becomes the oracle.
+var bindOracleCases = []string{
+	"BindAlias/AppendOnlyHistoryOrder",
+	"BindAlias/IdempotentRetryAndConflict",
+	"BindAlias/SameBindRequestIDDifferentAliasOrAsset",
+	"BindAlias/ConcurrentSameBindRequestID",
+	"BindAlias/ConcurrentSameBindRequestIDDifferentRevision",
+	"DeepCopy/AliasHistory",
+}
+
+// representationOracleCases are the cases whose first Representation becomes the oracle.
+var representationOracleCases = []string{
+	"AttachRepresentation/IdempotentRetryAndConflict",
+	"AttachRepresentation/SameOperationIDDifferentRevision",
+	"AttachRepresentation/ConcurrentSameOperationID",
+	"AttachRepresentation/ConcurrentSameOperationIDDifferentFormat",
+	"AttachRepresentation/ListOrder",
+	"Representation/AvailabilityPreservesIdentity",
+	"DeepCopy/Representation",
+}
+
 // requestIDOracleCases are the cases whose first accepted Revision becomes the oracle.
 var requestIDOracleCases = []string{
 	"AcceptRevision/IdempotentRetry",
@@ -813,6 +909,36 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "accept and read corrupt request id across reopen",
 			harness: reopenHarness(newRequestIDRewritingAccept(corruptRequestID)),
 			rejects: []string{"Reopen/Revision"},
+		},
+		{
+			mutant:  "bind and history omit bind request id",
+			harness: memoryHarness(newBindEventRewriting(omitBindRequestID)),
+			rejects: bindOracleCases,
+		},
+		{
+			mutant:  "bind and history rewrite asset",
+			harness: memoryHarness(newBindEventRewriting(corruptBindAsset)),
+			rejects: bindOracleCases,
+		},
+		{
+			mutant:  "bind and history omit bind request id across reopen",
+			harness: reopenHarness(newBindEventRewriting(omitBindRequestID)),
+			rejects: []string{"Reopen/AliasHistory"},
+		},
+		{
+			mutant:  "attach, get and list rewrite asset",
+			harness: memoryHarness(newRepresentationRewriting(corruptRepresentationAsset)),
+			rejects: representationOracleCases,
+		},
+		{
+			mutant:  "attach, get and list rewrite revision",
+			harness: memoryHarness(newRepresentationRewriting(corruptRepresentationRevision)),
+			rejects: representationOracleCases,
+		},
+		{
+			mutant:  "attach, get and list rewrite revision across reopen",
+			harness: reopenHarness(newRepresentationRewriting(corruptRepresentationRevision)),
+			rejects: []string{"Reopen/Representation"},
 		},
 	}
 	for _, tc := range cases {

@@ -120,6 +120,51 @@ func carriesRequest(rev authority.Revision, id authority.RequestID) error {
 	return nil
 }
 
+// bindAs binds through the facade and requires the returned event to record the submitted
+// request before a case uses it as an oracle.
+func bindAs(a *authority.Authority, req authority.BindRequest) (authority.BindEvent, error) {
+	ev, err := a.BindAlias(context.Background(), req)
+	if err != nil {
+		return authority.BindEvent{}, err
+	}
+	if err := bindMatches(ev, req); err != nil {
+		return authority.BindEvent{}, err
+	}
+	return ev, nil
+}
+
+// bindMatches checks that ev records the operation and logical binding of req.
+func bindMatches(ev authority.BindEvent, req authority.BindRequest) error {
+	if ev.BindRequestID != req.BindRequestID || ev.Alias != req.Alias || ev.AssetID != req.AssetID || ev.RevisionID != req.RevisionID {
+		return fmt.Errorf("bind event %+v does not record request %+v", ev, req)
+	}
+	return nil
+}
+
+// attachAs attaches through the facade and requires the returned Representation to carry
+// the submitted relation and attach identity before a case uses it as an oracle.
+func attachAs(a *authority.Authority, req authority.AttachRequest) (authority.Representation, error) {
+	rep, err := a.AttachRepresentation(context.Background(), req)
+	if err != nil {
+		return authority.Representation{}, err
+	}
+	if err := attachMatches(rep, req); err != nil {
+		return authority.Representation{}, err
+	}
+	return rep, nil
+}
+
+// attachMatches checks the immutable fields of rep against the attach request that created
+// it. Locators and health are mutable availability, so they are not compared.
+func attachMatches(rep authority.Representation, req authority.AttachRequest) error {
+	if rep.AttachOperationID != req.AttachOperationID || rep.AssetID != req.AssetID ||
+		rep.RevisionID != req.RevisionID || rep.Format != req.Format {
+		return fmt.Errorf("representation %q (op %q, asset %q, revision %q, format %q) does not record attach %+v",
+			rep.RepresentationID, rep.AttachOperationID, rep.AssetID, rep.RevisionID, rep.Format, req)
+	}
+	return nil
+}
+
 // sameRevision compares two Revisions field by field. AcceptedAt is compared with
 // time.Equal so a durable backend may drop the monotonic clock / location.
 func sameRevision(got, want authority.Revision) error {

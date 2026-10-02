@@ -11,7 +11,7 @@ import (
 )
 
 func bind(a *authority.Authority, id authority.RequestID, rev authority.Revision) (authority.BindEvent, error) {
-	ev, err := a.BindAlias(context.Background(), authority.BindRequest{
+	ev, err := bindAs(a, authority.BindRequest{
 		BindRequestID: id, Alias: aliasLatest, AssetID: rev.AssetID, RevisionID: rev.RevisionID,
 	})
 	if err != nil {
@@ -213,7 +213,7 @@ func bindConcurrentConflictingRequest(t *testing.T, h Harness) error {
 		go func(i int) {
 			defer wg.Done()
 			rev := revs[i%2]
-			events[i], errs[i] = a.BindAlias(context.Background(), authority.BindRequest{
+			events[i], errs[i] = bindAs(a, authority.BindRequest{
 				BindRequestID: "bind-race", Alias: aliasLatest, AssetID: rev.AssetID, RevisionID: rev.RevisionID,
 			})
 		}(i)

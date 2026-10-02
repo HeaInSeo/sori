@@ -220,7 +220,7 @@ func reopenRepresentation(t *testing.T, h Harness) error {
 // reopen: the restored ID allocator must not hand out rep's RepresentationID, and both
 // representations must stay intact and listed in attach order.
 func freshAttachAfterReopen(a *authority.Authority, s authority.Store, rev authority.Revision, rep authority.Representation) error {
-	fresh, err := a.AttachRepresentation(context.Background(), attachReq("attach-2", rev, formatTwo, locatorA))
+	fresh, err := attachAs(a, attachReq("attach-2", rev, formatTwo, locatorA))
 	if err != nil {
 		return fmt.Errorf("fresh attach after reopen: %w", err)
 	}
