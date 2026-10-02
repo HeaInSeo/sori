@@ -160,7 +160,8 @@ func (s *blindBind) BindAlias(ctx context.Context, req authority.BindRequest) (a
 }
 
 // revisionBlindAttach reconciles a reused AttachOperationID by fingerprint only,
-// ignoring the RevisionID the relation is attached to.
+// ignoring the RevisionID the relation is attached to. A hit returns the stored
+// Representation, so only the missing RevisionID comparison is wrong.
 type revisionBlindAttach struct {
 	*authority.MemoryStore
 	mu    sync.Mutex
@@ -175,7 +176,11 @@ func (s *revisionBlindAttach) AttachRepresentation(ctx context.Context, req auth
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p, ok := s.prior[req.AttachOperationID]; ok && p.Fingerprint == fp {
-		return p, nil
+		cur, found, err := s.GetRepresentation(ctx, p.RepresentationID)
+		if err != nil || !found {
+			return authority.Representation{}, fmt.Errorf("stored representation %q: found=%v err=%v", p.RepresentationID, found, err)
+		}
+		return cur, nil
 	}
 	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
 	if err == nil {
@@ -428,6 +433,30 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 		{
 			mutant:  "attach retry after reopen returns request availability",
 			harness: reopenHarness(newRequestEchoAttach),
+			rejects: []string{"Reopen/Representation"},
+		},
+		{
+			mutant:  "restored accept record compares profile",
+			harness: reopenHarness(newProfileStrictAccept),
+			rejects: []string{"Reopen/Revision"},
+		},
+		{
+			mutant: "restored bind record ignores alias",
+			harness: reopenHarness(newBlindBind(func(p authority.BindEvent, r authority.BindRequest) bool {
+				return p.AssetID == r.AssetID && p.RevisionID == r.RevisionID
+			})),
+			rejects: []string{"Reopen/AliasHistory"},
+		},
+		{
+			mutant: "restored bind record ignores asset",
+			harness: reopenHarness(newBlindBind(func(p authority.BindEvent, r authority.BindRequest) bool {
+				return p.Alias == r.Alias && p.RevisionID == r.RevisionID
+			})),
+			rejects: []string{"Reopen/AliasHistory"},
+		},
+		{
+			mutant:  "restored attach record ignores revision",
+			harness: reopenHarness(newRevisionBlindAttach),
 			rejects: []string{"Reopen/Representation"},
 		},
 	}

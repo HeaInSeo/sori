@@ -17,8 +17,15 @@ func reopenRevision(t *testing.T, h Harness) error {
 	if err != nil {
 		return err
 	}
+	profiled, err := acceptUnderEachProfile(authority.New(s))
+	if err != nil {
+		return err
+	}
 	s = h.Reopen(t, s)
 	a := authority.New(s)
+	if err := profileOnlyRetries(a, profiled); err != nil {
+		return fmt.Errorf("after reopen: %w", err)
+	}
 	if err := checkRevisionUnchanged(s, rev); err != nil {
 		return fmt.Errorf("after reopen: %w", err)
 	}
@@ -52,6 +59,44 @@ func reopenRevision(t *testing.T, h Harness) error {
 	return nil
 }
 
+// acceptUnderEachProfile accepts one external-import Revision under each profile and
+// returns them keyed by the profile they were accepted under.
+func acceptUnderEachProfile(a *authority.Authority) (map[authority.AcceptProfile]authority.Revision, error) {
+	out := map[authority.AcceptProfile]authority.Revision{}
+	for _, p := range []authority.AcceptProfile{authority.ProfileI4AOCIDigest, authority.ProfileUnspecified} {
+		req := authority.AcceptRequest{RequestID: profileRequestID(p), AssetID: assetA, Manifest: externalManifest(digestOne), Profile: p}
+		rev, err := a.AcceptRevision(context.Background(), req)
+		if err != nil {
+			return nil, fmt.Errorf("accept under %s: %w", p, err)
+		}
+		out[p] = rev
+	}
+	return out, nil
+}
+
+// profileOnlyRetries retries each Revision from acceptUnderEachProfile with only the
+// profile switched, so a restored idempotency record that keeps the profile is caught.
+func profileOnlyRetries(a *authority.Authority, accepted map[authority.AcceptProfile]authority.Revision) error {
+	for first, other := range map[authority.AcceptProfile]authority.AcceptProfile{
+		authority.ProfileI4AOCIDigest: authority.ProfileUnspecified,
+		authority.ProfileUnspecified:  authority.ProfileI4AOCIDigest,
+	} {
+		req := authority.AcceptRequest{RequestID: profileRequestID(first), AssetID: assetA, Manifest: externalManifest(digestOne), Profile: other}
+		retry, err := a.AcceptRevision(context.Background(), req)
+		if err != nil {
+			return fmt.Errorf("profile-only retry %s -> %s: %w", first, other, err)
+		}
+		if err := sameRevision(retry, accepted[first]); err != nil {
+			return fmt.Errorf("profile-only retry %s -> %s: %w", first, other, err)
+		}
+	}
+	return nil
+}
+
+func profileRequestID(p authority.AcceptProfile) authority.RequestID {
+	return authority.RequestID("req-profile-" + p.String())
+}
+
 // Alias history, bind reconcile/conflict and Sequence monotonicity survive a reopen.
 func reopenAliasHistory(t *testing.T, h Harness) error {
 	s := h.New(t)
@@ -74,6 +119,18 @@ func reopenAliasHistory(t *testing.T, h Harness) error {
 	}
 	if _, err := bind(a, "bind-2", r1); !errors.Is(err, authority.ErrAliasBindingConflict) {
 		return fmt.Errorf("bind conflict after reopen: err = %v, want ErrAliasBindingConflict", err)
+	}
+	// The restored bind record must still compare Alias and AssetID, each on its own.
+	otherAlias := authority.BindRequest{BindRequestID: "bind-2", Alias: aliasOther, AssetID: r2.AssetID, RevisionID: r2.RevisionID}
+	if _, err := a.BindAlias(context.Background(), otherAlias); !errors.Is(err, authority.ErrAliasBindingConflict) {
+		return fmt.Errorf("same bind id, different alias after reopen: err = %v, want ErrAliasBindingConflict", err)
+	}
+	otherAsset := authority.BindRequest{BindRequestID: "bind-2", Alias: aliasLatest, AssetID: assetB, RevisionID: r2.RevisionID}
+	if _, err := a.BindAlias(context.Background(), otherAsset); !errors.Is(err, authority.ErrAliasBindingConflict) {
+		return fmt.Errorf("same bind id, different asset after reopen: err = %v, want ErrAliasBindingConflict", err)
+	}
+	if other, err := s.AliasHistory(context.Background(), aliasOther); err != nil || len(other) != 0 {
+		return fmt.Errorf("conflicting alias history after reopen = %+v, err=%v; want empty", other, err)
 	}
 	next, err := bind(a, "bind-4", r2)
 	if err != nil {
@@ -104,6 +161,11 @@ func reopenRepresentation(t *testing.T, h Harness) error {
 	}
 	if err := a.SetRepresentationHealth(ctx, rep.RepresentationID, false); err != nil {
 		return fmt.Errorf("set health: %w", err)
+	}
+	// Same members as rev, so only the RevisionID distinguishes an attach to it.
+	rev2, err := accept(a, "req-2", digestOne)
+	if err != nil {
+		return err
 	}
 	s = h.Reopen(t, s)
 	a = authority.New(s)
@@ -137,6 +199,9 @@ func reopenRepresentation(t *testing.T, h Harness) error {
 	if _, err := a.AttachRepresentation(ctx, attachReq("attach-1", rev, formatTwo)); !errors.Is(err, authority.ErrAttachConflict) {
 		return fmt.Errorf("attach conflict after reopen: err = %v, want ErrAttachConflict", err)
 	}
+	if err := attachCrossRevisionConflictAfterReopen(a, s, rev2, rep); err != nil {
+		return err
+	}
 	reps, err := listRepresentations(s, rev.RevisionID)
 	if err != nil {
 		return err
@@ -145,4 +210,25 @@ func reopenRepresentation(t *testing.T, h Harness) error {
 		return fmt.Errorf("relations after reopen = %d, want 1", len(reps))
 	}
 	return sameRepresentationIdentity(reps[0], rep)
+}
+
+// attachCrossRevisionConflictAfterReopen reuses the restored attach operation of rep
+// on rev2, whose members (and so fingerprint) match: the restored operation record
+// must still compare the RevisionID, so it fails closed and changes nothing.
+func attachCrossRevisionConflictAfterReopen(a *authority.Authority, s authority.Store, rev2 authority.Revision, rep authority.Representation) error {
+	_, err := a.AttachRepresentation(context.Background(), attachReq(rep.AttachOperationID, rev2, rep.Format, locatorA))
+	if !errors.Is(err, authority.ErrAttachConflict) {
+		return fmt.Errorf("same op, different revision after reopen: err = %v, want ErrAttachConflict", err)
+	}
+	if reps, err := listRepresentations(s, rev2.RevisionID); err != nil || len(reps) != 0 {
+		return fmt.Errorf("conflicting attach after reopen left %d relations on second revision (err=%v), want 0", len(reps), err)
+	}
+	got, err := getRepresentation(s, rep.RepresentationID)
+	if err != nil {
+		return fmt.Errorf("after cross-revision conflict: %w", err)
+	}
+	if got.Healthy || !reflect.DeepEqual(got.Locators, []authority.Locator{locatorB}) {
+		return fmt.Errorf("cross-revision conflict after reopen changed availability: healthy=%v locators=%+v", got.Healthy, got.Locators)
+	}
+	return nil
 }
