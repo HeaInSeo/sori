@@ -193,3 +193,47 @@ func bindConcurrentSameRequest(t *testing.T, h Harness) error {
 	}
 	return sameHistory(hist, events[:1])
 }
+
+// Concurrent binds of one BindRequestID to two different Revisions commit exactly one
+// binding: every call for the winning Revision returns the same event, every call for
+// the other fails with ErrAliasBindingConflict, and the history holds one event.
+func bindConcurrentConflictingRequest(t *testing.T, h Harness) error {
+	s := h.New(t)
+	a := authority.New(s)
+	r1, r2, err := twoRevisions(a)
+	if err != nil {
+		return err
+	}
+	revs := [2]authority.Revision{r1, r2}
+	events := make([]authority.BindEvent, concurrency)
+	errs := make([]error, concurrency)
+	var wg sync.WaitGroup
+	for i := range concurrency {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rev := revs[i%2]
+			events[i], errs[i] = a.BindAlias(context.Background(), authority.BindRequest{
+				BindRequestID: "bind-race", Alias: aliasLatest, AssetID: rev.AssetID, RevisionID: rev.RevisionID,
+			})
+		}(i)
+	}
+	wg.Wait()
+	winner, err := splitRace(errs, authority.ErrAliasBindingConflict)
+	if err != nil {
+		return err
+	}
+	for i := winner % 2; i < concurrency; i += 2 {
+		if err := sameBindEvent(events[i], events[winner]); err != nil {
+			return fmt.Errorf("concurrent bind %d diverged: %w", i, err)
+		}
+	}
+	if events[winner].RevisionID != revs[winner%2].RevisionID {
+		return fmt.Errorf("winning bind points at %q, want %q", events[winner].RevisionID, revs[winner%2].RevisionID)
+	}
+	hist, err := s.AliasHistory(context.Background(), aliasLatest)
+	if err != nil {
+		return fmt.Errorf("alias history: %w", err)
+	}
+	return sameHistory(hist, events[winner:winner+1])
+}

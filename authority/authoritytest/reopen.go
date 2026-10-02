@@ -49,6 +49,10 @@ func reopenRevision(t *testing.T, h Harness) error {
 	if _, err := a.AcceptRevision(context.Background(), acceptReq("req-1", assetA, digestTwo)); !errors.Is(err, authority.ErrRequestConflict) {
 		return fmt.Errorf("conflict after reopen: err = %v, want ErrRequestConflict", err)
 	}
+	// The restored idempotency record must still compare the full fingerprint.
+	if err := fingerprintOnlyConflicts(a); err != nil {
+		return fmt.Errorf("after reopen: %w", err)
+	}
 	next, err := accept(a, "req-2", digestOne)
 	if err != nil {
 		return err

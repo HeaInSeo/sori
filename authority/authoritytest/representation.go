@@ -149,6 +149,51 @@ func attachConcurrentSameOperation(t *testing.T, h Harness) error {
 	return sameRepresentationIdentity(listed[0], reps[0])
 }
 
+// Concurrent attaches of one AttachOperationID with two different formats commit
+// exactly one relation: every call for the winning format returns the same
+// Representation, every call for the other fails with ErrAttachConflict, and exactly
+// one Representation is appended.
+func attachConcurrentConflictingOperation(t *testing.T, h Harness) error {
+	s := h.New(t)
+	a := authority.New(s)
+	rev, err := accept(a, "req-1", digestOne)
+	if err != nil {
+		return err
+	}
+	formats := [2]string{formatOne, formatTwo}
+	reps := make([]authority.Representation, concurrency)
+	errs := make([]error, concurrency)
+	var wg sync.WaitGroup
+	for i := range concurrency {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			reps[i], errs[i] = a.AttachRepresentation(context.Background(), attachReq("attach-race", rev, formats[i%2], locatorA))
+		}(i)
+	}
+	wg.Wait()
+	winner, err := splitRace(errs, authority.ErrAttachConflict)
+	if err != nil {
+		return err
+	}
+	for i := winner % 2; i < concurrency; i += 2 {
+		if err := sameRepresentationIdentity(reps[i], reps[winner]); err != nil {
+			return fmt.Errorf("concurrent attach %d diverged: %w", i, err)
+		}
+	}
+	if reps[winner].Format != formats[winner%2] {
+		return fmt.Errorf("winning attach has format %q, want %q", reps[winner].Format, formats[winner%2])
+	}
+	listed, err := listRepresentations(s, rev.RevisionID)
+	if err != nil {
+		return err
+	}
+	if len(listed) != 1 {
+		return fmt.Errorf("relations after conflicting concurrent attach = %d, want 1", len(listed))
+	}
+	return sameRepresentationIdentity(listed[0], reps[winner])
+}
+
 // A new attach operation whose proofs do not match the accepted Revision is rejected
 // and appends nothing.
 func attachMemberEquivalence(t *testing.T, h Harness) error {

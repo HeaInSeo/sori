@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/HeaInSeo/sori/authority"
 )
@@ -106,6 +107,180 @@ func (s *profileStrictAccept) AcceptRevision(ctx context.Context, req authority.
 		}
 	}
 	return rev, err
+}
+
+// memberDigestAccept reconciles a reused RequestID on (AssetID, member digests) only,
+// ignoring the rest of the supplied fingerprint: a hit is forwarded with the prior
+// fingerprint, so a provenance-only change is returned as the original Revision.
+type memberDigestAccept struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	prior map[authority.RequestID]authority.Revision
+}
+
+func newMemberDigestAccept(m *authority.MemoryStore) authority.Store {
+	return &memberDigestAccept{MemoryStore: m, prior: map[authority.RequestID]authority.Revision{}}
+}
+
+func memberDigests(m authority.SemanticManifest) []string {
+	out := make([]string, 0, len(m.Members))
+	for _, mem := range m.Members {
+		out = append(out, mem.Proof.Digest)
+	}
+	return out
+}
+
+func (s *memberDigestAccept) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.prior[req.RequestID]; ok && p.AssetID == req.AssetID &&
+		slices.Equal(memberDigests(p.Manifest), memberDigests(req.Manifest)) {
+		fp = p.Fingerprint
+	}
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err == nil {
+		if _, ok := s.prior[req.RequestID]; !ok {
+			s.prior[req.RequestID] = rev
+		}
+	}
+	return rev, err
+}
+
+// raceWindow bounds how long a gated call waits for a conflicting racer.
+const raceWindow = 200 * time.Millisecond
+
+// raceGate widens a check-then-act gap: a call for an operation id waits until a
+// different request for the same id has arrived (or raceWindow passes), so two
+// conflicting racers both pass the conflict check before either commits. Sequential
+// callers only see a delay.
+type raceGate struct {
+	mu    sync.Mutex
+	first map[authority.RequestID]string
+	open  map[authority.RequestID]chan struct{}
+}
+
+func (g *raceGate) wait(id authority.RequestID, key string) {
+	g.mu.Lock()
+	if g.open == nil {
+		g.first, g.open = map[authority.RequestID]string{}, map[authority.RequestID]chan struct{}{}
+	}
+	ch, ok := g.open[id]
+	switch {
+	case !ok:
+		ch = make(chan struct{})
+		g.open[id], g.first[id] = ch, key
+	case g.first[id] != "" && g.first[id] != key:
+		close(ch)
+		g.first[id] = ""
+	}
+	g.mu.Unlock()
+	select {
+	case <-ch:
+	case <-time.After(raceWindow):
+	}
+}
+
+// tupleKeyedBind checks a reused BindRequestID correctly when it is already committed,
+// but commits under a uniqueness key on the full binding rather than the request id:
+// two racing different bindings both pass the check and both are appended.
+type tupleKeyedBind struct {
+	*authority.MemoryStore
+	gate raceGate
+	mu   sync.Mutex
+	done map[authority.RequestID]authority.BindEvent
+}
+
+func newTupleKeyedBind(m *authority.MemoryStore) authority.Store {
+	return &tupleKeyedBind{MemoryStore: m, done: map[authority.RequestID]authority.BindEvent{}}
+}
+
+func sameBinding(p authority.BindEvent, r authority.BindRequest) bool {
+	return p.Alias == r.Alias && p.AssetID == r.AssetID && p.RevisionID == r.RevisionID
+}
+
+func (s *tupleKeyedBind) BindAlias(ctx context.Context, req authority.BindRequest) (authority.BindEvent, error) {
+	id := req.BindRequestID
+	s.mu.Lock()
+	p, ok := s.done[id]
+	s.mu.Unlock()
+	if ok && sameBinding(p, req) {
+		return p, nil
+	}
+	if ok {
+		return authority.BindEvent{}, fmt.Errorf("%w: bind request %q", authority.ErrAliasBindingConflict, id)
+	}
+	s.gate.wait(id, fmt.Sprint(req.Alias, req.AssetID, req.RevisionID))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok = s.done[id]
+	if ok && sameBinding(p, req) {
+		return p, nil
+	}
+	inner := req
+	if ok {
+		inner.BindRequestID = id + "#tuple"
+	}
+	ev, err := s.MemoryStore.BindAlias(ctx, inner)
+	if err == nil && !ok {
+		s.done[id] = ev
+	}
+	ev.BindRequestID = id
+	return ev, err
+}
+
+// tupleKeyedAttach is tupleKeyedBind for AttachRepresentation: the uniqueness key is the
+// relation (RevisionID, fingerprint), not the AttachOperationID.
+type tupleKeyedAttach struct {
+	*authority.MemoryStore
+	gate raceGate
+	mu   sync.Mutex
+	done map[authority.RequestID]authority.Representation
+}
+
+func newTupleKeyedAttach(m *authority.MemoryStore) authority.Store {
+	return &tupleKeyedAttach{MemoryStore: m, done: map[authority.RequestID]authority.Representation{}}
+}
+
+func (s *tupleKeyedAttach) reconcile(ctx context.Context, req authority.AttachRequest, fp string) (authority.Representation, bool, error) {
+	p, ok := s.done[req.AttachOperationID]
+	if !ok {
+		return authority.Representation{}, false, nil
+	}
+	if p.RevisionID != req.RevisionID || p.Fingerprint != fp {
+		return authority.Representation{}, true, fmt.Errorf("%w: attach operation %q", authority.ErrAttachConflict, req.AttachOperationID)
+	}
+	cur, found, err := s.GetRepresentation(ctx, p.RepresentationID)
+	if err != nil || !found {
+		return authority.Representation{}, true, fmt.Errorf("stored representation %q: found=%v err=%v", p.RepresentationID, found, err)
+	}
+	return cur, true, nil
+}
+
+func (s *tupleKeyedAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	id := req.AttachOperationID
+	s.mu.Lock()
+	rep, hit, err := s.reconcile(ctx, req, fp)
+	s.mu.Unlock()
+	if hit {
+		return rep, err
+	}
+	s.gate.wait(id, fmt.Sprint(req.RevisionID, fp))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, committed := s.done[id]
+	if rep, hit, err := s.reconcile(ctx, req, fp); hit && err == nil {
+		return rep, nil
+	}
+	inner := req
+	if committed {
+		inner.AttachOperationID = id + "#tuple"
+	}
+	rep, err = s.MemoryStore.AttachRepresentation(ctx, inner, fp, revMembers)
+	if err == nil && !committed {
+		s.done[id] = rep
+	}
+	rep.AttachOperationID = id
+	return rep, err
 }
 
 // reopenHarness wraps each new MemoryStore and reopens to the same instance, so a
@@ -555,6 +730,26 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "reopen restores id allocators one behind",
 			harness: allocatorResetHarness(),
 			rejects: []string{"Reopen/Revision", "Reopen/Representation"},
+		},
+		{
+			mutant:  "accept reconcile compares only asset and member digests",
+			harness: memoryHarness(newMemberDigestAccept),
+			rejects: []string{"AcceptRevision/RequestConflict"},
+		},
+		{
+			mutant:  "restored accept record compares only asset and member digests",
+			harness: reopenHarness(newMemberDigestAccept),
+			rejects: []string{"Reopen/Revision"},
+		},
+		{
+			mutant:  "bind unique on full binding, not request id",
+			harness: memoryHarness(newTupleKeyedBind),
+			rejects: []string{"BindAlias/ConcurrentSameBindRequestIDDifferentRevision"},
+		},
+		{
+			mutant:  "attach unique on relation, not operation id",
+			harness: memoryHarness(newTupleKeyedAttach),
+			rejects: []string{"AttachRepresentation/ConcurrentSameOperationIDDifferentFormat"},
 		},
 	}
 	for _, tc := range cases {

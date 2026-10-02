@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 
@@ -91,11 +92,35 @@ func acceptRequestConflict(t *testing.T, h Harness) error {
 	if _, err := a.AcceptRevision(ctx, acceptReq("req-1", assetB, digestOne)); !errors.Is(err, authority.ErrRequestConflict) {
 		return fmt.Errorf("same request, different asset: err = %v, want ErrRequestConflict", err)
 	}
+	if err := fingerprintOnlyConflicts(a); err != nil {
+		return err
+	}
 	stored, err := getRevision(s, first.RevisionID)
 	if err != nil {
 		return err
 	}
 	return sameRevision(stored, first)
+}
+
+// fingerprintOnlyConflicts reuses req-1 (asset A, digestOne) with the same asset and
+// member digest but one other identity-bearing field changed: provenance, lineage or
+// a non-digest member field. The supplied fingerprint covers all of them, so a
+// reconcile on (AssetID, member digest) alone is caught.
+func fingerprintOnlyConflicts(a *authority.Authority) error {
+	builder := acceptReq("req-1", assetA, digestOne)
+	builder.Manifest.Provenance.BuilderIdentity = "builder@v2"
+	lineage := acceptReq("req-1", assetA, digestOne)
+	lineage.Manifest.Provenance.InputLineage = []string{"input-a", "input-c"}
+	format := acceptReq("req-1", assetA, digestOne)
+	format.Manifest.Members[0].DataFormat = "bam"
+	for name, req := range map[string]authority.AcceptRequest{
+		"builder identity": builder, "input lineage": lineage, "member data format": format,
+	} {
+		if _, err := a.AcceptRevision(context.Background(), req); !errors.Is(err, authority.ErrRequestConflict) {
+			return fmt.Errorf("same request, only %s changed: err = %v, want ErrRequestConflict", name, err)
+		}
+	}
+	return nil
 }
 
 // Distinct RequestIDs are distinct Revisions even for identical content, and an
@@ -119,6 +144,25 @@ func acceptDistinctRequests(t *testing.T, h Harness) error {
 		return fmt.Errorf("unknown revision: ok=%v err=%v, want ok=false err=nil", ok, err)
 	}
 	return nil
+}
+
+// splitRace checks a race between two conflicting requests for one operation id,
+// issued at even and odd indexes: every call of one side succeeds and every call of
+// the other fails with want. It returns the index of a winning call.
+func splitRace(errs []error, want error) (int, error) {
+	winner := slices.IndexFunc(errs, func(err error) bool { return err == nil })
+	if winner < 0 {
+		return -1, errors.New("no concurrent call won")
+	}
+	for i, err := range errs {
+		switch {
+		case i%2 == winner%2 && err != nil:
+			return -1, fmt.Errorf("call %d for the winning request failed: %w", i, err)
+		case i%2 != winner%2 && !errors.Is(err, want):
+			return -1, fmt.Errorf("call %d for the losing request: err = %v, want %v", i, err, want)
+		}
+	}
+	return winner, nil
 }
 
 // Concurrent retries of one RequestID converge on exactly one Revision.
