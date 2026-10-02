@@ -76,7 +76,7 @@ func acceptUnderEachProfile(a *authority.Authority) (map[authority.AcceptProfile
 	out := map[authority.AcceptProfile]authority.Revision{}
 	for _, p := range []authority.AcceptProfile{authority.ProfileI4AOCIDigest, authority.ProfileUnspecified} {
 		req := authority.AcceptRequest{RequestID: profileRequestID(p), AssetID: assetA, Manifest: externalManifest(digestOne), Profile: p}
-		rev, err := a.AcceptRevision(context.Background(), req)
+		rev, err := acceptAs(a, req)
 		if err != nil {
 			return nil, fmt.Errorf("accept under %s: %w", p, err)
 		}

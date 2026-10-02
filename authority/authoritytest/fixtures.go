@@ -90,11 +90,34 @@ func attachReq(op authority.RequestID, rev authority.Revision, format string, lo
 // accept accepts one Revision through the Authority facade so the production
 // validation + fingerprint path feeds the Store under test.
 func accept(a *authority.Authority, id authority.RequestID, digest string) (authority.Revision, error) {
-	rev, err := a.AcceptRevision(context.Background(), acceptReq(id, assetA, digest))
+	rev, err := acceptAs(a, acceptReq(id, assetA, digest))
 	if err != nil {
 		return authority.Revision{}, fmt.Errorf("accept %q: %w", id, err)
 	}
 	return rev, nil
+}
+
+// acceptAs accepts req and checks that the returned Revision carries the submitted
+// RequestID. Every first acceptance goes through it before the result becomes the
+// oracle for later sameRevision checks, so a Store that consistently omits or
+// corrupts Revision.RequestID in both responses and reads cannot pass.
+func acceptAs(a *authority.Authority, req authority.AcceptRequest) (authority.Revision, error) {
+	rev, err := a.AcceptRevision(context.Background(), req)
+	if err != nil {
+		return authority.Revision{}, err
+	}
+	if err := carriesRequest(rev, req.RequestID); err != nil {
+		return authority.Revision{}, err
+	}
+	return rev, nil
+}
+
+// carriesRequest checks that rev identifies the publication operation that accepted it.
+func carriesRequest(rev authority.Revision, id authority.RequestID) error {
+	if rev.RequestID != id {
+		return fmt.Errorf("revision %q carries RequestID %q, want %q", rev.RevisionID, rev.RequestID, id)
+	}
+	return nil
 }
 
 // sameRevision compares two Revisions field by field. AcceptedAt is compared with

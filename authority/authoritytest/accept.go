@@ -60,7 +60,7 @@ func acceptProfileOnlyRetry(a *authority.Authority) error {
 	} {
 		id := authority.RequestID("req-profile-" + order[0].String())
 		req := authority.AcceptRequest{RequestID: id, AssetID: assetA, Manifest: externalManifest(digestOne), Profile: order[0]}
-		first, err := a.AcceptRevision(context.Background(), req)
+		first, err := acceptAs(a, req)
 		if err != nil {
 			return fmt.Errorf("accept under %s: %w", order[0], err)
 		}
@@ -219,6 +219,9 @@ func acceptConcurrentConflictingRequest(t *testing.T, h Harness) error {
 	}
 	if winner < 0 {
 		return errors.New("no concurrent acceptance won")
+	}
+	if err := carriesRequest(revs[winner], "req-race"); err != nil {
+		return fmt.Errorf("winner %d: %w", winner, err)
 	}
 	stored, err := getRevision(s, revs[winner].RevisionID)
 	if err != nil {

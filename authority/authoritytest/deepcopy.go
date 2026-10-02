@@ -31,7 +31,7 @@ func deepCopyRevision(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
 	req := acceptReq("req-1", assetA, digestOne)
-	rev, err := a.AcceptRevision(context.Background(), req)
+	rev, err := acceptAs(a, req)
 	if err != nil {
 		return fmt.Errorf("accept: %w", err)
 	}

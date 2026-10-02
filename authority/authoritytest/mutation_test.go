@@ -146,6 +146,49 @@ func (s *memberDigestAccept) AcceptRevision(ctx context.Context, req authority.A
 	return rev, err
 }
 
+// requestIDRewritingAccept commits and reconciles correctly but reports every
+// Revision, on accept and on read alike, with its RequestID rewritten. The responses
+// stay self-consistent, so only a check against the submitted request catches it.
+type requestIDRewritingAccept struct {
+	*authority.MemoryStore
+	rewrite func(authority.RequestID) authority.RequestID
+}
+
+func newRequestIDRewritingAccept(rewrite func(authority.RequestID) authority.RequestID) func(*authority.MemoryStore) authority.Store {
+	return func(m *authority.MemoryStore) authority.Store {
+		return requestIDRewritingAccept{MemoryStore: m, rewrite: rewrite}
+	}
+}
+
+func (s requestIDRewritingAccept) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err == nil {
+		rev.RequestID = s.rewrite(rev.RequestID)
+	}
+	return rev, err
+}
+
+func (s requestIDRewritingAccept) GetRevision(ctx context.Context, id authority.RevisionID) (authority.Revision, bool, error) {
+	rev, ok, err := s.MemoryStore.GetRevision(ctx, id)
+	if ok {
+		rev.RequestID = s.rewrite(rev.RequestID)
+	}
+	return rev, ok, err
+}
+
+func omitRequestID(authority.RequestID) authority.RequestID { return "" }
+
+func corruptRequestID(id authority.RequestID) authority.RequestID { return id + "-corrupt" }
+
+// requestIDOracleCases are the cases whose first accepted Revision becomes the oracle.
+var requestIDOracleCases = []string{
+	"AcceptRevision/IdempotentRetry",
+	"AcceptRevision/RequestConflict",
+	"AcceptRevision/ConcurrentSameRequestID",
+	"AcceptRevision/ConcurrentSameRequestIDDifferentContent",
+	"DeepCopy/Revision",
+}
+
 // raceWindow bounds how long a gated call waits for a conflicting racer.
 const raceWindow = 200 * time.Millisecond
 
@@ -750,6 +793,26 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "attach unique on relation, not operation id",
 			harness: memoryHarness(newTupleKeyedAttach),
 			rejects: []string{"AttachRepresentation/ConcurrentSameOperationIDDifferentFormat"},
+		},
+		{
+			mutant:  "accept and read omit request id",
+			harness: memoryHarness(newRequestIDRewritingAccept(omitRequestID)),
+			rejects: requestIDOracleCases,
+		},
+		{
+			mutant:  "accept and read corrupt request id",
+			harness: memoryHarness(newRequestIDRewritingAccept(corruptRequestID)),
+			rejects: requestIDOracleCases,
+		},
+		{
+			mutant:  "accept and read omit request id across reopen",
+			harness: reopenHarness(newRequestIDRewritingAccept(omitRequestID)),
+			rejects: []string{"Reopen/Revision"},
+		},
+		{
+			mutant:  "accept and read corrupt request id across reopen",
+			harness: reopenHarness(newRequestIDRewritingAccept(corruptRequestID)),
+			rejects: []string{"Reopen/Revision"},
 		},
 	}
 	for _, tc := range cases {
