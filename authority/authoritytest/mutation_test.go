@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -48,6 +49,33 @@ func (s conflictSwallowingAccept) AcceptRevision(ctx context.Context, req author
 	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
 	if errors.Is(err, authority.ErrRequestConflict) {
 		return authority.Revision{RequestID: req.RequestID, AssetID: req.AssetID, Fingerprint: fp}, nil
+	}
+	return rev, err
+}
+
+// presentationStrictAccept reconciles a reused RequestID against the full manifest,
+// so a presentation-only retry is wrongly reported as ErrRequestConflict.
+type presentationStrictAccept struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	prior map[authority.RequestID]map[string]string
+}
+
+func newPresentationStrictAccept(m *authority.MemoryStore) authority.Store {
+	return &presentationStrictAccept{MemoryStore: m, prior: map[authority.RequestID]map[string]string{}}
+}
+
+func (s *presentationStrictAccept) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.prior[req.RequestID]; ok && !reflect.DeepEqual(p, req.Manifest.Presentation) {
+		return authority.Revision{}, fmt.Errorf("%w: request %q", authority.ErrRequestConflict, req.RequestID)
+	}
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err == nil {
+		if _, ok := s.prior[req.RequestID]; !ok {
+			s.prior[req.RequestID] = req.Manifest.Presentation
+		}
 	}
 	return rev, err
 }
@@ -135,6 +163,64 @@ func (s *duplicatingAttach) AttachRepresentation(ctx context.Context, req author
 	return s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
 }
 
+// locatorStrictAttach includes Locators in the attach idempotency record, so a
+// retry with a different locator is wrongly reported as ErrAttachConflict.
+type locatorStrictAttach struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	prior map[authority.RequestID][]authority.Locator
+}
+
+func newLocatorStrictAttach(m *authority.MemoryStore) authority.Store {
+	return &locatorStrictAttach{MemoryStore: m, prior: map[authority.RequestID][]authority.Locator{}}
+}
+
+func (s *locatorStrictAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.prior[req.AttachOperationID]; ok && !reflect.DeepEqual(p, req.Locators) {
+		return authority.Representation{}, fmt.Errorf("%w: attach operation %q", authority.ErrAttachConflict, req.AttachOperationID)
+	}
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err == nil {
+		if _, ok := s.prior[req.AttachOperationID]; !ok {
+			s.prior[req.AttachOperationID] = req.Locators
+		}
+	}
+	return rep, err
+}
+
+// availabilityResettingAttach applies an idempotent attach retry's locators and
+// health over the current availability state.
+type availabilityResettingAttach struct {
+	*authority.MemoryStore
+	mu   sync.Mutex
+	seen map[authority.RequestID]bool
+}
+
+func newAvailabilityResettingAttach(m *authority.MemoryStore) authority.Store {
+	return &availabilityResettingAttach{MemoryStore: m, seen: map[authority.RequestID]bool{}}
+}
+
+func (s *availabilityResettingAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err != nil {
+		return rep, err
+	}
+	if s.seen[req.AttachOperationID] {
+		if err := s.SetRepresentationLocators(ctx, rep.RepresentationID, req.Locators); err != nil {
+			return authority.Representation{}, err
+		}
+		if err := s.SetRepresentationHealth(ctx, rep.RepresentationID, true); err != nil {
+			return authority.Representation{}, err
+		}
+	}
+	s.seen[req.AttachOperationID] = true
+	return rep, nil
+}
+
 // sharedRead returns one cached, shared copy on every read.
 type sharedRead struct {
 	*authority.MemoryStore
@@ -190,6 +276,11 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			rejects: []string{"AcceptRevision/RequestConflict", "AcceptRevision/ConcurrentSameRequestIDDifferentContent"},
 		},
 		{
+			mutant:  "accept reconcile compares presentation",
+			harness: memoryHarness(newPresentationStrictAccept),
+			rejects: []string{"AcceptRevision/IdempotentRetry"},
+		},
+		{
 			mutant:  "duplicating bind",
 			harness: memoryHarness(func(m *authority.MemoryStore) authority.Store { return &duplicatingBind{MemoryStore: m} }),
 			rejects: []string{"BindAlias/IdempotentRetryAndConflict", "BindAlias/ConcurrentSameBindRequestID"},
@@ -217,6 +308,16 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "duplicating attach",
 			harness: memoryHarness(func(m *authority.MemoryStore) authority.Store { return &duplicatingAttach{MemoryStore: m} }),
 			rejects: []string{"AttachRepresentation/IdempotentRetryAndConflict", "AttachRepresentation/ConcurrentSameOperationID"},
+		},
+		{
+			mutant:  "attach reconcile compares locators",
+			harness: memoryHarness(newLocatorStrictAttach),
+			rejects: []string{"AttachRepresentation/IdempotentRetryAndConflict", "Representation/AvailabilityPreservesIdentity"},
+		},
+		{
+			mutant:  "attach retry overwrites availability",
+			harness: memoryHarness(newAvailabilityResettingAttach),
+			rejects: []string{"Representation/AvailabilityPreservesIdentity"},
 		},
 		{
 			mutant:  "shared read copies",

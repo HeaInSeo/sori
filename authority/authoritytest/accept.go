@@ -14,7 +14,9 @@ import (
 const concurrency = 16
 
 // A committed acceptance whose response was lost reconciles to the identical
-// Revision on retry.
+// Revision on retry. Presentation is not identity-bearing, so a retry that changes
+// only Manifest.Presentation is the same acceptance: it reconciles to the original
+// Revision (original Presentation kept) instead of failing with ErrRequestConflict.
 func acceptIdempotentRetry(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -28,6 +30,15 @@ func acceptIdempotentRetry(t *testing.T, h Harness) error {
 	}
 	if err := sameRevision(retry, first); err != nil {
 		return fmt.Errorf("retry: %w", err)
+	}
+	presentationOnly := acceptReq("req-1", assetA, digestOne)
+	presentationOnly.Manifest.Presentation = map[string]string{"title": "conformance-retitled"}
+	retry, err = a.AcceptRevision(context.Background(), presentationOnly)
+	if err != nil {
+		return fmt.Errorf("presentation-only retry: %w", err)
+	}
+	if err := sameRevision(retry, first); err != nil {
+		return fmt.Errorf("presentation-only retry: %w", err)
 	}
 	stored, err := getRevision(s, first.RevisionID)
 	if err != nil {

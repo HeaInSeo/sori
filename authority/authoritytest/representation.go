@@ -14,6 +14,7 @@ import (
 var (
 	locatorA = authority.Locator{Scheme: "oci", Coordinate: "registry/a:tag"}
 	locatorB = authority.Locator{Scheme: "path", Coordinate: "/replica/b"}
+	locatorC = authority.Locator{Scheme: "oci", Coordinate: "registry/c:tag"}
 )
 
 // acceptAndAttach accepts one Revision and attaches one Representation to it.
@@ -37,8 +38,9 @@ func listRepresentations(s authority.Store, revID authority.RevisionID) ([]autho
 	return reps, nil
 }
 
-// An attach retry returns the same Representation (one relation); the same op id
-// with a different relation fails closed (reconciled BEFORE member equivalence).
+// An attach retry returns the same Representation (one relation) even when its
+// locators differ, since locators are mutable and not identity-bearing; the same op
+// id with a different relation fails closed (reconciled BEFORE member equivalence).
 func attachIdempotentAndConflict(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -47,7 +49,7 @@ func attachIdempotentAndConflict(t *testing.T, h Harness) error {
 	if err != nil {
 		return err
 	}
-	retry, err := a.AttachRepresentation(ctx, attachReq("attach-1", rev, formatOne, locatorA))
+	retry, err := a.AttachRepresentation(ctx, attachReq("attach-1", rev, formatOne, locatorB))
 	if err != nil {
 		return fmt.Errorf("idempotent retry: %w", err)
 	}
@@ -200,7 +202,9 @@ func attachListOrder(t *testing.T, h Harness) error {
 }
 
 // Locator and health updates change only availability: Representation identity and
-// the accepted Revision stay intact, and a later attach retry still reconciles.
+// the accepted Revision stay intact, and a later attach retry carrying a locator
+// different from the original still reconciles without overwriting the availability
+// state set since the attach.
 func representationAvailability(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -228,12 +232,26 @@ func representationAvailability(t *testing.T, h Harness) error {
 	if err := checkRevisionUnchanged(s, rev); err != nil {
 		return err
 	}
-	retry, err := a.AttachRepresentation(ctx, attachReq("attach-1", rev, formatOne, locatorA))
+	retry, err := a.AttachRepresentation(ctx, attachReq("attach-1", rev, formatOne, locatorC))
 	if err != nil {
 		return fmt.Errorf("attach retry after availability change: %w", err)
 	}
 	if err := sameRepresentationIdentity(retry, rep); err != nil {
 		return fmt.Errorf("attach retry after availability change: %w", err)
+	}
+	reps, err := listRepresentations(s, rev.RevisionID)
+	if err != nil {
+		return err
+	}
+	if len(reps) != 1 {
+		return fmt.Errorf("relations after attach retry = %d, want 1", len(reps))
+	}
+	got, err = getRepresentation(s, rep.RepresentationID)
+	if err != nil {
+		return err
+	}
+	if got.Healthy || !reflect.DeepEqual(got.Locators, []authority.Locator{locatorB}) {
+		return fmt.Errorf("attach retry overwrote availability: healthy=%v locators=%+v", got.Healthy, got.Locators)
 	}
 	return checkUnknownRepresentation(s)
 }
