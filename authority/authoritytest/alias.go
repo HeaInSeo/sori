@@ -122,6 +122,44 @@ func bindIdempotentAndConflict(t *testing.T, h Harness) error {
 	return sameHistory(hist, []authority.BindEvent{first})
 }
 
+// The same BindRequestID reused for a different alias, or for a different asset on
+// the same Revision, is a different logical binding: each fails closed and neither
+// alias history changes. Every other field is held equal so a reconcile that ignores
+// just the alias or just the asset is caught.
+func bindIdentityConflict(t *testing.T, h Harness) error {
+	s := h.New(t)
+	a := authority.New(s)
+	ctx := context.Background()
+	rev, err := accept(a, "req-1", digestOne)
+	if err != nil {
+		return err
+	}
+	first, err := bind(a, "bind-1", rev)
+	if err != nil {
+		return err
+	}
+	otherAlias := authority.BindRequest{BindRequestID: "bind-1", Alias: aliasOther, AssetID: rev.AssetID, RevisionID: rev.RevisionID}
+	if _, err := a.BindAlias(ctx, otherAlias); !errors.Is(err, authority.ErrAliasBindingConflict) {
+		return fmt.Errorf("same bind id, different alias: err = %v, want ErrAliasBindingConflict", err)
+	}
+	otherAsset := authority.BindRequest{BindRequestID: "bind-1", Alias: aliasLatest, AssetID: assetB, RevisionID: rev.RevisionID}
+	if _, err := a.BindAlias(ctx, otherAsset); !errors.Is(err, authority.ErrAliasBindingConflict) {
+		return fmt.Errorf("same bind id, different asset: err = %v, want ErrAliasBindingConflict", err)
+	}
+	hist, err := s.AliasHistory(ctx, aliasLatest)
+	if err != nil {
+		return fmt.Errorf("alias history: %w", err)
+	}
+	if err := sameHistory(hist, []authority.BindEvent{first}); err != nil {
+		return err
+	}
+	other, err := s.AliasHistory(ctx, aliasOther)
+	if err != nil || len(other) != 0 {
+		return fmt.Errorf("conflicting alias history = %+v, err=%v; want empty", other, err)
+	}
+	return nil
+}
+
 // Concurrent retries of one BindRequestID append exactly one history event.
 func bindConcurrentSameRequest(t *testing.T, h Harness) error {
 	s := h.New(t)

@@ -67,6 +67,74 @@ func (s *duplicatingBind) BindAlias(ctx context.Context, req authority.BindReque
 	return s.MemoryStore.BindAlias(ctx, req)
 }
 
+// blindBind reconciles a reused BindRequestID with a comparison that ignores one
+// binding field, so a different binding is returned as an idempotent hit.
+type blindBind struct {
+	*authority.MemoryStore
+	same  func(prior authority.BindEvent, req authority.BindRequest) bool
+	mu    sync.Mutex
+	prior map[authority.RequestID]authority.BindEvent
+}
+
+func newBlindBind(same func(authority.BindEvent, authority.BindRequest) bool) func(*authority.MemoryStore) authority.Store {
+	return func(m *authority.MemoryStore) authority.Store {
+		return &blindBind{MemoryStore: m, same: same, prior: map[authority.RequestID]authority.BindEvent{}}
+	}
+}
+
+func (s *blindBind) BindAlias(ctx context.Context, req authority.BindRequest) (authority.BindEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.prior[req.BindRequestID]; ok && s.same(p, req) {
+		return p, nil
+	}
+	ev, err := s.MemoryStore.BindAlias(ctx, req)
+	if err == nil {
+		s.prior[req.BindRequestID] = ev
+	}
+	return ev, err
+}
+
+// revisionBlindAttach reconciles a reused AttachOperationID by fingerprint only,
+// ignoring the RevisionID the relation is attached to.
+type revisionBlindAttach struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	prior map[authority.RequestID]authority.Representation
+}
+
+func newRevisionBlindAttach(m *authority.MemoryStore) authority.Store {
+	return &revisionBlindAttach{MemoryStore: m, prior: map[authority.RequestID]authority.Representation{}}
+}
+
+func (s *revisionBlindAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.prior[req.AttachOperationID]; ok && p.Fingerprint == fp {
+		return p, nil
+	}
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err == nil {
+		s.prior[req.AttachOperationID] = rep
+	}
+	return rep, err
+}
+
+// duplicatingAttach treats every attach retry as a new operation.
+type duplicatingAttach struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *duplicatingAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	s.calls++
+	req.AttachOperationID = authority.RequestID(fmt.Sprintf("%s-%d", req.AttachOperationID, s.calls))
+	s.mu.Unlock()
+	return s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+}
+
 // sharedRead returns one cached, shared copy on every read.
 type sharedRead struct {
 	*authority.MemoryStore
@@ -125,6 +193,30 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "duplicating bind",
 			harness: memoryHarness(func(m *authority.MemoryStore) authority.Store { return &duplicatingBind{MemoryStore: m} }),
 			rejects: []string{"BindAlias/IdempotentRetryAndConflict", "BindAlias/ConcurrentSameBindRequestID"},
+		},
+		{
+			mutant: "bind reconcile ignores alias",
+			harness: memoryHarness(newBlindBind(func(p authority.BindEvent, r authority.BindRequest) bool {
+				return p.AssetID == r.AssetID && p.RevisionID == r.RevisionID
+			})),
+			rejects: []string{"BindAlias/SameBindRequestIDDifferentAliasOrAsset"},
+		},
+		{
+			mutant: "bind reconcile ignores asset",
+			harness: memoryHarness(newBlindBind(func(p authority.BindEvent, r authority.BindRequest) bool {
+				return p.Alias == r.Alias && p.RevisionID == r.RevisionID
+			})),
+			rejects: []string{"BindAlias/SameBindRequestIDDifferentAliasOrAsset"},
+		},
+		{
+			mutant:  "attach reconcile ignores revision",
+			harness: memoryHarness(newRevisionBlindAttach),
+			rejects: []string{"AttachRepresentation/SameOperationIDDifferentRevision"},
+		},
+		{
+			mutant:  "duplicating attach",
+			harness: memoryHarness(func(m *authority.MemoryStore) authority.Store { return &duplicatingAttach{MemoryStore: m} }),
+			rejects: []string{"AttachRepresentation/IdempotentRetryAndConflict", "AttachRepresentation/ConcurrentSameOperationID"},
 		},
 		{
 			mutant:  "shared read copies",

@@ -19,6 +19,7 @@ const (
 	memberKey   = "m1"
 	memberRole  = "primary"
 	aliasLatest = "latest"
+	aliasOther  = "conformance-other-alias"
 )
 
 func member(digest string) authority.Member {

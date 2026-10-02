@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/HeaInSeo/sori/authority"
@@ -69,6 +70,81 @@ func attachIdempotentAndConflict(t *testing.T, h Harness) error {
 		return fmt.Errorf("relations after retry/conflict = %d, want 1", len(reps))
 	}
 	return sameRepresentationIdentity(reps[0], first)
+}
+
+// The same AttachOperationID reused on a different Revision is a different relation
+// even when format and proofs (and therefore the representation fingerprint) are
+// identical: it fails closed and the second Revision stays representation-empty.
+func attachCrossRevisionConflict(t *testing.T, h Harness) error {
+	s := h.New(t)
+	a := authority.New(s)
+	rev1, first, err := acceptAndAttach(a)
+	if err != nil {
+		return err
+	}
+	// Same members as rev1, so only the RevisionID distinguishes the two attaches.
+	rev2, err := accept(a, "req-2", digestOne)
+	if err != nil {
+		return err
+	}
+	if rev2.RevisionID == rev1.RevisionID {
+		return fmt.Errorf("distinct requests share revision id %q", rev1.RevisionID)
+	}
+	if _, err := a.AttachRepresentation(context.Background(), attachReq("attach-1", rev2, formatOne, locatorA)); !errors.Is(err, authority.ErrAttachConflict) {
+		return fmt.Errorf("same op, different revision: err = %v, want ErrAttachConflict", err)
+	}
+	reps, err := listRepresentations(s, rev2.RevisionID)
+	if err != nil {
+		return err
+	}
+	if len(reps) != 0 {
+		return fmt.Errorf("conflicting attach left %d relations on second revision, want 0", len(reps))
+	}
+	reps, err = listRepresentations(s, rev1.RevisionID)
+	if err != nil {
+		return err
+	}
+	if len(reps) != 1 {
+		return fmt.Errorf("relations on first revision = %d, want 1", len(reps))
+	}
+	return sameRepresentationIdentity(reps[0], first)
+}
+
+// Concurrent retries of one AttachOperationID create exactly one Representation.
+func attachConcurrentSameOperation(t *testing.T, h Harness) error {
+	s := h.New(t)
+	a := authority.New(s)
+	rev, err := accept(a, "req-1", digestOne)
+	if err != nil {
+		return err
+	}
+	reps := make([]authority.Representation, concurrency)
+	errs := make([]error, concurrency)
+	var wg sync.WaitGroup
+	for i := range concurrency {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			reps[i], errs[i] = a.AttachRepresentation(context.Background(), attachReq("attach-race", rev, formatOne, locatorA))
+		}(i)
+	}
+	wg.Wait()
+	for i := range concurrency {
+		if errs[i] != nil {
+			return fmt.Errorf("concurrent attach %d: %w", i, errs[i])
+		}
+		if err := sameRepresentationIdentity(reps[i], reps[0]); err != nil {
+			return fmt.Errorf("concurrent attach %d diverged: %w", i, err)
+		}
+	}
+	listed, err := listRepresentations(s, rev.RevisionID)
+	if err != nil {
+		return err
+	}
+	if len(listed) != 1 {
+		return fmt.Errorf("relations after concurrent attach = %d, want 1", len(listed))
+	}
+	return sameRepresentationIdentity(listed[0], reps[0])
 }
 
 // A new attach operation whose proofs do not match the accepted Revision is rejected
