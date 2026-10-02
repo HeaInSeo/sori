@@ -80,6 +80,42 @@ func (s *presentationStrictAccept) AcceptRevision(ctx context.Context, req autho
 	return rev, err
 }
 
+// profileStrictAccept keeps AcceptRequest.Profile in its idempotency record, so a
+// valid profile-only retry is wrongly reported as ErrRequestConflict.
+type profileStrictAccept struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	prior map[authority.RequestID]authority.AcceptProfile
+}
+
+func newProfileStrictAccept(m *authority.MemoryStore) authority.Store {
+	return &profileStrictAccept{MemoryStore: m, prior: map[authority.RequestID]authority.AcceptProfile{}}
+}
+
+func (s *profileStrictAccept) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.prior[req.RequestID]; ok && p != req.Profile {
+		return authority.Revision{}, fmt.Errorf("%w: request %q", authority.ErrRequestConflict, req.RequestID)
+	}
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err == nil {
+		if _, ok := s.prior[req.RequestID]; !ok {
+			s.prior[req.RequestID] = req.Profile
+		}
+	}
+	return rev, err
+}
+
+// reopenHarness wraps each new MemoryStore and reopens to the same instance, so a
+// wrapper's restored idempotency/availability behavior is what the Reopen cases see.
+func reopenHarness(wrap func(*authority.MemoryStore) authority.Store) Harness {
+	return Harness{
+		New:    func(*testing.T) authority.Store { return wrap(authority.NewMemoryStore()) },
+		Reopen: func(_ *testing.T, s authority.Store) authority.Store { return s },
+	}
+}
+
 // duplicatingBind treats every bind retry as a new operation.
 type duplicatingBind struct {
 	*authority.MemoryStore
@@ -368,6 +404,31 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 				Reopen: func(*testing.T, authority.Store) authority.Store { return authority.NewMemoryStore() },
 			},
 			rejects: []string{"Reopen/Revision", "Reopen/AliasHistory", "Reopen/Representation"},
+		},
+		{
+			mutant:  "accept reconcile compares profile",
+			harness: memoryHarness(newProfileStrictAccept),
+			rejects: []string{"AcceptRevision/IdempotentRetry"},
+		},
+		{
+			mutant:  "restored accept record compares presentation",
+			harness: reopenHarness(newPresentationStrictAccept),
+			rejects: []string{"Reopen/Revision"},
+		},
+		{
+			mutant:  "restored attach record compares locators",
+			harness: reopenHarness(newLocatorStrictAttach),
+			rejects: []string{"Reopen/Representation"},
+		},
+		{
+			mutant:  "attach retry after reopen overwrites availability",
+			harness: reopenHarness(newAvailabilityResettingAttach),
+			rejects: []string{"Reopen/Representation"},
+		},
+		{
+			mutant:  "attach retry after reopen returns request availability",
+			harness: reopenHarness(newRequestEchoAttach),
+			rejects: []string{"Reopen/Representation"},
 		},
 	}
 	for _, tc := range cases {

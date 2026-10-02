@@ -29,6 +29,16 @@ func reopenRevision(t *testing.T, h Harness) error {
 	if err := sameRevision(retry, rev); err != nil {
 		return fmt.Errorf("retry after reopen: %w", err)
 	}
+	// The restored idempotency record must still exclude Presentation from the match.
+	presentationOnly := acceptReq("req-1", assetA, digestOne)
+	presentationOnly.Manifest.Presentation = map[string]string{"title": "conformance-retitled"}
+	retry, err = a.AcceptRevision(context.Background(), presentationOnly)
+	if err != nil {
+		return fmt.Errorf("presentation-only retry after reopen: %w", err)
+	}
+	if err := sameRevision(retry, rev); err != nil {
+		return fmt.Errorf("presentation-only retry after reopen: %w", err)
+	}
 	if _, err := a.AcceptRevision(context.Background(), acceptReq("req-1", assetA, digestTwo)); !errors.Is(err, authority.ErrRequestConflict) {
 		return fmt.Errorf("conflict after reopen: err = %v, want ErrRequestConflict", err)
 	}
@@ -107,12 +117,22 @@ func reopenRepresentation(t *testing.T, h Harness) error {
 	if got.Healthy || !reflect.DeepEqual(got.Locators, []authority.Locator{locatorB}) {
 		return fmt.Errorf("availability lost on reopen: healthy=%v locators=%+v", got.Healthy, got.Locators)
 	}
-	retry, err := a.AttachRepresentation(ctx, attachReq("attach-1", rev, formatOne, locatorA))
+	// A retry with a new locator reconciles without touching the restored availability.
+	retry, err := a.AttachRepresentation(ctx, attachReq("attach-1", rev, formatOne, locatorC))
 	if err != nil {
 		return fmt.Errorf("attach retry after reopen: %w", err)
 	}
 	if err := sameRepresentationIdentity(retry, rep); err != nil {
 		return fmt.Errorf("attach retry after reopen: %w", err)
+	}
+	if retry.Healthy || !reflect.DeepEqual(retry.Locators, []authority.Locator{locatorB}) {
+		return fmt.Errorf("attach retry after reopen returned request availability: healthy=%v locators=%+v", retry.Healthy, retry.Locators)
+	}
+	if got, err = getRepresentation(s, rep.RepresentationID); err != nil {
+		return fmt.Errorf("after attach retry: %w", err)
+	}
+	if got.Healthy || !reflect.DeepEqual(got.Locators, []authority.Locator{locatorB}) {
+		return fmt.Errorf("attach retry after reopen overwrote availability: healthy=%v locators=%+v", got.Healthy, got.Locators)
 	}
 	if _, err := a.AttachRepresentation(ctx, attachReq("attach-1", rev, formatTwo)); !errors.Is(err, authority.ErrAttachConflict) {
 		return fmt.Errorf("attach conflict after reopen: err = %v, want ErrAttachConflict", err)

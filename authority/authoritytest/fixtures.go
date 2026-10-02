@@ -58,6 +58,20 @@ func derivedManifest(digest string) authority.SemanticManifest {
 	}
 }
 
+// externalManifest is an ExternalImport manifest that is valid under both
+// ProfileUnspecified and ProfileI4AOCIDigest, so a retry can vary only the profile.
+func externalManifest(digest string) authority.SemanticManifest {
+	return authority.SemanticManifest{
+		Origin:  authority.OriginExternalImport,
+		Members: []authority.Member{member(digest)},
+		Provenance: authority.Provenance{
+			SourceCoordinate: "oci://registry/conformance",
+			ObservedVersion:  "v1",
+			ObservedChecksum: "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+		},
+	}
+}
+
 func acceptReq(id authority.RequestID, asset authority.AssetID, digest string) authority.AcceptRequest {
 	return authority.AcceptRequest{RequestID: id, AssetID: asset, Manifest: derivedManifest(digest)}
 }

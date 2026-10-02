@@ -44,7 +44,35 @@ func acceptIdempotentRetry(t *testing.T, h Harness) error {
 	if err != nil {
 		return err
 	}
-	return sameRevision(stored, first)
+	if err := sameRevision(stored, first); err != nil {
+		return err
+	}
+	return acceptProfileOnlyRetry(a)
+}
+
+// AcceptRequest.Profile is a validation gate, not identity: a valid retry that changes
+// only the profile reconciles to the original Revision, in either direction.
+func acceptProfileOnlyRetry(a *authority.Authority) error {
+	for _, order := range [][2]authority.AcceptProfile{
+		{authority.ProfileI4AOCIDigest, authority.ProfileUnspecified},
+		{authority.ProfileUnspecified, authority.ProfileI4AOCIDigest},
+	} {
+		id := authority.RequestID("req-profile-" + order[0].String())
+		req := authority.AcceptRequest{RequestID: id, AssetID: assetA, Manifest: externalManifest(digestOne), Profile: order[0]}
+		first, err := a.AcceptRevision(context.Background(), req)
+		if err != nil {
+			return fmt.Errorf("accept under %s: %w", order[0], err)
+		}
+		req.Profile = order[1]
+		retry, err := a.AcceptRevision(context.Background(), req)
+		if err != nil {
+			return fmt.Errorf("profile-only retry %s -> %s: %w", order[0], order[1], err)
+		}
+		if err := sameRevision(retry, first); err != nil {
+			return fmt.Errorf("profile-only retry %s -> %s: %w", order[0], order[1], err)
+		}
+	}
+	return nil
 }
 
 // The same RequestID with a different identity-bearing fingerprint or asset fails
