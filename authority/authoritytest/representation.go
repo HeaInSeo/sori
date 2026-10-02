@@ -204,7 +204,8 @@ func attachListOrder(t *testing.T, h Harness) error {
 // Locator and health updates change only availability: Representation identity and
 // the accepted Revision stay intact, and a later attach retry carrying a locator
 // different from the original still reconciles without overwriting the availability
-// state set since the attach.
+// state set since the attach: neither the stored record nor the retry's return value
+// carries the retry request's locators or the initial healthy state.
 func representationAvailability(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -238,6 +239,9 @@ func representationAvailability(t *testing.T, h Harness) error {
 	}
 	if err := sameRepresentationIdentity(retry, rep); err != nil {
 		return fmt.Errorf("attach retry after availability change: %w", err)
+	}
+	if retry.Healthy || !reflect.DeepEqual(retry.Locators, []authority.Locator{locatorB}) {
+		return fmt.Errorf("attach retry returned request availability, not stored: healthy=%v locators=%+v", retry.Healthy, retry.Locators)
 	}
 	reps, err := listRepresentations(s, rev.RevisionID)
 	if err != nil {

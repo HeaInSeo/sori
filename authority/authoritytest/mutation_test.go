@@ -221,6 +221,33 @@ func (s *availabilityResettingAttach) AttachRepresentation(ctx context.Context, 
 	return rep, nil
 }
 
+// requestEchoAttach stores availability correctly but answers an idempotent attach
+// retry with the retry request's locators and the initial healthy state.
+type requestEchoAttach struct {
+	*authority.MemoryStore
+	mu   sync.Mutex
+	seen map[authority.RequestID]bool
+}
+
+func newRequestEchoAttach(m *authority.MemoryStore) authority.Store {
+	return &requestEchoAttach{MemoryStore: m, seen: map[authority.RequestID]bool{}}
+}
+
+func (s *requestEchoAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err != nil {
+		return rep, err
+	}
+	if s.seen[req.AttachOperationID] {
+		rep.Locators = append([]authority.Locator(nil), req.Locators...)
+		rep.Healthy = true
+	}
+	s.seen[req.AttachOperationID] = true
+	return rep, nil
+}
+
 // sharedRead returns one cached, shared copy on every read.
 type sharedRead struct {
 	*authority.MemoryStore
@@ -317,6 +344,11 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 		{
 			mutant:  "attach retry overwrites availability",
 			harness: memoryHarness(newAvailabilityResettingAttach),
+			rejects: []string{"Representation/AvailabilityPreservesIdentity"},
+		},
+		{
+			mutant:  "attach retry returns request availability",
+			harness: memoryHarness(newRequestEchoAttach),
 			rejects: []string{"Representation/AvailabilityPreservesIdentity"},
 		},
 		{
