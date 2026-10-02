@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 
@@ -114,6 +115,97 @@ func reopenHarness(wrap func(*authority.MemoryStore) authority.Store) Harness {
 		New:    func(*testing.T) authority.Store { return wrap(authority.NewMemoryStore()) },
 		Reopen: func(_ *testing.T, s authority.Store) authority.Store { return s },
 	}
+}
+
+// allocatorResetOnReopen reloads every record on reopen but restores its ID
+// allocators one step behind, so the first fresh Revision or Representation after
+// reopen reuses the last persisted ID and overwrites that record.
+type allocatorResetOnReopen struct {
+	*authority.MemoryStore
+	mu       sync.Mutex
+	reopened bool
+	revIDs   []authority.RevisionID
+	repIDs   []authority.RepresentationID
+	revs     map[authority.RevisionID]authority.Revision
+	reps     map[authority.RepresentationID]authority.Representation
+}
+
+func allocatorResetHarness() Harness {
+	return Harness{
+		New: func(*testing.T) authority.Store {
+			return &allocatorResetOnReopen{
+				MemoryStore: authority.NewMemoryStore(),
+				revs:        map[authority.RevisionID]authority.Revision{},
+				reps:        map[authority.RepresentationID]authority.Representation{},
+			}
+		},
+		Reopen: func(t *testing.T, s authority.Store) authority.Store {
+			r, ok := s.(*allocatorResetOnReopen)
+			if !ok {
+				t.Fatalf("reopen: unexpected store %T", s)
+			}
+			r.mu.Lock()
+			r.reopened = true
+			r.mu.Unlock()
+			return r
+		},
+	}
+}
+
+func (s *allocatorResetOnReopen) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err != nil {
+		return rev, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case slices.Contains(s.revIDs, rev.RevisionID):
+	case !s.reopened:
+		s.revIDs = append(s.revIDs, rev.RevisionID)
+	default:
+		rev.RevisionID = s.revIDs[len(s.revIDs)-1]
+		s.revs[rev.RevisionID] = rev
+	}
+	return rev, nil
+}
+
+func (s *allocatorResetOnReopen) GetRevision(ctx context.Context, id authority.RevisionID) (authority.Revision, bool, error) {
+	s.mu.Lock()
+	rev, ok := s.revs[id]
+	s.mu.Unlock()
+	if ok {
+		return rev, true, nil
+	}
+	return s.MemoryStore.GetRevision(ctx, id)
+}
+
+func (s *allocatorResetOnReopen) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err != nil {
+		return rep, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case slices.Contains(s.repIDs, rep.RepresentationID):
+	case !s.reopened:
+		s.repIDs = append(s.repIDs, rep.RepresentationID)
+	default:
+		rep.RepresentationID = s.repIDs[len(s.repIDs)-1]
+		s.reps[rep.RepresentationID] = rep
+	}
+	return rep, nil
+}
+
+func (s *allocatorResetOnReopen) GetRepresentation(ctx context.Context, id authority.RepresentationID) (authority.Representation, bool, error) {
+	s.mu.Lock()
+	rep, ok := s.reps[id]
+	s.mu.Unlock()
+	if ok {
+		return rep, true, nil
+	}
+	return s.MemoryStore.GetRepresentation(ctx, id)
 }
 
 // duplicatingBind treats every bind retry as a new operation.
@@ -458,6 +550,11 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "restored attach record ignores revision",
 			harness: reopenHarness(newRevisionBlindAttach),
 			rejects: []string{"Reopen/Representation"},
+		},
+		{
+			mutant:  "reopen restores id allocators one behind",
+			harness: allocatorResetHarness(),
+			rejects: []string{"Reopen/Revision", "Reopen/Representation"},
 		},
 	}
 	for _, tc := range cases {

@@ -53,10 +53,17 @@ func reopenRevision(t *testing.T, h Harness) error {
 	if err != nil {
 		return err
 	}
-	if next.RevisionID == rev.RevisionID {
-		return fmt.Errorf("revision id %q reused after reopen", rev.RevisionID)
+	// The restored ID allocator must not hand out any persisted RevisionID; re-reading
+	// every earlier Revision also catches a reused ID that overwrote one of them.
+	for _, prior := range []authority.Revision{rev, profiled[authority.ProfileI4AOCIDigest], profiled[authority.ProfileUnspecified]} {
+		if next.RevisionID == prior.RevisionID {
+			return fmt.Errorf("revision id %q reused after reopen", prior.RevisionID)
+		}
+		if err := checkRevisionUnchanged(s, prior); err != nil {
+			return fmt.Errorf("after new accept after reopen: %w", err)
+		}
 	}
-	return nil
+	return checkRevisionUnchanged(s, next)
 }
 
 // acceptUnderEachProfile accepts one external-import Revision under each profile and
@@ -202,14 +209,50 @@ func reopenRepresentation(t *testing.T, h Harness) error {
 	if err := attachCrossRevisionConflictAfterReopen(a, s, rev2, rep); err != nil {
 		return err
 	}
+	return freshAttachAfterReopen(a, s, rev, rep)
+}
+
+// freshAttachAfterReopen commits a new attach (new operation and format) to rev after
+// reopen: the restored ID allocator must not hand out rep's RepresentationID, and both
+// representations must stay intact and listed in attach order.
+func freshAttachAfterReopen(a *authority.Authority, s authority.Store, rev authority.Revision, rep authority.Representation) error {
+	fresh, err := a.AttachRepresentation(context.Background(), attachReq("attach-2", rev, formatTwo, locatorA))
+	if err != nil {
+		return fmt.Errorf("fresh attach after reopen: %w", err)
+	}
+	if fresh.RepresentationID == rep.RepresentationID {
+		return fmt.Errorf("representation id %q reused after reopen", rep.RepresentationID)
+	}
+	got, err := getRepresentation(s, rep.RepresentationID)
+	if err != nil {
+		return fmt.Errorf("after fresh attach: %w", err)
+	}
+	if err := sameRepresentationIdentity(got, rep); err != nil {
+		return fmt.Errorf("after fresh attach: %w", err)
+	}
+	if got.Healthy || !reflect.DeepEqual(got.Locators, []authority.Locator{locatorB}) {
+		return fmt.Errorf("fresh attach after reopen changed availability: healthy=%v locators=%+v", got.Healthy, got.Locators)
+	}
+	if got, err = getRepresentation(s, fresh.RepresentationID); err != nil {
+		return fmt.Errorf("fresh attach: %w", err)
+	}
+	if err := sameRepresentationIdentity(got, fresh); err != nil {
+		return fmt.Errorf("fresh attach: %w", err)
+	}
 	reps, err := listRepresentations(s, rev.RevisionID)
 	if err != nil {
 		return err
 	}
-	if len(reps) != 1 {
-		return fmt.Errorf("relations after reopen = %d, want 1", len(reps))
+	if len(reps) != 2 {
+		return fmt.Errorf("relations after fresh attach = %d, want 2", len(reps))
 	}
-	return sameRepresentationIdentity(reps[0], rep)
+	if err := sameRepresentationIdentity(reps[0], rep); err != nil {
+		return fmt.Errorf("list order after fresh attach: %w", err)
+	}
+	if err := sameRepresentationIdentity(reps[1], fresh); err != nil {
+		return fmt.Errorf("list order after fresh attach: %w", err)
+	}
+	return nil
 }
 
 // attachCrossRevisionConflictAfterReopen reuses the restored attach operation of rep
