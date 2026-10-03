@@ -220,7 +220,7 @@ func acceptConcurrentConflictingRequest(t *testing.T, h Harness) error {
 	if winner < 0 {
 		return errors.New("no concurrent acceptance won")
 	}
-	if err := carriesRequest(revs[winner], "req-race"); err != nil {
+	if err := acceptedAs(revs[winner], acceptReq("req-race", assetA, fmt.Sprintf("digest-%d", winner))); err != nil {
 		return fmt.Errorf("winner %d: %w", winner, err)
 	}
 	stored, err := getRevision(s, revs[winner].RevisionID)

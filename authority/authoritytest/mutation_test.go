@@ -180,6 +180,40 @@ func omitRequestID(authority.RequestID) authority.RequestID { return "" }
 
 func corruptRequestID(id authority.RequestID) authority.RequestID { return id + "-corrupt" }
 
+// fingerprintRewritingAccept reconciles on the supplied fingerprint but reports every
+// Revision, on accept and on read alike, with its Fingerprint rewritten. The responses
+// stay self-consistent, so only a check against the supplied fingerprint catches it.
+type fingerprintRewritingAccept struct {
+	*authority.MemoryStore
+	rewrite func(string) string
+}
+
+func newFingerprintRewritingAccept(rewrite func(string) string) func(*authority.MemoryStore) authority.Store {
+	return func(m *authority.MemoryStore) authority.Store {
+		return fingerprintRewritingAccept{MemoryStore: m, rewrite: rewrite}
+	}
+}
+
+func (s fingerprintRewritingAccept) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err == nil {
+		rev.Fingerprint = s.rewrite(rev.Fingerprint)
+	}
+	return rev, err
+}
+
+func (s fingerprintRewritingAccept) GetRevision(ctx context.Context, id authority.RevisionID) (authority.Revision, bool, error) {
+	rev, ok, err := s.MemoryStore.GetRevision(ctx, id)
+	if ok {
+		rev.Fingerprint = s.rewrite(rev.Fingerprint)
+	}
+	return rev, ok, err
+}
+
+func omitFingerprint(string) string { return "" }
+
+func corruptFingerprint(fp string) string { return fp + "-corrupt" }
+
 // bindEventRewriting binds and records correctly but reports every BindEvent, on bind and
 // on history reads alike, rewritten. The responses stay self-consistent, so only a check
 // against the submitted BindRequest catches it.
@@ -254,6 +288,10 @@ func (s representationRewriting) ListRepresentations(ctx context.Context, revID 
 func corruptRepresentationAsset(rep *authority.Representation) { rep.AssetID += "-corrupt" }
 
 func corruptRepresentationRevision(rep *authority.Representation) { rep.RevisionID += "-corrupt" }
+
+func omitRepresentationFingerprint(rep *authority.Representation) { rep.Fingerprint = "" }
+
+func corruptRepresentationFingerprint(rep *authority.Representation) { rep.Fingerprint += "-corrupt" }
 
 // bindOracleCases are the cases whose first BindEvent becomes the oracle.
 var bindOracleCases = []string{
@@ -911,6 +949,21 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			rejects: []string{"Reopen/Revision"},
 		},
 		{
+			mutant:  "accept and read omit fingerprint",
+			harness: memoryHarness(newFingerprintRewritingAccept(omitFingerprint)),
+			rejects: requestIDOracleCases,
+		},
+		{
+			mutant:  "accept and read corrupt fingerprint",
+			harness: memoryHarness(newFingerprintRewritingAccept(corruptFingerprint)),
+			rejects: requestIDOracleCases,
+		},
+		{
+			mutant:  "accept and read corrupt fingerprint across reopen",
+			harness: reopenHarness(newFingerprintRewritingAccept(corruptFingerprint)),
+			rejects: []string{"Reopen/Revision"},
+		},
+		{
 			mutant:  "bind and history omit bind request id",
 			harness: memoryHarness(newBindEventRewriting(omitBindRequestID)),
 			rejects: bindOracleCases,
@@ -938,6 +991,21 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 		{
 			mutant:  "attach, get and list rewrite revision across reopen",
 			harness: reopenHarness(newRepresentationRewriting(corruptRepresentationRevision)),
+			rejects: []string{"Reopen/Representation"},
+		},
+		{
+			mutant:  "attach, get and list omit fingerprint",
+			harness: memoryHarness(newRepresentationRewriting(omitRepresentationFingerprint)),
+			rejects: representationOracleCases,
+		},
+		{
+			mutant:  "attach, get and list corrupt fingerprint",
+			harness: memoryHarness(newRepresentationRewriting(corruptRepresentationFingerprint)),
+			rejects: representationOracleCases,
+		},
+		{
+			mutant:  "attach, get and list corrupt fingerprint across reopen",
+			harness: reopenHarness(newRepresentationRewriting(corruptRepresentationFingerprint)),
 			rejects: []string{"Reopen/Representation"},
 		},
 	}

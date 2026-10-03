@@ -97,27 +97,87 @@ func accept(a *authority.Authority, id authority.RequestID, digest string) (auth
 	return rev, nil
 }
 
-// acceptAs accepts req and checks that the returned Revision carries the submitted
-// RequestID. Every first acceptance goes through it before the result becomes the
+// acceptAs accepts req and checks that the returned Revision records req (see
+// acceptedAs). Every first acceptance goes through it before the result becomes the
 // oracle for later sameRevision checks, so a Store that consistently omits or
-// corrupts Revision.RequestID in both responses and reads cannot pass.
+// corrupts Revision.RequestID or Revision.Fingerprint in both responses and reads
+// cannot pass.
 func acceptAs(a *authority.Authority, req authority.AcceptRequest) (authority.Revision, error) {
 	rev, err := a.AcceptRevision(context.Background(), req)
 	if err != nil {
 		return authority.Revision{}, err
 	}
-	if err := carriesRequest(rev, req.RequestID); err != nil {
+	if err := acceptedAs(rev, req); err != nil {
 		return authority.Revision{}, err
 	}
 	return rev, nil
 }
 
-// carriesRequest checks that rev identifies the publication operation that accepted it.
-func carriesRequest(rev authority.Revision, id authority.RequestID) error {
-	if rev.RequestID != id {
-		return fmt.Errorf("revision %q carries RequestID %q, want %q", rev.RevisionID, rev.RequestID, id)
+// acceptedAs checks that rev identifies the publication operation that accepted it
+// and carries the fingerprint the facade supplied to the Store for req.
+func acceptedAs(rev authority.Revision, req authority.AcceptRequest) error {
+	if rev.RequestID != req.RequestID {
+		return fmt.Errorf("revision %q carries RequestID %q, want %q", rev.RevisionID, rev.RequestID, req.RequestID)
+	}
+	want, err := suppliedRevisionFingerprint(req)
+	if err != nil {
+		return err
+	}
+	if rev.Fingerprint != want {
+		return fmt.Errorf("revision %q carries Fingerprint %q, want the supplied %q", rev.RevisionID, rev.Fingerprint, want)
 	}
 	return nil
+}
+
+// fingerprintProbe is a Store that only records the fingerprint the facade supplies
+// to AcceptRevision or AttachRepresentation. It derives the expected fingerprint
+// through the production facade, independently of the Store under test. Its
+// GetRevision reports every revision as accepted for asset, so an attach reaches
+// the Store; any other method panics on the nil embedded Store.
+type fingerprintProbe struct {
+	authority.Store
+	asset       authority.AssetID
+	fingerprint string
+}
+
+func (p *fingerprintProbe) AcceptRevision(_ context.Context, _ authority.AcceptRequest, fp string) (authority.Revision, error) {
+	p.fingerprint = fp
+	return authority.Revision{}, nil
+}
+
+func (p *fingerprintProbe) GetRevision(_ context.Context, id authority.RevisionID) (authority.Revision, bool, error) {
+	return authority.Revision{RevisionID: id, AssetID: p.asset}, true, nil
+}
+
+func (p *fingerprintProbe) AttachRepresentation(_ context.Context, _ authority.AttachRequest, fp string, _ []authority.Member) (authority.Representation, error) {
+	p.fingerprint = fp
+	return authority.Representation{}, nil
+}
+
+// suppliedRevisionFingerprint returns the fingerprint the facade supplies to the
+// Store when accepting req.
+func suppliedRevisionFingerprint(req authority.AcceptRequest) (string, error) {
+	p := &fingerprintProbe{}
+	if _, err := authority.New(p).AcceptRevision(context.Background(), req); err != nil {
+		return "", fmt.Errorf("derive fingerprint of %q: %w", req.RequestID, err)
+	}
+	if p.fingerprint == "" {
+		return "", fmt.Errorf("derive fingerprint of %q: facade supplied none", req.RequestID)
+	}
+	return p.fingerprint, nil
+}
+
+// suppliedRepresentationFingerprint returns the fingerprint the facade supplies to
+// the Store when attaching req.
+func suppliedRepresentationFingerprint(req authority.AttachRequest) (string, error) {
+	p := &fingerprintProbe{asset: req.AssetID}
+	if _, err := authority.New(p).AttachRepresentation(context.Background(), req); err != nil {
+		return "", fmt.Errorf("derive fingerprint of attach %q: %w", req.AttachOperationID, err)
+	}
+	if p.fingerprint == "" {
+		return "", fmt.Errorf("derive fingerprint of attach %q: facade supplied none", req.AttachOperationID)
+	}
+	return p.fingerprint, nil
 }
 
 // bindAs binds through the facade and requires the returned event to record the submitted
@@ -142,7 +202,8 @@ func bindMatches(ev authority.BindEvent, req authority.BindRequest) error {
 }
 
 // attachAs attaches through the facade and requires the returned Representation to carry
-// the submitted relation and attach identity before a case uses it as an oracle.
+// the submitted relation, attach identity and supplied fingerprint before a case uses
+// it as an oracle.
 func attachAs(a *authority.Authority, req authority.AttachRequest) (authority.Representation, error) {
 	rep, err := a.AttachRepresentation(context.Background(), req)
 	if err != nil {
@@ -155,12 +216,20 @@ func attachAs(a *authority.Authority, req authority.AttachRequest) (authority.Re
 }
 
 // attachMatches checks the immutable fields of rep against the attach request that created
-// it. Locators and health are mutable availability, so they are not compared.
+// it, including the fingerprint the facade supplied for req. Locators and health are
+// mutable availability, so they are not compared.
 func attachMatches(rep authority.Representation, req authority.AttachRequest) error {
 	if rep.AttachOperationID != req.AttachOperationID || rep.AssetID != req.AssetID ||
 		rep.RevisionID != req.RevisionID || rep.Format != req.Format {
 		return fmt.Errorf("representation %q (op %q, asset %q, revision %q, format %q) does not record attach %+v",
 			rep.RepresentationID, rep.AttachOperationID, rep.AssetID, rep.RevisionID, rep.Format, req)
+	}
+	want, err := suppliedRepresentationFingerprint(req)
+	if err != nil {
+		return err
+	}
+	if rep.Fingerprint != want {
+		return fmt.Errorf("representation %q carries Fingerprint %q, want the supplied %q", rep.RepresentationID, rep.Fingerprint, want)
 	}
 	return nil
 }
