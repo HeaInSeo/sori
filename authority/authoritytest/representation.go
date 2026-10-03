@@ -41,7 +41,8 @@ func listRepresentations(s authority.Store, revID authority.RevisionID) ([]autho
 
 // An attach retry returns the same Representation (one relation) even when its
 // locators differ, since locators are mutable and not identity-bearing; the same op
-// id with a different relation fails closed (reconciled BEFORE member equivalence).
+// id with a different relation (format, proof digest or proof algorithm) fails closed
+// (reconciled BEFORE member equivalence).
 func attachIdempotentAndConflict(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -75,6 +76,13 @@ func attachIdempotentAndConflict(t *testing.T, h Harness) error {
 	mismatch.MemberProofs = []authority.Member{proofMember(digestTwo)}
 	if _, err := a.AttachRepresentation(ctx, mismatch); !errors.Is(err, authority.ErrAttachConflict) {
 		return fmt.Errorf("same op, different proofs: err = %v, want ErrAttachConflict (reconcile before equivalence)", err)
+	}
+	// The proof algorithm is identity-bearing for the reused operation too: the same
+	// digest under another algorithm is a different relation, not a retry.
+	algoOnly := attachReq("attach-1", rev, formatOne)
+	algoOnly.MemberProofs[0].Proof.Algorithm = "conformance-other-algorithm"
+	if _, err := a.AttachRepresentation(ctx, algoOnly); !errors.Is(err, authority.ErrAttachConflict) {
+		return fmt.Errorf("same op, same digest under another algorithm: err = %v, want ErrAttachConflict (reconcile before equivalence)", err)
 	}
 	reps, err := listRepresentations(s, rev.RevisionID)
 	if err != nil {

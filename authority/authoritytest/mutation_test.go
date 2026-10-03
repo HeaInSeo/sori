@@ -387,6 +387,156 @@ func (s *initialAvailabilityDroppingAttach) AttachRepresentation(ctx context.Con
 	return rep, nil
 }
 
+// looseAttachReconcile reconciles a reused AttachOperationID on (RevisionID, Format)
+// and same only, ignoring the rest of the supplied fingerprint: a hit is forwarded with
+// the prior fingerprint, so a change same does not see is returned as the original
+// Representation instead of ErrAttachConflict.
+type looseAttachReconcile struct {
+	*authority.MemoryStore
+	same  func(prior authority.Representation, req authority.AttachRequest) bool
+	mu    sync.Mutex
+	prior map[authority.RequestID]authority.Representation
+}
+
+func (s *looseAttachReconcile) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.prior[req.AttachOperationID]; ok && p.RevisionID == req.RevisionID && p.Format == req.Format && s.same(p, req) {
+		fp = p.Fingerprint
+	}
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err == nil {
+		if _, ok := s.prior[req.AttachOperationID]; !ok {
+			s.prior[req.AttachOperationID] = rep
+		}
+	}
+	return rep, err
+}
+
+// proofKeyDigests lists the semantic key and digest of each proof, sorted; the proof
+// algorithm is left out.
+func proofKeyDigests(members []authority.Member) []string {
+	out := make([]string, 0, len(members))
+	for _, mem := range members {
+		out = append(out, mem.SemanticKey+"="+mem.Proof.Digest)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// sameIgnoringAlgorithm compares proofs on semantic key and digest only.
+func sameIgnoringAlgorithm(p authority.Representation, req authority.AttachRequest) bool {
+	return slices.Equal(proofKeyDigests(p.MemberProofs), proofKeyDigests(req.MemberProofs))
+}
+
+// firstKeyProof returns the proof with the smallest semantic key.
+func firstKeyProof(members []authority.Member) authority.Member {
+	return slices.MinFunc(members, func(a, b authority.Member) int {
+		switch {
+		case a.SemanticKey < b.SemanticKey:
+			return -1
+		case a.SemanticKey > b.SemanticKey:
+			return 1
+		}
+		return 0
+	})
+}
+
+// sameFirstProof compares only the proof of the first semantic member.
+func sameFirstProof(p authority.Representation, req authority.AttachRequest) bool {
+	a, b := firstKeyProof(p.MemberProofs), firstKeyProof(req.MemberProofs)
+	return a.SemanticKey == b.SemanticKey && a.Proof == b.Proof
+}
+
+func newAlgorithmBlindAttach(m *authority.MemoryStore) authority.Store {
+	return &looseAttachReconcile{MemoryStore: m, same: sameIgnoringAlgorithm, prior: map[authority.RequestID]authority.Representation{}}
+}
+
+// recordingStore is a correct Store that remembers the first committed Revision per
+// RequestID and Representation per AttachOperationID, standing in for the durable
+// records a backend rebuilds its reconcile indexes from on reopen.
+type recordingStore struct {
+	*authority.MemoryStore
+	mu   sync.Mutex
+	revs map[authority.RequestID]authority.Revision
+	reps map[authority.RequestID]authority.Representation
+}
+
+func (s *recordingStore) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err == nil {
+		s.mu.Lock()
+		if _, ok := s.revs[req.RequestID]; !ok {
+			s.revs[req.RequestID] = rev
+		}
+		s.mu.Unlock()
+	}
+	return rev, err
+}
+
+func (s *recordingStore) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err == nil {
+		s.mu.Lock()
+		if _, ok := s.reps[req.AttachOperationID]; !ok {
+			s.reps[req.AttachOperationID] = rep
+		}
+		s.mu.Unlock()
+	}
+	return rep, err
+}
+
+// restoredIndexHarness behaves correctly until Reopen, which returns the same state
+// behind restore, handed the recorded records: a durable backend that keeps every
+// record intact but rebuilds its reconcile index from part of each.
+func restoredIndexHarness(restore func(*authority.MemoryStore, map[authority.RequestID]authority.Revision, map[authority.RequestID]authority.Representation) authority.Store) Harness {
+	return Harness{
+		New: func(*testing.T) authority.Store {
+			return &recordingStore{
+				MemoryStore: authority.NewMemoryStore(),
+				revs:        map[authority.RequestID]authority.Revision{},
+				reps:        map[authority.RequestID]authority.Representation{},
+			}
+		},
+		Reopen: func(t *testing.T, s authority.Store) authority.Store {
+			r, ok := s.(*recordingStore)
+			if !ok {
+				t.Fatalf("reopen: unexpected store %T", s)
+			}
+			return restore(r.MemoryStore, r.revs, r.reps)
+		},
+	}
+}
+
+// restoreFirstMemberAccept rebuilds the RequestID index on (AssetID, first member
+// digest) only.
+func restoreFirstMemberAccept(m *authority.MemoryStore, revs map[authority.RequestID]authority.Revision, _ map[authority.RequestID]authority.Representation) authority.Store {
+	s := newFirstMemberDigestAccept(m).(*memberDigestAccept)
+	for id, rev := range revs {
+		s.prior[id] = rev
+	}
+	return s
+}
+
+// restoreFirstProofAttach rebuilds the attach operation index on the first semantic
+// member's proof only.
+func restoreFirstProofAttach(m *authority.MemoryStore, _ map[authority.RequestID]authority.Revision, reps map[authority.RequestID]authority.Representation) authority.Store {
+	s := &looseAttachReconcile{MemoryStore: m, same: sameFirstProof, prior: map[authority.RequestID]authority.Representation{}}
+	for op, rep := range reps {
+		s.prior[op] = rep
+	}
+	return s
+}
+
+// restoreRoleStrictAttach rebuilds the attach operation index with the proof roles.
+func restoreRoleStrictAttach(m *authority.MemoryStore, _ map[authority.RequestID]authority.Revision, reps map[authority.RequestID]authority.Representation) authority.Store {
+	s := newRoleStrictAttach(m).(*roleStrictAttach)
+	for op, rep := range reps {
+		s.prior[op] = proofRoles(rep.MemberProofs)
+	}
+	return s
+}
+
 // firstProofAttach checks member equivalence on the first proof only: when it matches
 // the Revision's member of the same key, the remaining proofs are taken on trust.
 type firstProofAttach struct{ *authority.MemoryStore }
@@ -1390,6 +1540,26 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "attach retry returns the request's proof roles",
 			harness: memoryHarness(newRoleEchoAttach),
 			rejects: []string{"AttachRepresentation/IdempotentRetryAndConflict"},
+		},
+		{
+			mutant:  "attach reconcile ignores the proof algorithm",
+			harness: memoryHarness(newAlgorithmBlindAttach),
+			rejects: []string{"AttachRepresentation/IdempotentRetryAndConflict"},
+		},
+		{
+			mutant:  "restored accept index compares only the first member",
+			harness: restoredIndexHarness(restoreFirstMemberAccept),
+			rejects: []string{"Reopen/MultiMember"},
+		},
+		{
+			mutant:  "restored attach index compares only the first proof",
+			harness: restoredIndexHarness(restoreFirstProofAttach),
+			rejects: []string{"Reopen/MultiMember"},
+		},
+		{
+			mutant:  "restored attach index compares proof roles",
+			harness: restoredIndexHarness(restoreRoleStrictAttach),
+			rejects: []string{"Reopen/MultiMember"},
 		},
 	}
 	for _, tc := range cases {

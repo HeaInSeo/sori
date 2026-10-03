@@ -262,8 +262,9 @@ func freshAttachAfterReopen(a *authority.Authority, s authority.Store, rev autho
 
 // A two-member Revision and a Representation carrying both member proofs survive a
 // reopen with every member intact, so a backend that restores only the first member
-// or proof is observable; retries with the members or proofs reordered still
-// reconcile to the restored records.
+// or proof is observable; retries with the members or proofs reordered, or with only
+// a proof role changed, still reconcile to the restored records, while a retry whose
+// second member or second proof changed conflicts and leaves them unchanged.
 func reopenMultiMember(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -301,6 +302,14 @@ func reopenMultiMember(t *testing.T, h Harness) error {
 	if err := sameRevision(retry, rev); err != nil {
 		return fmt.Errorf("reordered-members retry after reopen: %w", err)
 	}
+	changedMember := accepted
+	changedMember.Manifest = twoMemberManifest(digestThree)
+	if _, err := a.AcceptRevision(ctx, changedMember); !errors.Is(err, authority.ErrRequestConflict) {
+		return fmt.Errorf("same request, only the second member changed after reopen: err = %v, want ErrRequestConflict", err)
+	}
+	if err := checkRevisionUnchanged(s, rev); err != nil {
+		return fmt.Errorf("after second-member conflict after reopen: %w", err)
+	}
 	reorderedProofs := attachReq("attach-multi", rev, formatOne, locatorA)
 	reorderedProofs.MemberProofs = twoMemberProofs(digestTwo)
 	slices.Reverse(reorderedProofs.MemberProofs)
@@ -310,6 +319,22 @@ func reopenMultiMember(t *testing.T, h Harness) error {
 	}
 	if err := sameRepresentationIdentity(again, rep); err != nil {
 		return fmt.Errorf("reordered-proofs retry after reopen: %w", err)
+	}
+	// Role is not identity-bearing for the restored operation either.
+	roleOnly := attachReq("attach-multi", rev, formatOne, locatorA)
+	roleOnly.MemberProofs = twoMemberProofs(digestTwo)
+	roleOnly.MemberProofs[1].Role = "conformance-other-role"
+	again, err = a.AttachRepresentation(ctx, roleOnly)
+	if err != nil {
+		return fmt.Errorf("role-only retry after reopen: %w", err)
+	}
+	if err := sameRepresentationIdentity(again, rep); err != nil {
+		return fmt.Errorf("role-only retry after reopen: %w", err)
+	}
+	changedProof := attachReq("attach-multi", rev, formatOne, locatorA)
+	changedProof.MemberProofs = twoMemberProofs(digestThree)
+	if _, err := a.AttachRepresentation(ctx, changedProof); !errors.Is(err, authority.ErrAttachConflict) {
+		return fmt.Errorf("same op, only the second proof changed after reopen: err = %v, want ErrAttachConflict", err)
 	}
 	reps, err := listRepresentations(s, rev.RevisionID)
 	if err != nil {
