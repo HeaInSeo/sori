@@ -257,6 +257,136 @@ func corruptSecondProof(rep *authority.Representation) {
 	}
 }
 
+// lossyReopenHarness reads every record back intact until Reopen, which returns the
+// same state behind wrap: a durable backend that restores only part of a record.
+func lossyReopenHarness(wrap func(*authority.MemoryStore) authority.Store) Harness {
+	return Harness{
+		New: func(*testing.T) authority.Store { return authority.NewMemoryStore() },
+		Reopen: func(t *testing.T, s authority.Store) authority.Store {
+			m, ok := s.(*authority.MemoryStore)
+			if !ok {
+				t.Fatalf("reopen: unexpected store %T", s)
+			}
+			return wrap(m)
+		},
+	}
+}
+
+// digestOnlyAttach checks member equivalence on semantic key and digest only, so a
+// proof with the right digest under another algorithm is taken as equivalent.
+type digestOnlyAttach struct{ *authority.MemoryStore }
+
+func (s digestOnlyAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	if len(req.MemberProofs) == len(revMembers) {
+		digests := make(map[string]string, len(revMembers))
+		for _, mem := range revMembers {
+			digests[mem.SemanticKey] = mem.Proof.Digest
+		}
+		same := true
+		for _, p := range req.MemberProofs {
+			if d, ok := digests[p.SemanticKey]; !ok || d != p.Proof.Digest {
+				same = false
+				break
+			}
+		}
+		if same {
+			revMembers = req.MemberProofs
+		}
+	}
+	return s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+}
+
+// proofRoles lists the semantic key and role of each proof, sorted.
+func proofRoles(members []authority.Member) []string {
+	out := make([]string, 0, len(members))
+	for _, mem := range members {
+		out = append(out, mem.SemanticKey+"="+mem.Role)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// roleStrictAttach keeps proof roles in its attach idempotency record, so a retry
+// that changes only the roles is wrongly reported as ErrAttachConflict.
+type roleStrictAttach struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	prior map[authority.RequestID][]string
+}
+
+func newRoleStrictAttach(m *authority.MemoryStore) authority.Store {
+	return &roleStrictAttach{MemoryStore: m, prior: map[authority.RequestID][]string{}}
+}
+
+func (s *roleStrictAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	roles := proofRoles(req.MemberProofs)
+	if p, ok := s.prior[req.AttachOperationID]; ok && !slices.Equal(p, roles) {
+		return authority.Representation{}, fmt.Errorf("%w: attach operation %q", authority.ErrAttachConflict, req.AttachOperationID)
+	}
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err == nil {
+		if _, ok := s.prior[req.AttachOperationID]; !ok {
+			s.prior[req.AttachOperationID] = roles
+		}
+	}
+	return rep, err
+}
+
+// roleEchoAttach reconciles a retry to the stored Representation but answers with
+// the retry request's proofs, so a role-only change shows up in the response.
+type roleEchoAttach struct {
+	*authority.MemoryStore
+	mu   sync.Mutex
+	seen map[authority.RequestID]bool
+}
+
+func newRoleEchoAttach(m *authority.MemoryStore) authority.Store {
+	return &roleEchoAttach{MemoryStore: m, seen: map[authority.RequestID]bool{}}
+}
+
+func (s *roleEchoAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err != nil {
+		return rep, err
+	}
+	if s.seen[req.AttachOperationID] {
+		rep.MemberProofs = slices.Clone(req.MemberProofs)
+	}
+	s.seen[req.AttachOperationID] = true
+	return rep, nil
+}
+
+// initialAvailabilityDroppingAttach stores a new Representation correctly but
+// answers its first attach without the submitted locators and as unhealthy.
+type initialAvailabilityDroppingAttach struct {
+	*authority.MemoryStore
+	mu   sync.Mutex
+	seen map[authority.RequestID]bool
+}
+
+func newInitialAvailabilityDroppingAttach(m *authority.MemoryStore) authority.Store {
+	return &initialAvailabilityDroppingAttach{MemoryStore: m, seen: map[authority.RequestID]bool{}}
+}
+
+func (s *initialAvailabilityDroppingAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err != nil {
+		return rep, err
+	}
+	if !s.seen[req.AttachOperationID] {
+		rep.Locators = nil
+		rep.Healthy = false
+	}
+	s.seen[req.AttachOperationID] = true
+	return rep, nil
+}
+
 // firstProofAttach checks member equivalence on the first proof only: when it matches
 // the Revision's member of the same key, the remaining proofs are taken on trust.
 type firstProofAttach struct{ *authority.MemoryStore }
@@ -1220,6 +1350,46 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "attach reconcile compares proof order",
 			harness: memoryHarness(newProofOrderStrictAttach),
 			rejects: []string{"AttachRepresentation/MultiMember"},
+		},
+		{
+			mutant:  "reopen restores only the first member",
+			harness: lossyReopenHarness(newRevisionRewriting(truncateRevisionMembers)),
+			rejects: []string{"Reopen/MultiMember"},
+		},
+		{
+			mutant:  "reopen rewrites the second member",
+			harness: lossyReopenHarness(newRevisionRewriting(corruptSecondMember)),
+			rejects: []string{"Reopen/MultiMember"},
+		},
+		{
+			mutant:  "reopen restores only the first proof",
+			harness: lossyReopenHarness(newRepresentationRewriting(truncateRepresentationProofs)),
+			rejects: []string{"Reopen/MultiMember"},
+		},
+		{
+			mutant:  "reopen rewrites the second proof",
+			harness: lossyReopenHarness(newRepresentationRewriting(corruptSecondProof)),
+			rejects: []string{"Reopen/MultiMember"},
+		},
+		{
+			mutant:  "initial attach response drops availability",
+			harness: memoryHarness(newInitialAvailabilityDroppingAttach),
+			rejects: []string{"Representation/AvailabilityPreservesIdentity"},
+		},
+		{
+			mutant:  "attach equivalence ignores the proof algorithm",
+			harness: memoryHarness(func(m *authority.MemoryStore) authority.Store { return digestOnlyAttach{m} }),
+			rejects: []string{"AttachRepresentation/MemberEquivalence"},
+		},
+		{
+			mutant:  "attach reconcile compares proof roles",
+			harness: memoryHarness(newRoleStrictAttach),
+			rejects: []string{"AttachRepresentation/IdempotentRetryAndConflict"},
+		},
+		{
+			mutant:  "attach retry returns the request's proof roles",
+			harness: memoryHarness(newRoleEchoAttach),
+			rejects: []string{"AttachRepresentation/IdempotentRetryAndConflict"},
 		},
 	}
 	for _, tc := range cases {

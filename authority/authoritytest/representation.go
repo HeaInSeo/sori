@@ -57,6 +57,17 @@ func attachIdempotentAndConflict(t *testing.T, h Harness) error {
 	if err := sameRepresentationIdentity(retry, first); err != nil {
 		return fmt.Errorf("retry: %w", err)
 	}
+	// Role is not identity-bearing either: a retry that changes only the proof roles is
+	// the same relation and returns the original Representation, original roles included.
+	roleOnly := attachReq("attach-1", rev, formatOne, locatorA)
+	roleOnly.MemberProofs[0].Role = "conformance-other-role"
+	retry, err = a.AttachRepresentation(ctx, roleOnly)
+	if err != nil {
+		return fmt.Errorf("role-only retry: %w", err)
+	}
+	if err := sameRepresentationIdentity(retry, first); err != nil {
+		return fmt.Errorf("role-only retry: %w", err)
+	}
 	if _, err := a.AttachRepresentation(ctx, attachReq("attach-1", rev, formatTwo)); !errors.Is(err, authority.ErrAttachConflict) {
 		return fmt.Errorf("same op, different format: err = %v, want ErrAttachConflict", err)
 	}
@@ -196,7 +207,8 @@ func attachConcurrentConflictingOperation(t *testing.T, h Harness) error {
 }
 
 // A new attach operation whose proofs do not match the accepted Revision is rejected
-// and appends nothing.
+// and appends nothing. The proof algorithm is identity-bearing: the same digest under
+// another algorithm is a different content proof.
 func attachMemberEquivalence(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -208,6 +220,11 @@ func attachMemberEquivalence(t *testing.T, h Harness) error {
 	bad.MemberProofs = []authority.Member{proofMember(digestTwo)}
 	if _, err := a.AttachRepresentation(context.Background(), bad); !errors.Is(err, authority.ErrMemberEquivalence) {
 		return fmt.Errorf("mismatched proofs: err = %v, want ErrMemberEquivalence", err)
+	}
+	otherAlgo := attachReq("attach-bad-algorithm", rev, formatOne)
+	otherAlgo.MemberProofs[0].Proof.Algorithm = "conformance-other-algorithm"
+	if _, err := a.AttachRepresentation(context.Background(), otherAlgo); !errors.Is(err, authority.ErrMemberEquivalence) {
+		return fmt.Errorf("same digest, different algorithm: err = %v, want ErrMemberEquivalence", err)
 	}
 	reps, err := listRepresentations(s, rev.RevisionID)
 	if err != nil {
@@ -314,6 +331,10 @@ func representationAvailability(t *testing.T, h Harness) error {
 	rev, rep, err := acceptAndAttach(a)
 	if err != nil {
 		return err
+	}
+	// The first attach answers with the submitted locators and the initial healthy state.
+	if !rep.Healthy || !reflect.DeepEqual(rep.Locators, []authority.Locator{locatorA}) {
+		return fmt.Errorf("initial attach returned healthy=%v locators=%+v, want healthy and the submitted %+v", rep.Healthy, rep.Locators, []authority.Locator{locatorA})
 	}
 	if err := a.SetRepresentationLocators(ctx, rep.RepresentationID, []authority.Locator{locatorB}); err != nil {
 		return fmt.Errorf("set locators: %w", err)

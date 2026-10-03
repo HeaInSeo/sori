@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/HeaInSeo/sori/authority"
@@ -257,6 +258,67 @@ func freshAttachAfterReopen(a *authority.Authority, s authority.Store, rev autho
 		return fmt.Errorf("list order after fresh attach: %w", err)
 	}
 	return nil
+}
+
+// A two-member Revision and a Representation carrying both member proofs survive a
+// reopen with every member intact, so a backend that restores only the first member
+// or proof is observable; retries with the members or proofs reordered still
+// reconcile to the restored records.
+func reopenMultiMember(t *testing.T, h Harness) error {
+	s := h.New(t)
+	a := authority.New(s)
+	ctx := context.Background()
+	accepted := authority.AcceptRequest{RequestID: "req-multi", AssetID: assetA, Manifest: twoMemberManifest(digestTwo)}
+	rev, err := acceptAs(a, accepted)
+	if err != nil {
+		return fmt.Errorf("accept two members: %w", err)
+	}
+	req := attachReq("attach-multi", rev, formatOne, locatorA)
+	req.MemberProofs = twoMemberProofs(digestTwo)
+	rep, err := attachAs(a, req)
+	if err != nil {
+		return fmt.Errorf("attach two members: %w", err)
+	}
+	s = h.Reopen(t, s)
+	a = authority.New(s)
+	if err := checkRevisionUnchanged(s, rev); err != nil {
+		return fmt.Errorf("two-member revision after reopen: %w", err)
+	}
+	got, err := getRepresentation(s, rep.RepresentationID)
+	if err != nil {
+		return fmt.Errorf("after reopen: %w", err)
+	}
+	if err := sameRepresentationIdentity(got, rep); err != nil {
+		return fmt.Errorf("two-member representation after reopen: %w", err)
+	}
+	reordered := accepted
+	reordered.Manifest = twoMemberManifest(digestTwo)
+	slices.Reverse(reordered.Manifest.Members)
+	retry, err := a.AcceptRevision(ctx, reordered)
+	if err != nil {
+		return fmt.Errorf("reordered-members retry after reopen: %w", err)
+	}
+	if err := sameRevision(retry, rev); err != nil {
+		return fmt.Errorf("reordered-members retry after reopen: %w", err)
+	}
+	reorderedProofs := attachReq("attach-multi", rev, formatOne, locatorA)
+	reorderedProofs.MemberProofs = twoMemberProofs(digestTwo)
+	slices.Reverse(reorderedProofs.MemberProofs)
+	again, err := a.AttachRepresentation(ctx, reorderedProofs)
+	if err != nil {
+		return fmt.Errorf("reordered-proofs retry after reopen: %w", err)
+	}
+	if err := sameRepresentationIdentity(again, rep); err != nil {
+		return fmt.Errorf("reordered-proofs retry after reopen: %w", err)
+	}
+	reps, err := listRepresentations(s, rev.RevisionID)
+	if err != nil {
+		return err
+	}
+	if len(reps) != 1 {
+		return fmt.Errorf("relations after reopen = %d, want 1", len(reps))
+	}
+	return sameRepresentationIdentity(reps[0], rep)
 }
 
 // attachCrossRevisionConflictAfterReopen reuses the restored attach operation of rep

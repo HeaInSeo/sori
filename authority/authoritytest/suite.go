@@ -65,6 +65,7 @@ var reopenCases = []conformanceCase{
 	{"Reopen/Revision", reopenRevision},
 	{"Reopen/AliasHistory", reopenAliasHistory},
 	{"Reopen/Representation", reopenRepresentation},
+	{"Reopen/MultiMember", reopenMultiMember},
 }
 
 // Run executes the full conformance suite against h.
