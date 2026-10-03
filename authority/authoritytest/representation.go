@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 
@@ -216,6 +217,61 @@ func attachMemberEquivalence(t *testing.T, h Harness) error {
 		return fmt.Errorf("rejected attach left %d relations, want 0", len(reps))
 	}
 	return nil
+}
+
+// A Representation of a two-member Revision round-trips both proofs, submitted in
+// the opposite order to the Revision's members. A retry of the same operation with
+// the proofs reordered is the same relation; the same operation with only the second
+// proof changed conflicts; and a new operation whose second proof does not match the
+// Revision fails member equivalence.
+func attachMultiMember(t *testing.T, h Harness) error {
+	s := h.New(t)
+	a := authority.New(s)
+	ctx := context.Background()
+	rev, err := acceptAs(a, authority.AcceptRequest{RequestID: "req-multi", AssetID: assetA, Manifest: twoMemberManifest(digestTwo)})
+	if err != nil {
+		return fmt.Errorf("accept two members: %w", err)
+	}
+	req := attachReq("attach-multi", rev, formatOne)
+	req.MemberProofs = twoMemberProofs(digestTwo)
+	slices.Reverse(req.MemberProofs)
+	first, err := attachAs(a, req)
+	if err != nil {
+		return fmt.Errorf("attach two members: %w", err)
+	}
+	stored, err := getRepresentation(s, first.RepresentationID)
+	if err != nil {
+		return err
+	}
+	if err := attachMatches(stored, req); err != nil {
+		return fmt.Errorf("read two members: %w", err)
+	}
+	reordered := attachReq("attach-multi", rev, formatOne)
+	reordered.MemberProofs = twoMemberProofs(digestTwo)
+	retry, err := a.AttachRepresentation(ctx, reordered)
+	if err != nil {
+		return fmt.Errorf("reordered-proofs retry: %w", err)
+	}
+	if err := sameRepresentationIdentity(retry, first); err != nil {
+		return fmt.Errorf("reordered-proofs retry: %w", err)
+	}
+	changed := attachReq("attach-multi", rev, formatOne)
+	changed.MemberProofs = twoMemberProofs(digestThree)
+	if _, err := a.AttachRepresentation(ctx, changed); !errors.Is(err, authority.ErrAttachConflict) {
+		return fmt.Errorf("same op, only the second proof changed: err = %v, want ErrAttachConflict", err)
+	}
+	changed.AttachOperationID = "attach-multi-bad"
+	if _, err := a.AttachRepresentation(ctx, changed); !errors.Is(err, authority.ErrMemberEquivalence) {
+		return fmt.Errorf("new op, second proof mismatched: err = %v, want ErrMemberEquivalence", err)
+	}
+	reps, err := listRepresentations(s, rev.RevisionID)
+	if err != nil {
+		return err
+	}
+	if len(reps) != 1 {
+		return fmt.Errorf("relations after retry/conflict/mismatch = %d, want 1", len(reps))
+	}
+	return sameRepresentationIdentity(reps[0], first)
 }
 
 // Multiple Representations of one Revision are listed in attach order.

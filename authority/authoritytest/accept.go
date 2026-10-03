@@ -123,6 +123,48 @@ func fingerprintOnlyConflicts(a *authority.Authority) error {
 	return nil
 }
 
+// A two-member Revision round-trips both members on accept and read. Member order
+// is not identity-bearing, so a retry with the members reordered reconciles to the
+// original Revision, while a retry that changes only the second member's proof is a
+// different acceptance and fails closed.
+func acceptMultiMember(t *testing.T, h Harness) error {
+	s := h.New(t)
+	a := authority.New(s)
+	ctx := context.Background()
+	req := authority.AcceptRequest{RequestID: "req-multi", AssetID: assetA, Manifest: twoMemberManifest(digestTwo)}
+	first, err := acceptAs(a, req)
+	if err != nil {
+		return fmt.Errorf("accept two members: %w", err)
+	}
+	stored, err := getRevision(s, first.RevisionID)
+	if err != nil {
+		return err
+	}
+	if err := acceptedAs(stored, req); err != nil {
+		return fmt.Errorf("read two members: %w", err)
+	}
+	reordered := req
+	reordered.Manifest = twoMemberManifest(digestTwo)
+	slices.Reverse(reordered.Manifest.Members)
+	retry, err := a.AcceptRevision(ctx, reordered)
+	if err != nil {
+		return fmt.Errorf("reordered-members retry: %w", err)
+	}
+	if err := sameRevision(retry, first); err != nil {
+		return fmt.Errorf("reordered-members retry: %w", err)
+	}
+	changed := req
+	changed.Manifest = twoMemberManifest(digestThree)
+	if _, err := a.AcceptRevision(ctx, changed); !errors.Is(err, authority.ErrRequestConflict) {
+		return fmt.Errorf("same request, only the second member's proof changed: err = %v, want ErrRequestConflict", err)
+	}
+	stored, err = getRevision(s, first.RevisionID)
+	if err != nil {
+		return err
+	}
+	return sameRevision(stored, first)
+}
+
 // Distinct RequestIDs are distinct Revisions even for identical content, and an
 // unknown RevisionID is reported as absent without error.
 func acceptDistinctRequests(t *testing.T, h Harness) error {

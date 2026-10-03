@@ -114,12 +114,21 @@ func (s *profileStrictAccept) AcceptRevision(ctx context.Context, req authority.
 // fingerprint, so a provenance-only change is returned as the original Revision.
 type memberDigestAccept struct {
 	*authority.MemoryStore
-	mu    sync.Mutex
-	prior map[authority.RequestID]authority.Revision
+	digests func(authority.SemanticManifest) []string
+	mu      sync.Mutex
+	prior   map[authority.RequestID]authority.Revision
 }
 
 func newMemberDigestAccept(m *authority.MemoryStore) authority.Store {
-	return &memberDigestAccept{MemoryStore: m, prior: map[authority.RequestID]authority.Revision{}}
+	return &memberDigestAccept{MemoryStore: m, digests: memberDigests, prior: map[authority.RequestID]authority.Revision{}}
+}
+
+// newFirstMemberDigestAccept reconciles on (AssetID, first member digest) only, so a
+// change confined to a later member is returned as the original Revision.
+func newFirstMemberDigestAccept(m *authority.MemoryStore) authority.Store {
+	return &memberDigestAccept{MemoryStore: m, digests: func(m authority.SemanticManifest) []string {
+		return memberDigests(m)[:1]
+	}, prior: map[authority.RequestID]authority.Revision{}}
 }
 
 func memberDigests(m authority.SemanticManifest) []string {
@@ -134,7 +143,7 @@ func (s *memberDigestAccept) AcceptRevision(ctx context.Context, req authority.A
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p, ok := s.prior[req.RequestID]; ok && p.AssetID == req.AssetID &&
-		slices.Equal(memberDigests(p.Manifest), memberDigests(req.Manifest)) {
+		slices.Equal(s.digests(p.Manifest), s.digests(req.Manifest)) {
 		fp = p.Fingerprint
 	}
 	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
@@ -144,6 +153,135 @@ func (s *memberDigestAccept) AcceptRevision(ctx context.Context, req authority.A
 		}
 	}
 	return rev, err
+}
+
+// memberKeys lists the member semantic keys of members in order.
+func memberKeys(members []authority.Member) []string {
+	out := make([]string, 0, len(members))
+	for _, mem := range members {
+		out = append(out, mem.SemanticKey)
+	}
+	return out
+}
+
+// memberOrderStrictAccept keeps member order in its idempotency record, so a retry
+// with the same members reordered is wrongly reported as ErrRequestConflict.
+type memberOrderStrictAccept struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	prior map[authority.RequestID][]string
+}
+
+func newMemberOrderStrictAccept(m *authority.MemoryStore) authority.Store {
+	return &memberOrderStrictAccept{MemoryStore: m, prior: map[authority.RequestID][]string{}}
+}
+
+func (s *memberOrderStrictAccept) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := memberKeys(req.Manifest.Members)
+	if p, ok := s.prior[req.RequestID]; ok && !slices.Equal(p, keys) {
+		return authority.Revision{}, fmt.Errorf("%w: request %q", authority.ErrRequestConflict, req.RequestID)
+	}
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err == nil {
+		if _, ok := s.prior[req.RequestID]; !ok {
+			s.prior[req.RequestID] = keys
+		}
+	}
+	return rev, err
+}
+
+// revisionRewriting commits and reconciles correctly but reports every Revision, on
+// accept and on read alike, rewritten. The responses stay self-consistent, so only a
+// check against the submitted request catches it.
+type revisionRewriting struct {
+	*authority.MemoryStore
+	rewrite func(*authority.Revision)
+}
+
+func newRevisionRewriting(rewrite func(*authority.Revision)) func(*authority.MemoryStore) authority.Store {
+	return func(m *authority.MemoryStore) authority.Store {
+		return revisionRewriting{MemoryStore: m, rewrite: rewrite}
+	}
+}
+
+func (s revisionRewriting) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err == nil {
+		s.rewrite(&rev)
+	}
+	return rev, err
+}
+
+func (s revisionRewriting) GetRevision(ctx context.Context, id authority.RevisionID) (authority.Revision, bool, error) {
+	rev, ok, err := s.MemoryStore.GetRevision(ctx, id)
+	if ok {
+		s.rewrite(&rev)
+	}
+	return rev, ok, err
+}
+
+func corruptRevisionAsset(rev *authority.Revision) { rev.AssetID += "-corrupt" }
+
+// corruptExternalSource rewrites the source coordinate of an ExternalImport manifest.
+func corruptExternalSource(rev *authority.Revision) {
+	if rev.Manifest.Origin == authority.OriginExternalImport {
+		rev.Manifest.Provenance.SourceCoordinate += "-corrupt"
+	}
+}
+
+func truncateRevisionMembers(rev *authority.Revision) {
+	rev.Manifest.Members = rev.Manifest.Members[:1]
+}
+
+func truncateRepresentationProofs(rep *authority.Representation) {
+	rep.MemberProofs = rep.MemberProofs[:1]
+}
+
+// firstProofAttach checks member equivalence on the first proof only: when it matches
+// the Revision's member of the same key, the remaining proofs are taken on trust.
+type firstProofAttach struct{ *authority.MemoryStore }
+
+func (s firstProofAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	if len(req.MemberProofs) == len(revMembers) && len(req.MemberProofs) > 0 {
+		head := req.MemberProofs[0]
+		for _, mem := range revMembers {
+			if mem.SemanticKey == head.SemanticKey && mem.Proof == head.Proof {
+				revMembers = req.MemberProofs
+				break
+			}
+		}
+	}
+	return s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+}
+
+// proofOrderStrictAttach keeps proof order in its attach idempotency record, so a
+// retry with the same proofs reordered is wrongly reported as ErrAttachConflict.
+type proofOrderStrictAttach struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	prior map[authority.RequestID][]string
+}
+
+func newProofOrderStrictAttach(m *authority.MemoryStore) authority.Store {
+	return &proofOrderStrictAttach{MemoryStore: m, prior: map[authority.RequestID][]string{}}
+}
+
+func (s *proofOrderStrictAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := memberKeys(req.MemberProofs)
+	if p, ok := s.prior[req.AttachOperationID]; ok && !slices.Equal(p, keys) {
+		return authority.Representation{}, fmt.Errorf("%w: attach operation %q", authority.ErrAttachConflict, req.AttachOperationID)
+	}
+	rep, err := s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+	if err == nil {
+		if _, ok := s.prior[req.AttachOperationID]; !ok {
+			s.prior[req.AttachOperationID] = keys
+		}
+	}
+	return rep, err
 }
 
 // requestIDRewritingAccept commits and reconciles correctly but reports every
@@ -309,6 +447,7 @@ var representationOracleCases = []string{
 	"AttachRepresentation/SameOperationIDDifferentRevision",
 	"AttachRepresentation/ConcurrentSameOperationID",
 	"AttachRepresentation/ConcurrentSameOperationIDDifferentFormat",
+	"AttachRepresentation/MultiMember",
 	"AttachRepresentation/ListOrder",
 	"Representation/AvailabilityPreservesIdentity",
 	"DeepCopy/Representation",
@@ -320,6 +459,7 @@ var requestIDOracleCases = []string{
 	"AcceptRevision/RequestConflict",
 	"AcceptRevision/ConcurrentSameRequestID",
 	"AcceptRevision/ConcurrentSameRequestIDDifferentContent",
+	"AcceptRevision/MultiMember",
 	"DeepCopy/Revision",
 }
 
@@ -1007,6 +1147,51 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "attach, get and list corrupt fingerprint across reopen",
 			harness: reopenHarness(newRepresentationRewriting(corruptRepresentationFingerprint)),
 			rejects: []string{"Reopen/Representation"},
+		},
+		{
+			mutant:  "accept and read rewrite asset",
+			harness: memoryHarness(newRevisionRewriting(corruptRevisionAsset)),
+			rejects: requestIDOracleCases,
+		},
+		{
+			mutant:  "accept and read rewrite asset across reopen",
+			harness: reopenHarness(newRevisionRewriting(corruptRevisionAsset)),
+			rejects: []string{"Reopen/Revision"},
+		},
+		{
+			mutant:  "accept and read corrupt external-import source",
+			harness: memoryHarness(newRevisionRewriting(corruptExternalSource)),
+			rejects: []string{"AcceptRevision/IdempotentRetry"},
+		},
+		{
+			mutant:  "accept and read keep only the first member",
+			harness: memoryHarness(newRevisionRewriting(truncateRevisionMembers)),
+			rejects: []string{"AcceptRevision/MultiMember", "AttachRepresentation/MultiMember"},
+		},
+		{
+			mutant:  "accept reconcile compares only asset and first member digest",
+			harness: memoryHarness(newFirstMemberDigestAccept),
+			rejects: []string{"AcceptRevision/MultiMember"},
+		},
+		{
+			mutant:  "accept reconcile compares member order",
+			harness: memoryHarness(newMemberOrderStrictAccept),
+			rejects: []string{"AcceptRevision/MultiMember"},
+		},
+		{
+			mutant:  "attach, get and list keep only the first proof",
+			harness: memoryHarness(newRepresentationRewriting(truncateRepresentationProofs)),
+			rejects: []string{"AttachRepresentation/MultiMember"},
+		},
+		{
+			mutant:  "attach equivalence checks only the first proof",
+			harness: memoryHarness(func(m *authority.MemoryStore) authority.Store { return firstProofAttach{m} }),
+			rejects: []string{"AttachRepresentation/MultiMember"},
+		},
+		{
+			mutant:  "attach reconcile compares proof order",
+			harness: memoryHarness(newProofOrderStrictAttach),
+			rejects: []string{"AttachRepresentation/MultiMember"},
 		},
 	}
 	for _, tc := range cases {

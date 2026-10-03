@@ -1,9 +1,11 @@
 package authoritytest
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"github.com/HeaInSeo/sori/authority"
 )
@@ -15,8 +17,10 @@ const (
 	formatTwo   = "conformance-format-two"
 	digestOne   = "conformance-digest-one"
 	digestTwo   = "conformance-digest-two"
+	digestThree = "conformance-digest-three"
 	proofAlgo   = "sha256"
 	memberKey   = "m1"
+	memberKey2  = "m2"
 	memberRole  = "primary"
 	aliasLatest = "latest"
 	aliasOther  = "conformance-other-alias"
@@ -72,6 +76,24 @@ func externalManifest(digest string) authority.SemanticManifest {
 	}
 }
 
+// twoMemberManifest is derivedManifest(digestOne) with a second member keyed
+// memberKey2 whose proof is second, so a Store that persists or compares only the
+// first member is observable.
+func twoMemberManifest(second string) authority.SemanticManifest {
+	m := derivedManifest(digestOne)
+	extra := member(second)
+	extra.SemanticKey = memberKey2
+	m.Members = append(m.Members, extra)
+	return m
+}
+
+// twoMemberProofs are the proofs matching twoMemberManifest(second), in member order.
+func twoMemberProofs(second string) []authority.Member {
+	extra := proofMember(second)
+	extra.SemanticKey = memberKey2
+	return []authority.Member{proofMember(digestOne), extra}
+}
+
 func acceptReq(id authority.RequestID, asset authority.AssetID, digest string) authority.AcceptRequest {
 	return authority.AcceptRequest{RequestID: id, AssetID: asset, Manifest: derivedManifest(digest)}
 }
@@ -113,11 +135,18 @@ func acceptAs(a *authority.Authority, req authority.AcceptRequest) (authority.Re
 	return rev, nil
 }
 
-// acceptedAs checks that rev identifies the publication operation that accepted it
-// and carries the fingerprint the facade supplied to the Store for req.
+// acceptedAs checks that rev identifies the publication operation that accepted it,
+// records the submitted asset and manifest, and carries the fingerprint the facade
+// supplied to the Store for req.
 func acceptedAs(rev authority.Revision, req authority.AcceptRequest) error {
 	if rev.RequestID != req.RequestID {
 		return fmt.Errorf("revision %q carries RequestID %q, want %q", rev.RevisionID, rev.RequestID, req.RequestID)
+	}
+	if rev.AssetID != req.AssetID {
+		return fmt.Errorf("revision %q carries AssetID %q, want %q", rev.RevisionID, rev.AssetID, req.AssetID)
+	}
+	if !sameManifest(rev.Manifest, req.Manifest) {
+		return fmt.Errorf("revision %q carries manifest %+v, want the submitted %+v", rev.RevisionID, rev.Manifest, req.Manifest)
 	}
 	want, err := suppliedRevisionFingerprint(req)
 	if err != nil {
@@ -224,6 +253,9 @@ func attachMatches(rep authority.Representation, req authority.AttachRequest) er
 		return fmt.Errorf("representation %q (op %q, asset %q, revision %q, format %q) does not record attach %+v",
 			rep.RepresentationID, rep.AttachOperationID, rep.AssetID, rep.RevisionID, rep.Format, req)
 	}
+	if !sameMemberSet(rep.MemberProofs, req.MemberProofs) {
+		return fmt.Errorf("representation %q carries member proofs %+v, want the submitted %+v", rep.RepresentationID, rep.MemberProofs, req.MemberProofs)
+	}
 	want, err := suppliedRepresentationFingerprint(req)
 	if err != nil {
 		return err
@@ -232,6 +264,31 @@ func attachMatches(rep authority.Representation, req authority.AttachRequest) er
 		return fmt.Errorf("representation %q carries Fingerprint %q, want the supplied %q", rep.RepresentationID, rep.Fingerprint, want)
 	}
 	return nil
+}
+
+// sameManifest compares two manifests with their members compared as a set: member
+// order is not identity-bearing (the revision fingerprint normalizes it).
+func sameManifest(got, want authority.SemanticManifest) bool {
+	if !sameMemberSet(got.Members, want.Members) {
+		return false
+	}
+	got.Members, want.Members = nil, nil
+	return reflect.DeepEqual(got, want)
+}
+
+// sameMemberSet reports whether a and b hold the same members in any order.
+func sameMemberSet(a, b []authority.Member) bool {
+	return reflect.DeepEqual(sortedMembers(a), sortedMembers(b))
+}
+
+func sortedMembers(in []authority.Member) []authority.Member {
+	out := slices.Clone(in)
+	slices.SortFunc(out, func(x, y authority.Member) int {
+		return cmp.Or(cmp.Compare(x.SemanticKey, y.SemanticKey), cmp.Compare(x.Role, y.Role),
+			cmp.Compare(x.Proof.Algorithm, y.Proof.Algorithm), cmp.Compare(x.Proof.Digest, y.Proof.Digest),
+			cmp.Compare(x.DataFormat, y.DataFormat), cmp.Compare(x.Cardinality, y.Cardinality))
+	})
+	return out
 }
 
 // sameRevision compares two Revisions field by field. AcceptedAt is compared with
