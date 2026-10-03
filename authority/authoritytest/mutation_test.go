@@ -239,6 +239,24 @@ func truncateRepresentationProofs(rep *authority.Representation) {
 	rep.MemberProofs = rep.MemberProofs[:1]
 }
 
+// corruptSecondMember rewrites the proof digest of a Revision's second member,
+// keeping the member count, so only a check of every member catches it.
+func corruptSecondMember(rev *authority.Revision) {
+	if len(rev.Manifest.Members) > 1 {
+		rev.Manifest.Members = slices.Clone(rev.Manifest.Members)
+		rev.Manifest.Members[1].Proof.Digest += "-corrupt"
+	}
+}
+
+// corruptSecondProof rewrites the digest of a Representation's second member proof,
+// keeping the proof count, so only a check of every proof catches it.
+func corruptSecondProof(rep *authority.Representation) {
+	if len(rep.MemberProofs) > 1 {
+		rep.MemberProofs = slices.Clone(rep.MemberProofs)
+		rep.MemberProofs[1].Proof.Digest += "-corrupt"
+	}
+}
+
 // firstProofAttach checks member equivalence on the first proof only: when it matches
 // the Revision's member of the same key, the remaining proofs are taken on trust.
 type firstProofAttach struct{ *authority.MemoryStore }
@@ -1169,6 +1187,11 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			rejects: []string{"AcceptRevision/MultiMember", "AttachRepresentation/MultiMember"},
 		},
 		{
+			mutant:  "accept and read rewrite the second member",
+			harness: memoryHarness(newRevisionRewriting(corruptSecondMember)),
+			rejects: []string{"AcceptRevision/MultiMember"},
+		},
+		{
 			mutant:  "accept reconcile compares only asset and first member digest",
 			harness: memoryHarness(newFirstMemberDigestAccept),
 			rejects: []string{"AcceptRevision/MultiMember"},
@@ -1181,6 +1204,11 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 		{
 			mutant:  "attach, get and list keep only the first proof",
 			harness: memoryHarness(newRepresentationRewriting(truncateRepresentationProofs)),
+			rejects: []string{"AttachRepresentation/MultiMember"},
+		},
+		{
+			mutant:  "attach, get and list rewrite the second proof",
+			harness: memoryHarness(newRepresentationRewriting(corruptSecondProof)),
 			rejects: []string{"AttachRepresentation/MultiMember"},
 		},
 		{
