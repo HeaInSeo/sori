@@ -264,7 +264,8 @@ func freshAttachAfterReopen(a *authority.Authority, s authority.Store, rev autho
 // reopen with every member intact, so a backend that restores only the first member
 // or proof is observable; retries with the members or proofs reordered, or with only
 // a proof role changed, still reconcile to the restored records, while a retry whose
-// second member or second proof changed conflicts and leaves them unchanged.
+// second member or second proof changed, or only a proof algorithm, conflicts and
+// leaves them unchanged.
 func reopenMultiMember(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -330,6 +331,13 @@ func reopenMultiMember(t *testing.T, h Harness) error {
 	}
 	if err := sameRepresentationIdentity(again, rep); err != nil {
 		return fmt.Errorf("role-only retry after reopen: %w", err)
+	}
+	// The proof algorithm is identity-bearing for the restored operation, as it is live.
+	algoOnly := attachReq("attach-multi", rev, formatOne, locatorA)
+	algoOnly.MemberProofs = twoMemberProofs(digestTwo)
+	algoOnly.MemberProofs[1].Proof.Algorithm = proofAlgo2
+	if _, err := a.AttachRepresentation(ctx, algoOnly); !errors.Is(err, authority.ErrAttachConflict) {
+		return fmt.Errorf("same op, only a proof algorithm changed after reopen: err = %v, want ErrAttachConflict", err)
 	}
 	changedProof := attachReq("attach-multi", rev, formatOne, locatorA)
 	changedProof.MemberProofs = twoMemberProofs(digestThree)

@@ -19,6 +19,7 @@ const (
 	digestTwo   = "conformance-digest-two"
 	digestThree = "conformance-digest-three"
 	proofAlgo   = "sha256"
+	proofAlgo2  = "conformance-other-algorithm"
 	memberKey   = "m1"
 	memberKey2  = "m2"
 	memberRole  = "primary"

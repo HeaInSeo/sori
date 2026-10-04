@@ -80,7 +80,7 @@ func attachIdempotentAndConflict(t *testing.T, h Harness) error {
 	// The proof algorithm is identity-bearing for the reused operation too: the same
 	// digest under another algorithm is a different relation, not a retry.
 	algoOnly := attachReq("attach-1", rev, formatOne)
-	algoOnly.MemberProofs[0].Proof.Algorithm = "conformance-other-algorithm"
+	algoOnly.MemberProofs[0].Proof.Algorithm = proofAlgo2
 	if _, err := a.AttachRepresentation(ctx, algoOnly); !errors.Is(err, authority.ErrAttachConflict) {
 		return fmt.Errorf("same op, same digest under another algorithm: err = %v, want ErrAttachConflict (reconcile before equivalence)", err)
 	}
@@ -230,7 +230,7 @@ func attachMemberEquivalence(t *testing.T, h Harness) error {
 		return fmt.Errorf("mismatched proofs: err = %v, want ErrMemberEquivalence", err)
 	}
 	otherAlgo := attachReq("attach-bad-algorithm", rev, formatOne)
-	otherAlgo.MemberProofs[0].Proof.Algorithm = "conformance-other-algorithm"
+	otherAlgo.MemberProofs[0].Proof.Algorithm = proofAlgo2
 	if _, err := a.AttachRepresentation(context.Background(), otherAlgo); !errors.Is(err, authority.ErrMemberEquivalence) {
 		return fmt.Errorf("same digest, different algorithm: err = %v, want ErrMemberEquivalence", err)
 	}
