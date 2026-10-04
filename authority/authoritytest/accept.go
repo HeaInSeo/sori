@@ -103,9 +103,10 @@ func acceptRequestConflict(t *testing.T, h Harness) error {
 }
 
 // fingerprintOnlyConflicts reuses req-1 (asset A, digestOne) with the same asset and
-// member digest but one other identity-bearing field changed: provenance, lineage or
-// a non-digest member field. The supplied fingerprint covers all of them, so a
-// reconcile on (AssetID, member digest) alone is caught.
+// member digest but one other identity-bearing field changed: provenance, lineage,
+// a non-digest member field or the member proof algorithm. The supplied fingerprint
+// covers all of them, so a reconcile on (AssetID, member digest) alone, or on every
+// manifest field except the proof algorithm, is caught.
 func fingerprintOnlyConflicts(a *authority.Authority) error {
 	builder := acceptReq("req-1", assetA, digestOne)
 	builder.Manifest.Provenance.BuilderIdentity = "builder@v2"
@@ -113,8 +114,11 @@ func fingerprintOnlyConflicts(a *authority.Authority) error {
 	lineage.Manifest.Provenance.InputLineage = []string{"input-a", "input-c"}
 	format := acceptReq("req-1", assetA, digestOne)
 	format.Manifest.Members[0].DataFormat = "bam"
+	algorithm := acceptReq("req-1", assetA, digestOne)
+	algorithm.Manifest.Members[0].Proof.Algorithm = proofAlgo2
 	for name, req := range map[string]authority.AcceptRequest{
 		"builder identity": builder, "input lineage": lineage, "member data format": format,
+		"member proof algorithm": algorithm,
 	} {
 		if _, err := a.AcceptRevision(context.Background(), req); !errors.Is(err, authority.ErrRequestConflict) {
 			return fmt.Errorf("same request, only %s changed: err = %v, want ErrRequestConflict", name, err)

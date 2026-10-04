@@ -452,6 +452,76 @@ func newAlgorithmBlindAttach(m *authority.MemoryStore) authority.Store {
 	return &looseAttachReconcile{MemoryStore: m, same: sameIgnoringAlgorithm, prior: map[authority.RequestID]authority.Representation{}}
 }
 
+// proofValues lists the (algorithm, digest) of each proof, sorted; the semantic key
+// is left out.
+func proofValues(members []authority.Member) []string {
+	out := make([]string, 0, len(members))
+	for _, mem := range members {
+		out = append(out, mem.Proof.Algorithm+"/"+mem.Proof.Digest)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// sameProofSet compares the unordered proof values only, not which key each proves.
+func sameProofSet(p authority.Representation, req authority.AttachRequest) bool {
+	return slices.Equal(proofValues(p.MemberProofs), proofValues(req.MemberProofs))
+}
+
+// newKeyBlindAttach reconciles a reused attach operation on the unordered proof set,
+// so proofs swapped between semantic keys are returned as the original relation.
+func newKeyBlindAttach(m *authority.MemoryStore) authority.Store {
+	return &looseAttachReconcile{MemoryStore: m, same: sameProofSet, prior: map[authority.RequestID]authority.Representation{}}
+}
+
+// keyBlindEquivalenceAttach checks member equivalence on the unordered proof set
+// only, so proofs swapped between semantic keys are taken as equivalent.
+type keyBlindEquivalenceAttach struct{ *authority.MemoryStore }
+
+func (s keyBlindEquivalenceAttach) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fp string, revMembers []authority.Member) (authority.Representation, error) {
+	if slices.Equal(proofValues(req.MemberProofs), proofValues(revMembers)) {
+		revMembers = req.MemberProofs
+	}
+	return s.MemoryStore.AttachRepresentation(ctx, req, fp, revMembers)
+}
+
+// algorithmBlindAccept reconciles a reused RequestID on the AssetID and the whole
+// manifest except the member proof algorithms: a hit is forwarded with the prior
+// fingerprint, so an algorithm-only change is returned as the original Revision.
+type algorithmBlindAccept struct {
+	*authority.MemoryStore
+	mu    sync.Mutex
+	prior map[authority.RequestID]authority.Revision
+}
+
+func newAlgorithmBlindAccept(m *authority.MemoryStore) authority.Store {
+	return &algorithmBlindAccept{MemoryStore: m, prior: map[authority.RequestID]authority.Revision{}}
+}
+
+func withoutAlgorithms(m authority.SemanticManifest) authority.SemanticManifest {
+	m.Members = slices.Clone(m.Members)
+	for i := range m.Members {
+		m.Members[i].Proof.Algorithm = ""
+	}
+	return m
+}
+
+func (s *algorithmBlindAccept) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fp string) (authority.Revision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.prior[req.RequestID]; ok && p.AssetID == req.AssetID &&
+		reflect.DeepEqual(withoutAlgorithms(p.Manifest), withoutAlgorithms(req.Manifest)) {
+		fp = p.Fingerprint
+	}
+	rev, err := s.MemoryStore.AcceptRevision(ctx, req, fp)
+	if err == nil {
+		if _, ok := s.prior[req.RequestID]; !ok {
+			s.prior[req.RequestID] = rev
+		}
+	}
+	return rev, err
+}
+
 // recordingStore is a correct Store that remembers the first committed Revision per
 // RequestID and Representation per AttachOperationID, standing in for the durable
 // records a backend rebuilds its reconcile indexes from on reopen.
@@ -1575,6 +1645,26 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 			mutant:  "restored attach index ignores the proof algorithm",
 			harness: restoredIndexHarness(restoreAlgorithmBlindAttach),
 			rejects: []string{"Reopen/MultiMember"},
+		},
+		{
+			mutant:  "accept reconcile ignores the proof algorithm",
+			harness: memoryHarness(newAlgorithmBlindAccept),
+			rejects: []string{"AcceptRevision/RequestConflict"},
+		},
+		{
+			mutant:  "restored accept record ignores the proof algorithm",
+			harness: reopenHarness(newAlgorithmBlindAccept),
+			rejects: []string{"Reopen/Revision"},
+		},
+		{
+			mutant:  "attach equivalence ignores which key each proof proves",
+			harness: memoryHarness(func(m *authority.MemoryStore) authority.Store { return keyBlindEquivalenceAttach{m} }),
+			rejects: []string{"AttachRepresentation/MultiMember"},
+		},
+		{
+			mutant:  "attach reconcile ignores which key each proof proves",
+			harness: memoryHarness(newKeyBlindAttach),
+			rejects: []string{"AttachRepresentation/MultiMember"},
 		},
 	}
 	for _, tc := range cases {

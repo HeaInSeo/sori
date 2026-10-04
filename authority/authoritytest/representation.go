@@ -248,7 +248,9 @@ func attachMemberEquivalence(t *testing.T, h Harness) error {
 // the opposite order to the Revision's members. A retry of the same operation with
 // the proofs reordered is the same relation; the same operation with only the second
 // proof changed conflicts; and a new operation whose second proof does not match the
-// Revision fails member equivalence.
+// Revision fails member equivalence. Swapping the two digests between the semantic
+// keys keeps the unordered proof set but proves the wrong content for each key: a new
+// operation fails member equivalence and the committed operation conflicts.
 func attachMultiMember(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -288,6 +290,16 @@ func attachMultiMember(t *testing.T, h Harness) error {
 	changed.AttachOperationID = "attach-multi-bad"
 	if _, err := a.AttachRepresentation(ctx, changed); !errors.Is(err, authority.ErrMemberEquivalence) {
 		return fmt.Errorf("new op, second proof mismatched: err = %v, want ErrMemberEquivalence", err)
+	}
+	swapped := attachReq("attach-multi-swap", rev, formatOne)
+	swapped.MemberProofs = twoMemberProofs(digestTwo)
+	swapped.MemberProofs[0].Proof.Digest, swapped.MemberProofs[1].Proof.Digest = digestTwo, digestOne
+	if _, err := a.AttachRepresentation(ctx, swapped); !errors.Is(err, authority.ErrMemberEquivalence) {
+		return fmt.Errorf("new op, digests swapped between semantic keys: err = %v, want ErrMemberEquivalence", err)
+	}
+	swapped.AttachOperationID = "attach-multi"
+	if _, err := a.AttachRepresentation(ctx, swapped); !errors.Is(err, authority.ErrAttachConflict) {
+		return fmt.Errorf("same op, digests swapped between semantic keys: err = %v, want ErrAttachConflict", err)
 	}
 	reps, err := listRepresentations(s, rev.RevisionID)
 	if err != nil {
