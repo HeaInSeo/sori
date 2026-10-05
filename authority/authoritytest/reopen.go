@@ -264,8 +264,8 @@ func freshAttachAfterReopen(a *authority.Authority, s authority.Store, rev autho
 // reopen with every member intact, so a backend that restores only the first member
 // or proof is observable; retries with the members or proofs reordered, or with only
 // a proof role changed, still reconcile to the restored records, while a retry whose
-// second member or second proof changed, or only a proof algorithm, conflicts and
-// leaves them unchanged.
+// second member or second proof changed, only a proof algorithm, or whose proofs are
+// swapped between semantic keys, conflicts and leaves them unchanged.
 func reopenMultiMember(t *testing.T, h Harness) error {
 	s := h.New(t)
 	a := authority.New(s)
@@ -343,6 +343,14 @@ func reopenMultiMember(t *testing.T, h Harness) error {
 	changedProof.MemberProofs = twoMemberProofs(digestThree)
 	if _, err := a.AttachRepresentation(ctx, changedProof); !errors.Is(err, authority.ErrAttachConflict) {
 		return fmt.Errorf("same op, only the second proof changed after reopen: err = %v, want ErrAttachConflict", err)
+	}
+	// Which key each proof proves is identity-bearing for the restored operation too:
+	// the same proof set swapped between the keys conflicts.
+	swapped := attachReq("attach-multi", rev, formatOne, locatorA)
+	swapped.MemberProofs = twoMemberProofs(digestTwo)
+	swapped.MemberProofs[0].Proof.Digest, swapped.MemberProofs[1].Proof.Digest = digestTwo, digestOne
+	if _, err := a.AttachRepresentation(ctx, swapped); !errors.Is(err, authority.ErrAttachConflict) {
+		return fmt.Errorf("same op, proofs swapped between semantic keys after reopen: err = %v, want ErrAttachConflict", err)
 	}
 	reps, err := listRepresentations(s, rev.RevisionID)
 	if err != nil {

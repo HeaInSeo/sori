@@ -608,6 +608,16 @@ func restoreAlgorithmBlindAttach(m *authority.MemoryStore, _ map[authority.Reque
 	return s
 }
 
+// restoreKeyBlindAttach rebuilds the attach operation index on the unordered proof
+// set only, dropping which semantic key each proof proves.
+func restoreKeyBlindAttach(m *authority.MemoryStore, _ map[authority.RequestID]authority.Revision, reps map[authority.RequestID]authority.Representation) authority.Store {
+	s := newKeyBlindAttach(m).(*looseAttachReconcile)
+	for op, rep := range reps {
+		s.prior[op] = rep
+	}
+	return s
+}
+
 // restoreRoleStrictAttach rebuilds the attach operation index with the proof roles.
 func restoreRoleStrictAttach(m *authority.MemoryStore, _ map[authority.RequestID]authority.Revision, reps map[authority.RequestID]authority.Representation) authority.Store {
 	s := newRoleStrictAttach(m).(*roleStrictAttach)
@@ -1644,6 +1654,11 @@ func TestSuiteRejectsBrokenStores(t *testing.T) {
 		{
 			mutant:  "restored attach index ignores the proof algorithm",
 			harness: restoredIndexHarness(restoreAlgorithmBlindAttach),
+			rejects: []string{"Reopen/MultiMember"},
+		},
+		{
+			mutant:  "restored attach index ignores which key each proof proves",
+			harness: restoredIndexHarness(restoreKeyBlindAttach),
 			rejects: []string{"Reopen/MultiMember"},
 		},
 		{
