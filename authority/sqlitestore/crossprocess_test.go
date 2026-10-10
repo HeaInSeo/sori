@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -121,6 +122,20 @@ func TestChildProcess(t *testing.T) {
 	a := authority.New(s)
 	args := strings.Split(os.Getenv(envArgs), ",")
 	res := childResult{PID: os.Getpid()}
+	// kill never returns: block until the SIGKILL lands so nothing after the hook runs.
+	kill := func() { _ = syscall.Kill(os.Getpid(), syscall.SIGKILL); time.Sleep(time.Hour) }
+	switch op {
+	case "accept-kill-before-commit", "accept-kill-after-commit": // request, digest
+		if op == "accept-kill-before-commit" {
+			s.SetCommitHooksForTest(func() error { kill(); return nil }, nil)
+		} else {
+			s.SetCommitHooksForTest(nil, kill)
+		}
+		_, err = a.AcceptRevision(ctx, authority.AcceptRequest{
+			RequestID: authority.RequestID(args[0]), AssetID: xpAsset, Manifest: xpManifest(args[1]),
+		})
+		t.Fatalf("child survived %s: %v", op, err)
+	}
 	switch op {
 	case "accept": // request, digest
 		res.Revision, err = a.AcceptRevision(ctx, authority.AcceptRequest{
@@ -306,6 +321,78 @@ func TestCrossProcessConcurrentWriters(t *testing.T) {
 	reps, err := s.ListRepresentations(context.Background(), base)
 	if err != nil || len(reps) != 1 || !reflect.DeepEqual(reps[0], winner.Representation) {
 		t.Fatalf("stored representations %+v, %v; want only the winner %+v", reps, err, winner.Representation)
+	}
+}
+
+// runKilledChild runs a child that SIGKILLs itself at a commit boundary.
+func runKilledChild(t *testing.T, db, op string, args ...string) {
+	t.Helper()
+	cmd, out := startChild(t, db, "", op, args...)
+	err := cmd.Wait()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+		t.Fatalf("child %s: want death by SIGKILL, got %v\n%s", op, err, out)
+	}
+	t.Logf("child pid=%d killed (%s) store=%s", cmd.Process.Pid, op, db)
+}
+
+// E018: a process killed after its writes but before COMMIT leaves no acceptance; a
+// process killed after COMMIT but before the ACK leaves exactly the complete one, and
+// the same request retried later gets it back; an in-process failure at the commit
+// boundary rolls back every write. Caller mutation of inputs/results is covered by the
+// DeepCopy cases of the conformance suite.
+func TestCommitBoundaryFaults(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "authority.db")
+	ctx := context.Background()
+
+	runKilledChild(t, db, "accept-kill-before-commit", "e018-a", "d1")
+	s := open(t, db)
+	if _, ok, err := s.GetRevision(ctx, "sori-rev-1"); err != nil || ok {
+		t.Fatalf("killed-before-commit acceptance is visible: ok=%v err=%v", ok, err)
+	}
+	a := authority.New(s)
+	rev, err := a.AcceptRevision(ctx, authority.AcceptRequest{RequestID: "e018-a", AssetID: xpAsset, Manifest: xpManifest("d1")})
+	if err != nil || rev.RevisionID != "sori-rev-1" {
+		t.Fatalf("retry after killed-before-commit = %+v, %v; want a fresh sori-rev-1", rev, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runKilledChild(t, db, "accept-kill-after-commit", "e018-b", "d1")
+	s = open(t, db)
+	a = authority.New(s)
+	stored, ok, err := s.GetRevision(ctx, "sori-rev-2")
+	if err != nil || !ok || stored.RequestID != "e018-b" {
+		t.Fatalf("killed-after-commit acceptance missing: %+v ok=%v err=%v", stored, ok, err)
+	}
+	retry, err := a.AcceptRevision(ctx, authority.AcceptRequest{RequestID: "e018-b", AssetID: xpAsset, Manifest: xpManifest("d1")})
+	if err != nil || !reflect.DeepEqual(retry, stored) {
+		t.Fatalf("retry after lost ACK = %+v, %v; want the committed %+v", retry, err, stored)
+	}
+
+	boom := errors.New("injected commit-boundary failure")
+	s.SetCommitHooksForTest(func() error { return boom }, nil)
+	if _, err := a.BindAlias(ctx, authority.BindRequest{BindRequestID: "e018-bind", Alias: xpAlias, AssetID: xpAsset, RevisionID: rev.RevisionID}); !errors.Is(err, boom) {
+		t.Fatalf("bind under failure: err = %v", err)
+	}
+	if _, err := a.AttachRepresentation(ctx, xpAttach("e018-attach", rev.RevisionID, "fmt-a")); !errors.Is(err, boom) {
+		t.Fatalf("attach under failure: err = %v", err)
+	}
+	s.SetCommitHooksForTest(nil, nil)
+	if hist, err := s.AliasHistory(ctx, xpAlias); err != nil || len(hist) != 0 {
+		t.Fatalf("rolled-back bind is visible: %+v, %v", hist, err)
+	}
+	if reps, err := s.ListRepresentations(ctx, rev.RevisionID); err != nil || len(reps) != 0 {
+		t.Fatalf("rolled-back attach is visible: %+v, %v", reps, err)
+	}
+	ev, err := a.BindAlias(ctx, authority.BindRequest{BindRequestID: "e018-bind", Alias: xpAlias, AssetID: xpAsset, RevisionID: rev.RevisionID})
+	if err != nil || ev.Sequence != 1 {
+		t.Fatalf("bind retry after rollback = %+v, %v; want sequence 1", ev, err)
+	}
+	rep, err := a.AttachRepresentation(ctx, xpAttach("e018-attach", rev.RevisionID, "fmt-a"))
+	if err != nil || rep.RepresentationID != "sori-rep-1" {
+		t.Fatalf("attach retry after rollback = %+v, %v; want sori-rep-1", rep, err)
 	}
 }
 

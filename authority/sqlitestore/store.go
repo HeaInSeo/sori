@@ -65,6 +65,12 @@ type Store struct {
 	db   *sql.DB
 	path string
 	now  func() time.Time
+
+	// beforeCommit, when non-nil, runs after a mutation's writes and just before its
+	// COMMIT; a non-nil error rolls the whole transaction back. afterCommit runs just
+	// after a successful COMMIT, before the result is returned. Test-only fault hooks.
+	beforeCommit func() error
+	afterCommit  func()
 }
 
 var _ authority.Store = (*Store)(nil)
@@ -129,8 +135,17 @@ func (s *Store) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
 		_ = tx.Rollback()
 		return err
 	}
+	if s.beforeCommit != nil {
+		if err := s.beforeCommit(); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("sqlitestore: commit: %w", err)
+	}
+	if s.afterCommit != nil {
+		s.afterCommit()
 	}
 	return nil
 }
