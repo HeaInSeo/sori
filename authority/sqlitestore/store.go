@@ -83,7 +83,7 @@ func Open(path string) (*Store, error) {
 	q.Add("_pragma", "foreign_keys(ON)")
 	q.Add("_pragma", "busy_timeout(10000)")
 	q.Set("_txlock", "immediate")
-	db, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	db, err := sql.Open("sqlite", fileURI(path)+"?"+q.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("sqlitestore: open %s: %w", path, err)
 	}
@@ -97,25 +97,49 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+// fileURI returns the SQLite "file:" URI naming exactly path. The path is
+// percent-encoded so that URI-significant characters valid in file names ('?',
+// '#', '%') stay part of the name instead of starting the query, a fragment, or
+// an escape; query parameters are appended by the caller.
+func fileURI(path string) string {
+	return "file:" + (&url.URL{Path: path}).EscapedPath()
+}
+
 // Path returns the database file path.
 func (s *Store) Path() string { return s.path }
 
 // Close closes the database. A later Open of the same path sees every committed write.
 func (s *Store) Close() error { return s.db.Close() }
 
+// init checks the stored schema version before touching the schema, and runs this
+// version's DDL only for a genuinely empty database. A database written by any
+// other version, or one with objects but no version, is refused with
+// ErrSchemaVersion and left unchanged.
 func (s *Store) init(ctx context.Context) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, schema); err != nil {
-			return fmt.Errorf("sqlitestore: create schema: %w", err)
+		var objects, hasMeta int
+		err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(type = 'table' AND name = 'meta'), 0)
+			FROM sqlite_schema WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\'`).Scan(&objects, &hasMeta)
+		if err != nil {
+			return fmt.Errorf("sqlitestore: probe schema: %w", err)
 		}
-		var v string
-		err := tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&v)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
+		if objects == 0 {
+			if _, err := tx.ExecContext(ctx, schema); err != nil {
+				return fmt.Errorf("sqlitestore: create schema: %w", err)
+			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, fmt.Sprint(SchemaVersion))
 			return err
+		}
+		if hasMeta == 0 {
+			return fmt.Errorf("%w: database has no schema version", ErrSchemaVersion)
+		}
+		var v string
+		err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&v)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("%w: database has no schema version", ErrSchemaVersion)
 		case err != nil:
-			return err
+			return fmt.Errorf("sqlitestore: read schema version: %w", err)
 		case v != fmt.Sprint(SchemaVersion):
 			return fmt.Errorf("%w: %s (want %d)", ErrSchemaVersion, v, SchemaVersion)
 		}
