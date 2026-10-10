@@ -92,8 +92,7 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db, path: path, now: func() time.Time { return time.Now().UTC() }}
 	if err := s.init(context.Background()); err != nil {
-		db.Close()
-		return nil, err
+		return nil, errors.Join(err, db.Close())
 	}
 	return s, nil
 }
@@ -156,6 +155,27 @@ func nextSeq(ctx context.Context, tx *sql.Tx, table string) (int, error) {
 	return n, err
 }
 
+// queryRower is satisfied by both *sql.DB and *sql.Tx.
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// lookup decodes the record column of the single row query selects, reporting
+// whether a row exists.
+func lookup[T any](ctx context.Context, q queryRower, query string, args ...any) (T, bool, error) {
+	var zero T
+	var raw string
+	err := q.QueryRowContext(ctx, query, args...).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return zero, false, nil
+	}
+	if err != nil {
+		return zero, false, err
+	}
+	v, err := decode[T](raw)
+	return v, err == nil, err
+}
+
 func decode[T any](raw string) (T, error) {
 	var v T
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
@@ -176,21 +196,16 @@ func encode(v any) (string, error) {
 func (s *Store) AcceptRevision(ctx context.Context, req authority.AcceptRequest, fingerprint string) (authority.Revision, error) {
 	var out authority.Revision
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		var raw string
-		err := tx.QueryRowContext(ctx, `SELECT record FROM revisions WHERE request_id = ?`, string(req.RequestID)).Scan(&raw)
-		if err == nil {
-			existing, err := decode[authority.Revision](raw)
-			if err != nil {
-				return err
-			}
+		existing, found, err := lookup[authority.Revision](ctx, tx, `SELECT record FROM revisions WHERE request_id = ?`, string(req.RequestID))
+		if err != nil {
+			return err
+		}
+		if found {
 			if existing.AssetID == req.AssetID && existing.Fingerprint == fingerprint {
 				out = existing // idempotent reconcile: same request, same content
 				return nil
 			}
 			return fmt.Errorf("%w: request %q", authority.ErrRequestConflict, req.RequestID)
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
 		}
 		seq, err := nextSeq(ctx, tx, "revisions")
 		if err != nil {
@@ -228,31 +243,25 @@ func (s *Store) AcceptRevision(ctx context.Context, req authority.AcceptRequest,
 func (s *Store) BindAlias(ctx context.Context, req authority.BindRequest) (authority.BindEvent, error) {
 	var out authority.BindEvent
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		var raw string
-		err := tx.QueryRowContext(ctx, `SELECT record FROM bind_events WHERE bind_request_id = ?`, string(req.BindRequestID)).Scan(&raw)
-		if err == nil {
-			prior, err := decode[authority.BindEvent](raw)
-			if err != nil {
-				return err
-			}
+		prior, found, err := lookup[authority.BindEvent](ctx, tx, `SELECT record FROM bind_events WHERE bind_request_id = ?`, string(req.BindRequestID))
+		if err != nil {
+			return err
+		}
+		if found {
 			if prior.Alias == req.Alias && prior.AssetID == req.AssetID && prior.RevisionID == req.RevisionID {
 				out = prior // idempotent: same operation id, same binding, no dup
 				return nil
 			}
 			return fmt.Errorf("%w: bind request %q", authority.ErrAliasBindingConflict, req.BindRequestID)
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		var assetID string
-		err = tx.QueryRowContext(ctx, `SELECT asset_id FROM revisions WHERE revision_id = ?`, string(req.RevisionID)).Scan(&assetID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: %q", authority.ErrRevisionNotFound, req.RevisionID)
-		}
+		target, found, err := lookup[authority.Revision](ctx, tx, `SELECT record FROM revisions WHERE revision_id = ?`, string(req.RevisionID))
 		if err != nil {
 			return err
 		}
-		if authority.AssetID(assetID) != req.AssetID {
+		if !found {
+			return fmt.Errorf("%w: %q", authority.ErrRevisionNotFound, req.RevisionID)
+		}
+		if target.AssetID != req.AssetID {
 			return fmt.Errorf("%w: revision %q belongs to a different asset", authority.ErrAliasBindingConflict, req.RevisionID)
 		}
 		seq, err := nextSeq(ctx, tx, "bind_events")
@@ -287,19 +296,7 @@ func (s *Store) BindAlias(ctx context.Context, req authority.BindRequest) (autho
 
 // GetRevision implements authority.Store.
 func (s *Store) GetRevision(ctx context.Context, id authority.RevisionID) (authority.Revision, bool, error) {
-	var raw string
-	err := s.db.QueryRowContext(ctx, `SELECT record FROM revisions WHERE revision_id = ?`, string(id)).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return authority.Revision{}, false, nil
-	}
-	if err != nil {
-		return authority.Revision{}, false, err
-	}
-	rev, err := decode[authority.Revision](raw)
-	if err != nil {
-		return authority.Revision{}, false, err
-	}
-	return rev, true, nil
+	return lookup[authority.Revision](ctx, s.db, `SELECT record FROM revisions WHERE revision_id = ?`, string(id))
 }
 
 // AliasHistory implements authority.Store.
@@ -329,21 +326,16 @@ func (s *Store) AttachRepresentation(ctx context.Context, req authority.AttachRe
 	var out authority.Representation
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		// Reconcile the attach operation id FIRST, before member equivalence.
-		var raw string
-		err := tx.QueryRowContext(ctx, `SELECT record FROM representations WHERE attach_op_id = ?`, string(req.AttachOperationID)).Scan(&raw)
-		if err == nil {
-			existing, err := decode[authority.Representation](raw)
-			if err != nil {
-				return err
-			}
+		existing, found, err := lookup[authority.Representation](ctx, tx, `SELECT record FROM representations WHERE attach_op_id = ?`, string(req.AttachOperationID))
+		if err != nil {
+			return err
+		}
+		if found {
 			if existing.RevisionID == req.RevisionID && existing.Fingerprint == fingerprint {
 				out = existing // idempotent: same op, same relation
 				return nil
 			}
 			return fmt.Errorf("%w: attach operation %q", authority.ErrAttachConflict, req.AttachOperationID)
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
 		}
 		if !authority.MembersEquivalent(req.MemberProofs, revMembers) {
 			return authority.ErrMemberEquivalence
@@ -389,17 +381,12 @@ func (s *Store) AttachRepresentation(ctx context.Context, req authority.AttachRe
 // Representation; its identity, fingerprint and Revision are never changed.
 func (s *Store) updateRepresentation(ctx context.Context, id authority.RepresentationID, mutate func(*authority.Representation)) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
-		var raw string
-		err := tx.QueryRowContext(ctx, `SELECT record FROM representations WHERE representation_id = ?`, string(id)).Scan(&raw)
-		if errors.Is(err, sql.ErrNoRows) {
+		rep, found, err := lookup[authority.Representation](ctx, tx, `SELECT record FROM representations WHERE representation_id = ?`, string(id))
+		if err != nil {
+			return err
+		}
+		if !found {
 			return fmt.Errorf("%w: %q", authority.ErrRepresentationNotFound, id)
-		}
-		if err != nil {
-			return err
-		}
-		rep, err := decode[authority.Representation](raw)
-		if err != nil {
-			return err
 		}
 		mutate(&rep)
 		rec, err := encode(rep)
@@ -423,19 +410,7 @@ func (s *Store) SetRepresentationHealth(ctx context.Context, id authority.Repres
 
 // GetRepresentation implements authority.Store.
 func (s *Store) GetRepresentation(ctx context.Context, id authority.RepresentationID) (authority.Representation, bool, error) {
-	var raw string
-	err := s.db.QueryRowContext(ctx, `SELECT record FROM representations WHERE representation_id = ?`, string(id)).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return authority.Representation{}, false, nil
-	}
-	if err != nil {
-		return authority.Representation{}, false, err
-	}
-	rep, err := decode[authority.Representation](raw)
-	if err != nil {
-		return authority.Representation{}, false, err
-	}
-	return rep, true, nil
+	return lookup[authority.Representation](ctx, s.db, `SELECT record FROM representations WHERE representation_id = ?`, string(id))
 }
 
 // ListRepresentations implements authority.Store.
