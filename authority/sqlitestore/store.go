@@ -239,6 +239,21 @@ func (s *Store) AcceptRevision(ctx context.Context, req authority.AcceptRequest,
 	return out, nil
 }
 
+// checkBindTarget requires the bound Revision to exist and belong to the bind's asset.
+func checkBindTarget(ctx context.Context, tx *sql.Tx, req authority.BindRequest) error {
+	target, found, err := lookup[authority.Revision](ctx, tx, `SELECT record FROM revisions WHERE revision_id = ?`, string(req.RevisionID))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: %q", authority.ErrRevisionNotFound, req.RevisionID)
+	}
+	if target.AssetID != req.AssetID {
+		return fmt.Errorf("%w: revision %q belongs to a different asset", authority.ErrAliasBindingConflict, req.RevisionID)
+	}
+	return nil
+}
+
 // BindAlias implements authority.Store.
 func (s *Store) BindAlias(ctx context.Context, req authority.BindRequest) (authority.BindEvent, error) {
 	var out authority.BindEvent
@@ -254,15 +269,8 @@ func (s *Store) BindAlias(ctx context.Context, req authority.BindRequest) (autho
 			}
 			return fmt.Errorf("%w: bind request %q", authority.ErrAliasBindingConflict, req.BindRequestID)
 		}
-		target, found, err := lookup[authority.Revision](ctx, tx, `SELECT record FROM revisions WHERE revision_id = ?`, string(req.RevisionID))
-		if err != nil {
+		if err := checkBindTarget(ctx, tx, req); err != nil {
 			return err
-		}
-		if !found {
-			return fmt.Errorf("%w: %q", authority.ErrRevisionNotFound, req.RevisionID)
-		}
-		if target.AssetID != req.AssetID {
-			return fmt.Errorf("%w: revision %q belongs to a different asset", authority.ErrAliasBindingConflict, req.RevisionID)
 		}
 		seq, err := nextSeq(ctx, tx, "bind_events")
 		if err != nil {
@@ -322,7 +330,9 @@ func (s *Store) AliasHistory(ctx context.Context, alias string) ([]authority.Bin
 }
 
 // AttachRepresentation implements authority.Store.
-func (s *Store) AttachRepresentation(ctx context.Context, req authority.AttachRequest, fingerprint string, revMembers []authority.Member) (authority.Representation, error) {
+func (s *Store) AttachRepresentation(
+	ctx context.Context, req authority.AttachRequest, fingerprint string, revMembers []authority.Member,
+) (authority.Representation, error) {
 	var out authority.Representation
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		// Reconcile the attach operation id FIRST, before member equivalence.
