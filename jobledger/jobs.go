@@ -388,6 +388,11 @@ func (s *Store) Advance(ctx context.Context, g Guard, jobID string, expectedVers
 		if !edgeAllowed(job.Phase, tr.Phase) {
 			return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, job.Phase, tr.Phase)
 		}
+		// A Job with cancel intent is never resumed, including from HOLD, where
+		// RequestCancel keeps the phase.
+		if job.CancelRequested && (tr.Phase == PhaseRunning || tr.Phase == PhaseQueued) {
+			return fmt.Errorf("%w: job %s has cancel intent", ErrInvalidTransition, jobID)
+		}
 		if tr.RevisionID != "" {
 			if job.RevisionID != "" && job.RevisionID != tr.RevisionID {
 				return fmt.Errorf("%w: job %s already records revision %s", ErrDescriptorConflict, jobID, job.RevisionID)

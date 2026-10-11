@@ -318,22 +318,25 @@ func appendLedger(ctx context.Context, tx *sql.Tx, kind, subject string, record 
 	if err != nil {
 		return fmt.Errorf("jobledger: encode ledger record: %w", err)
 	}
-	_, prev, err := ledgerHead(ctx, tx)
+	head, prev, err := ledgerHead(ctx, tx)
 	if err != nil {
 		return err
 	}
-	digest := chainDigest(prev, kind, subject, string(raw))
-	_, err = tx.ExecContext(ctx, `INSERT INTO ledger (kind, subject, record, digest) VALUES (?, ?, ?, ?)`,
-		kind, subject, string(raw), digest)
+	seq := head + 1
+	digest := chainDigest(seq, prev, kind, subject, string(raw))
+	_, err = tx.ExecContext(ctx, `INSERT INTO ledger (seq, kind, subject, record, digest) VALUES (?, ?, ?, ?, ?)`,
+		seq, kind, subject, string(raw), digest)
 	if err != nil {
 		return fmt.Errorf("jobledger: append ledger: %w", err)
 	}
 	return nil
 }
 
-func chainDigest(prev, kind, subject, record string) string {
+// chainDigest covers the row's own sequence number, so renumbering a row breaks
+// the chain even when the relative order is kept.
+func chainDigest(seq int64, prev, kind, subject, record string) string {
 	h := sha256.New()
-	for _, part := range []string{prev, kind, subject, record} {
+	for _, part := range []string{strconv.FormatInt(seq, 10), prev, kind, subject, record} {
 		h.Write([]byte(strconv.Itoa(len(part))))
 		h.Write([]byte{':'})
 		h.Write([]byte(part))
@@ -361,24 +364,28 @@ func (s *Store) LedgerHead(ctx context.Context) (seq int64, digest string, err e
 }
 
 // VerifyLedger recomputes the whole chain and returns ErrLedgerIntegrity at the
-// first row whose digest does not follow from its predecessor.
+// first row that is not the next sequence number or whose digest does not follow
+// from its predecessor.
 func (s *Store) VerifyLedger(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `SELECT seq, kind, subject, record, digest FROM ledger ORDER BY seq`)
 	if err != nil {
 		return fmt.Errorf("jobledger: read ledger: %w", err)
 	}
 	defer rows.Close()
-	prev := ""
+	prev, want := "", int64(1)
 	for rows.Next() {
 		var seq int64
 		var kind, subject, record, digest string
 		if err := rows.Scan(&seq, &kind, &subject, &record, &digest); err != nil {
 			return fmt.Errorf("jobledger: read ledger: %w", err)
 		}
-		if chainDigest(prev, kind, subject, record) != digest {
+		if seq != want {
+			return fmt.Errorf("%w: ledger seq %d, want %d", ErrLedgerIntegrity, seq, want)
+		}
+		if chainDigest(seq, prev, kind, subject, record) != digest {
 			return fmt.Errorf("%w: ledger seq %d", ErrLedgerIntegrity, seq)
 		}
-		prev = digest
+		prev, want = digest, want+1
 	}
 	return rows.Err()
 }

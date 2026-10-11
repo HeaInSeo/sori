@@ -179,6 +179,33 @@ func TestCancelAndTerminalReceipt(t *testing.T) {
 	}
 }
 
+// Cancel intent recorded while a Job is in HOLD keeps the phase, but the Job can
+// no longer be resumed; it can still be ended.
+func TestCancelInHoldIsNotResumed(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	ns := mustNamespace(t, s, guard1)
+	d, _ := s.Accept(ctx, guard1, req(ns, "k-hold", meaningA))
+	j, err := s.Advance(ctx, guard1, d.Job.JobID, 1, jobledger.Transition{Phase: jobledger.PhaseHold})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.RequestCancel(ctx, guard1, j.JobID, "bob")
+	if err != nil || c.Phase != jobledger.PhaseHold || !c.CancelRequested {
+		t.Fatalf("cancel in hold = %+v, %v", c, err)
+	}
+	if _, err := s.Advance(ctx, guard1, c.JobID, c.RecordVersion, jobledger.Transition{Phase: jobledger.PhaseRunning}); !errors.Is(err, jobledger.ErrInvalidTransition) {
+		t.Fatalf("resume from hold with cancel intent: %v, want ErrInvalidTransition", err)
+	}
+	if got, _, _ := s.GetJob(ctx, c.JobID); !reflect.DeepEqual(got, c) {
+		t.Fatalf("refused resume changed the job: %+v", got)
+	}
+	done, err := s.Advance(ctx, guard1, c.JobID, c.RecordVersion, jobledger.Transition{Phase: jobledger.PhaseCancelled})
+	if err != nil || done.Terminal == nil {
+		t.Fatalf("cancel from hold = %+v, %v", done, err)
+	}
+}
+
 func TestPolicyHistory(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
@@ -236,20 +263,28 @@ func TestPreparedAndBinding(t *testing.T) {
 }
 
 func TestLedgerTamperDetected(t *testing.T) {
-	s, _ := newStore(t)
 	ctx := context.Background()
-	ns := mustNamespace(t, s, guard1)
-	if _, err := s.Accept(ctx, guard1, req(ns, "k1", meaningA)); err != nil {
-		t.Fatal(err)
+	tampers := map[string]string{
+		"edited record":     `UPDATE ledger SET record = '{}' WHERE kind = 'namespace'`,
+		"renumbered head":   `UPDATE ledger SET seq = 500 WHERE seq = (SELECT MAX(seq) FROM ledger)`,
+		"renumbered middle": `UPDATE ledger SET seq = seq + 1000 WHERE seq >= 2`,
+		"dropped row":       `DELETE FROM ledger WHERE seq = 2`,
 	}
-	if err := s.VerifyLedger(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.ExecForTest(`UPDATE ledger SET record = '{}' WHERE kind = 'namespace'`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.VerifyLedger(ctx); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
-		t.Fatalf("tampered ledger: %v, want ErrLedgerIntegrity", err)
+	for name, stmt := range tampers {
+		s, _ := newStore(t)
+		ns := mustNamespace(t, s, guard1)
+		if _, err := s.Accept(ctx, guard1, req(ns, "k1", meaningA)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.VerifyLedger(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ExecForTest(stmt); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := s.VerifyLedger(ctx); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
+			t.Errorf("%s: %v, want ErrLedgerIntegrity", name, err)
+		}
 	}
 }
 
