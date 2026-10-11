@@ -148,6 +148,14 @@ func membersEquivalent(repMembers, revMembers []Member) bool {
 	return matched == len(want)
 }
 
+// MembersEquivalent reports whether an attach request's member proofs are equivalent
+// to the accepted Revision's members, with the same rule and preconditions as the
+// reference MemoryStore. Durable Store adapters outside this package use it so the
+// member-equivalence semantics are defined once.
+func MembersEquivalent(repMembers, revMembers []Member) bool {
+	return membersEquivalent(repMembers, revMembers)
+}
+
 // computeRepresentationFingerprint canonicalizes the representation's identity-bearing
 // facts (physical format + member-equivalence proof set) into a stable internal
 // comparison fingerprint. Locators/health are deliberately excluded, so a locator/tag
