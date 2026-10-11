@@ -1,11 +1,13 @@
 package sqlitestore_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/HeaInSeo/sori/authority/sqlitestore"
 )
@@ -21,6 +23,64 @@ func TestOpenRejectsTransientPaths(t *testing.T) {
 			}
 			t.Fatalf("Open(%q): err = %v, want ErrTransientPath", path, err)
 		}
+	}
+}
+
+// While another connection holds the write lock, Open must give up within its busy
+// budget: no attempt may start after the budget is spent or wait past it (PR #35
+// review). The budget is shortened here; the store's busy timeout stays 10 s.
+func TestOpenReturnsWithinBusyBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authority.db")
+	s, err := sqlitestore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	holder, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	ctx := context.Background()
+	conn, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, `ROLLBACK`) }()
+
+	const budget = 300 * time.Millisecond
+	defer sqlitestore.SetOpenBusyBudgetForTest(budget)()
+	start := time.Now()
+	s, err = sqlitestore.Open(path)
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("Open succeeded while another connection held the write lock")
+	}
+	if elapsed > budget+2*time.Second {
+		t.Fatalf("Open took %v with a %v budget: %v", elapsed, budget, err)
+	}
+}
+
+// An attempt made with less than the full budget left runs with a shorter busy
+// timeout; once Open succeeds the store's connection is back to the full 10 s.
+func TestOpenRestoresFullBusyTimeout(t *testing.T) {
+	defer sqlitestore.SetOpenBusyBudgetForTest(2 * time.Second)()
+	s, err := sqlitestore.Open(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ms, err := s.BusyTimeoutForTest()
+	if err != nil || ms != 10000 {
+		t.Fatalf("busy_timeout = %d, %v; want 10000", ms, err)
 	}
 }
 
