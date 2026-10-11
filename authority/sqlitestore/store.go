@@ -15,11 +15,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"time"
 
-	"github.com/HeaInSeo/sori/authority"
+	"modernc.org/sqlite" // also registers the "sqlite" database/sql driver
+	sqlite3 "modernc.org/sqlite/lib"
 
-	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
+	"github.com/HeaInSeo/sori/authority"
 )
 
 // SchemaVersion is the on-disk schema this adapter reads and writes.
@@ -75,13 +77,75 @@ type Store struct {
 
 var _ authority.Store = (*Store)(nil)
 
+// ErrTransientPath is returned by Open for a path SQLite would treat as an
+// in-memory or private temporary database, which loses every acceptance when the
+// connection closes.
+var ErrTransientPath = errors.New("sqlitestore: path names a non-durable database")
+
+// busyTimeout is how long a store connection waits for another process's lock.
+const busyTimeout = 10 * time.Second
+
+// openBusyBudget bounds how long Open spends on SQLITE_BUSY while opening and
+// initializing the database. It equals busyTimeout; tests shorten it.
+var openBusyBudget = busyTimeout
+
+// openAfterConnect, when non-nil, runs after an attempt's connection has applied
+// its pragmas and before init. Test-only fault hook.
+var openAfterConnect func()
+
+// errOpenBudgetSpent reports that an open attempt reached Open's deadline between
+// two blocking steps.
+var errOpenBudgetSpent = errors.New("sqlitestore: open busy budget spent")
+
 // Open opens (creating if needed) the store at path and checks its schema version.
+//
+// While another process is converting a new database file to WAL, SQLite can
+// return SQLITE_BUSY without consulting the busy handler. Open therefore retries
+// the whole open-and-init step on SQLITE_BUSY within openBusyBudget; any other
+// error is returned at once. All attempts share one deadline: no attempt starts
+// after it, and within an attempt the busy timeout is recomputed from it before
+// each blocking step, so Open returns within openBusyBudget plus one retry pause.
 func Open(path string) (*Store, error) {
+	if path == "" || path == ":memory:" {
+		return nil, fmt.Errorf("%w: %q", ErrTransientPath, path)
+	}
+	deadline := time.Now().Add(openBusyBudget)
+	var err error
+	for time.Until(deadline) > 0 {
+		var s *Store
+		if s, err = open(path, deadline); err == nil || !isBusy(err) {
+			return s, err
+		}
+		time.Sleep(min(10*time.Millisecond, time.Until(deadline)))
+	}
+	return nil, err
+}
+
+func isBusy(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_BUSY
+}
+
+// open makes one open-and-init attempt that ends by deadline. SQLite's busy timeout
+// applies to each lock wait, not to the connection, so the timeout is recomputed
+// from deadline before each blocking step: connecting (which converts a new
+// database to WAL) and init's BEGIN IMMEDIATE. init's context also carries
+// deadline, but that does not end a busy wait already in progress; the recomputed
+// timeout does. After init succeeds, the connection's busy timeout is set back to
+// busyTimeout for the store's own transactions.
+func open(path string, deadline time.Time) (*Store, error) {
+	left := time.Until(deadline)
+	if left <= 0 {
+		return nil, errOpenBudgetSpent
+	}
 	q := url.Values{}
+	// The driver applies _busy_timeout before any _pragma, so a process that loses
+	// the race to convert a new database to WAL waits instead of failing with
+	// SQLITE_BUSY.
+	q.Set("_busy_timeout", strconv.FormatInt(max(left.Milliseconds(), 1), 10))
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "synchronous(FULL)")
 	q.Add("_pragma", "foreign_keys(ON)")
-	q.Add("_pragma", "busy_timeout(10000)")
 	q.Set("_txlock", "immediate")
 	db, err := sql.Open("sqlite", fileURI(path)+"?"+q.Encode())
 	if err != nil {
@@ -89,12 +153,39 @@ func Open(path string) (*Store, error) {
 	}
 	// One connection per process: writes in this process are serialized here, and
 	// BEGIN IMMEDIATE plus busy_timeout serializes them against other processes.
+	// The pool keeps that connection, so each busy timeout set below stays in force.
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return nil, errors.Join(fmt.Errorf("sqlitestore: open %s: %w", path, err), db.Close())
+	}
+	if openAfterConnect != nil {
+		openAfterConnect()
+	}
+	if err := setBusyTimeout(ctx, db, time.Until(deadline)); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
 	s := &Store{db: db, path: path, now: func() time.Time { return time.Now().UTC() }}
-	if err := s.init(context.Background()); err != nil {
+	if err := s.init(ctx); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	if err := setBusyTimeout(context.Background(), db, busyTimeout); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
 	return s, nil
+}
+
+// setBusyTimeout sets the connection's busy timeout to d, refusing a spent d.
+func setBusyTimeout(ctx context.Context, db *sql.DB, d time.Duration) error {
+	if d <= 0 {
+		return errOpenBudgetSpent
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", max(d.Milliseconds(), 1))); err != nil {
+		return fmt.Errorf("sqlitestore: set busy timeout: %w", err)
+	}
+	return nil
 }
 
 // fileURI returns the SQLite "file:" URI naming exactly path. The path is
