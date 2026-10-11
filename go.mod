@@ -1,6 +1,6 @@
 module github.com/HeaInSeo/sori
 
-go 1.25.13
+go 1.26.9
 
 require (
 	github.com/opencontainers/go-digest v1.0.0
