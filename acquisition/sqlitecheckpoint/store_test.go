@@ -54,6 +54,20 @@ func TestOpenRefusesOtherSchemaVersion(t *testing.T) {
 	}
 }
 
+// An empty path or ":memory:" would give an in-memory or private temporary database
+// that loses every checkpoint on close, so Open refuses it.
+func TestOpenRejectsTransientPaths(t *testing.T) {
+	for _, path := range []string{"", ":memory:"} {
+		s, err := sqlitecheckpoint.Open(path)
+		if !errors.Is(err, sqlitecheckpoint.ErrTransientPath) {
+			if s != nil {
+				_ = s.Close()
+			}
+			t.Fatalf("Open(%q): err = %v, want ErrTransientPath", path, err)
+		}
+	}
+}
+
 // An authority database is not a checkpoint database: Open refuses it instead of
 // adding checkpoint tables to it.
 func TestOpenRefusesAuthorityDatabase(t *testing.T) {

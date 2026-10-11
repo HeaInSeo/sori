@@ -95,6 +95,13 @@ func TestChildProcess(t *testing.T) {
 	if op == "" {
 		t.Skip("child-process helper; driven by the cross-process tests")
 	}
+	barrier := os.Getenv(envBarrier)
+	if op == "open-race" && barrier != "" {
+		// Release before Open: both processes race to create and WAL-convert a
+		// database file that does not exist yet.
+		waitBarrier(t, barrier)
+		barrier = ""
+	}
 	s, err := sqlitecheckpoint.Open(os.Getenv(envDB))
 	if err != nil {
 		t.Fatalf("child open: %v", err)
@@ -103,8 +110,9 @@ func TestChildProcess(t *testing.T) {
 	ctx := context.Background()
 	args := strings.Split(os.Getenv(envArgs), ",")
 	res := childResult{PID: os.Getpid(), Command: op + " " + strings.Join(args, ",")}
-	barrier := os.Getenv(envBarrier)
 	switch op {
+	case "open-race": // id; Open already happened after the barrier
+		res.Op, res.Created, err = s.Begin(ctx, checkpointtest.Operation(acquisition.OperationID(args[0])))
 	case "begin": // id, fingerprint
 		want := checkpointtest.Operation(acquisition.OperationID(args[0]))
 		want.Fingerprint = args[1]
@@ -240,6 +248,20 @@ func TestCrossProcessConcurrentBegin(t *testing.T) {
 	got, ok, err := s.Get(ctx, "op-changed")
 	if err != nil || !ok || !reflect.DeepEqual(got, winner.Op) {
 		t.Fatalf("stored record %+v, %v, %v; want the winner %+v", got, ok, err, winner.Op)
+	}
+}
+
+// Two OS processes Open a database file that does not exist yet at the same moment.
+// Both must wait out the other's WAL conversion and schema creation instead of
+// failing with SQLITE_BUSY, and the same operation then has exactly one creator.
+// Several fresh files make the race likely.
+func TestCrossProcessConcurrentOpenOfNewDatabase(t *testing.T) {
+	for round := range 8 {
+		db := filepath.Join(t.TempDir(), fmt.Sprintf("fresh-%d.db", round))
+		r1, r2 := raceChildren(t, db, []string{"open-race", "op-open"}, []string{"open-race", "op-open"})
+		if r1.Err != "" || r2.Err != "" || r1.Created == r2.Created || !reflect.DeepEqual(r1.Op, r2.Op) {
+			t.Fatalf("round %d: concurrent first Open + Begin: %+v / %+v", round, r1, r2)
+		}
 	}
 }
 

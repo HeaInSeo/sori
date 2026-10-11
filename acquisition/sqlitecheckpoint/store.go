@@ -24,10 +24,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"time"
+
+	"modernc.org/sqlite" // also registers the "sqlite" database/sql driver
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/HeaInSeo/sori/acquisition"
-
-	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
 
 // SchemaVersion is the on-disk schema this adapter reads and writes.
@@ -65,12 +67,48 @@ type Store struct {
 
 var _ acquisition.CheckpointStore = (*Store)(nil)
 
+// ErrTransientPath is returned by Open for a path SQLite would treat as an
+// in-memory or private temporary database, which loses every checkpoint when the
+// connection closes.
+var ErrTransientPath = errors.New("sqlitecheckpoint: path names a non-durable database")
+
+// openBusyBudget bounds how long Open retries a SQLITE_BUSY from opening and
+// initializing the database. It equals the busy timeout.
+const openBusyBudget = 10 * time.Second
+
 // Open opens (creating if needed) the store at path and checks its schema version.
+//
+// While another process is converting a new database file to WAL, SQLite can
+// return SQLITE_BUSY without consulting the busy handler. Open therefore retries
+// the whole open-and-init step on SQLITE_BUSY within openBusyBudget; any other
+// error is returned at once.
 func Open(path string) (*Store, error) {
+	if path == "" || path == ":memory:" {
+		return nil, fmt.Errorf("%w: %q", ErrTransientPath, path)
+	}
+	deadline := time.Now().Add(openBusyBudget)
+	for {
+		s, err := open(path)
+		if err == nil || !isBusy(err) || time.Now().After(deadline) {
+			return s, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func isBusy(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_BUSY
+}
+
+func open(path string) (*Store, error) {
 	q := url.Values{}
+	// The driver applies _busy_timeout before any _pragma, so a process that loses
+	// the race to convert a new database to WAL waits instead of failing with
+	// SQLITE_BUSY.
+	q.Set("_busy_timeout", "10000")
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "synchronous(FULL)")
-	q.Add("_pragma", "busy_timeout(10000)")
 	q.Set("_txlock", "immediate")
 	db, err := sql.Open("sqlite", fileURI(path)+"?"+q.Encode())
 	if err != nil {
