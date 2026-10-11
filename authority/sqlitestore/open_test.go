@@ -69,6 +69,60 @@ func TestOpenReturnsWithinBusyBudget(t *testing.T) {
 	}
 }
 
+// The budget is one wall-clock deadline for the whole attempt, not a busy timeout
+// granted again to each lock wait (PR #35 review r4242961909). Here connecting
+// spends most of the budget, as a slow WAL conversion would, and then another
+// connection takes the write lock before init's BEGIN IMMEDIATE. Open must still
+// give up at the deadline instead of waiting another full budget in init.
+func TestOpenDeadlineSpansConnectAndInit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authority.db")
+	s, err := sqlitestore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	holder, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	ctx := context.Background()
+	conn, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	defer func() { _, _ = conn.ExecContext(ctx, `ROLLBACK`) }()
+
+	const budget = time.Second
+	const connectCost = 800 * time.Millisecond
+	defer sqlitestore.SetOpenBusyBudgetForTest(budget)()
+	var locked bool
+	defer sqlitestore.SetOpenAfterConnectForTest(func() {
+		if !locked {
+			time.Sleep(connectCost)
+			if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+				t.Error(err)
+			}
+			locked = true
+		}
+	})()
+	start := time.Now()
+	s, err = sqlitestore.Open(path)
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("Open succeeded while another connection held the write lock")
+	}
+	// Without one deadline, init waits a further full budget: about 1.8 s here.
+	if limit := budget + 400*time.Millisecond; elapsed > limit {
+		t.Fatalf("Open took %v with a %v budget (limit %v): %v", elapsed, budget, limit, err)
+	}
+}
+
 // An attempt made with less than the full budget left runs with a shorter busy
 // timeout; once Open succeeds the store's connection is back to the full 10 s.
 func TestOpenRestoresFullBusyTimeout(t *testing.T) {
