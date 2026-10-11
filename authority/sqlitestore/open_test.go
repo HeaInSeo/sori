@@ -10,6 +10,20 @@ import (
 	"github.com/HeaInSeo/sori/authority/sqlitestore"
 )
 
+// An empty path or ":memory:" would give an in-memory or private temporary database
+// that loses every acceptance on close, so Open refuses it (sori#34).
+func TestOpenRejectsTransientPaths(t *testing.T) {
+	for _, path := range []string{"", ":memory:"} {
+		s, err := sqlitestore.Open(path)
+		if !errors.Is(err, sqlitestore.ErrTransientPath) {
+			if s != nil {
+				_ = s.Close()
+			}
+			t.Fatalf("Open(%q): err = %v, want ErrTransientPath", path, err)
+		}
+	}
+}
+
 // A file name may contain characters that are significant in a URI. Open must
 // still create and reopen exactly that file, with the durability pragmas applied,
 // instead of parsing part of the name as DSN parameters, a fragment or an escape.

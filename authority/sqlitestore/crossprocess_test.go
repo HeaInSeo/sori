@@ -98,25 +98,20 @@ func TestChildProcess(t *testing.T) {
 	if op == "" {
 		t.Skip("child-process helper; driven by the cross-process tests")
 	}
+	barrier := os.Getenv(envBarrier)
+	if op == "open-race" && barrier != "" {
+		// Release before Open: both processes race to create and WAL-convert a
+		// database file that does not exist yet.
+		waitBarrier(t, barrier)
+		barrier = ""
+	}
 	s, err := sqlitestore.Open(os.Getenv(envDB))
 	if err != nil {
 		t.Fatalf("child open: %v", err)
 	}
 	defer s.Close()
-	if b := os.Getenv(envBarrier); b != "" {
-		// Signal readiness, then wait for the parent to release every child at once.
-		if err := os.WriteFile(fmt.Sprintf("%s.ready.%d", b, os.Getpid()), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		for deadline := time.Now().Add(30 * time.Second); ; {
-			if _, err := os.Stat(b + ".go"); err == nil {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("child: barrier timeout")
-			}
-			time.Sleep(time.Millisecond)
-		}
+	if barrier != "" {
+		waitBarrier(t, barrier)
 	}
 	ctx := context.Background()
 	a := authority.New(s)
@@ -137,7 +132,7 @@ func TestChildProcess(t *testing.T) {
 		t.Fatalf("child survived %s: %v", op, err)
 	}
 	switch op {
-	case "accept": // request, digest
+	case "accept", "open-race": // request, digest; open-race already opened after the barrier
 		res.Revision, err = a.AcceptRevision(ctx, authority.AcceptRequest{
 			RequestID: authority.RequestID(args[0]), AssetID: xpAsset, Manifest: xpManifest(args[1]),
 		})
@@ -187,6 +182,23 @@ func e016Write(ctx context.Context, a *authority.Authority, res *childResult) er
 	rep, _, err = a.GetRepresentation(ctx, rep.RepresentationID)
 	res.Representation = rep
 	return err
+}
+
+// waitBarrier signals readiness, then waits for the parent to release every child at once.
+func waitBarrier(t *testing.T, b string) {
+	t.Helper()
+	if err := os.WriteFile(fmt.Sprintf("%s.ready.%d", b, os.Getpid()), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		if _, err := os.Stat(b + ".go"); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child: barrier timeout")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // startChild starts one child process for op without waiting for it.
@@ -253,6 +265,21 @@ func raceChildren(t *testing.T, db string, a, b []string) (childResult, childRes
 	r1, r2 := waitChild(t, c1, o1), waitChild(t, c2, o2)
 	t.Logf("store=%s pids=%d,%d errs=%q,%q", db, r1.PID, r2.PID, r1.Err, r2.Err)
 	return r1, r2
+}
+
+// Two OS processes Open a database file that does not exist yet at the same moment
+// (sori#34). Both must wait out the other's WAL conversion and schema creation
+// instead of failing with SQLITE_BUSY, and the same accept then yields one durable
+// Revision. E017 creates the schema before its children start, so it does not cover
+// this. Several fresh files make the race likely.
+func TestCrossProcessConcurrentOpenOfNewDatabase(t *testing.T) {
+	for round := range 8 {
+		db := filepath.Join(t.TempDir(), fmt.Sprintf("fresh-%d.db", round))
+		r1, r2 := raceChildren(t, db, []string{"open-race", "open-req", "d1"}, []string{"open-race", "open-req", "d1"})
+		if r1.Err != "" || r2.Err != "" || r1.PID == r2.PID || !reflect.DeepEqual(r1.Revision, r2.Revision) {
+			t.Fatalf("round %d: concurrent first Open + accept: %+v / %+v", round, r1, r2)
+		}
+	}
 }
 
 // E016: state written by one OS process is exact after a reopen in another process.
