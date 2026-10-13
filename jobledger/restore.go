@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strconv"
 )
@@ -44,23 +43,7 @@ func (s *Store) AbsorbCut(ctx context.Context, g Guard) error {
 // including the cut and moved the recorded head back with them. Rows appended after
 // the cut are allowed.
 func (s *Store) VerifyCut(ctx context.Context, c Cut) error {
-	if err := s.VerifyLedger(ctx); err != nil {
-		return err
-	}
-	if c.LastLedgerSeq == 0 {
-		return nil
-	}
-	var digest string
-	err := s.db.QueryRowContext(ctx, `SELECT digest FROM ledger WHERE seq = ?`, c.LastLedgerSeq).Scan(&digest)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return fmt.Errorf("%w: cut ledger seq %d is missing", ErrLedgerIntegrity, c.LastLedgerSeq)
-	case err != nil:
-		return fmt.Errorf("jobledger: read ledger: %w", err)
-	case digest != c.LedgerHeadDigest:
-		return fmt.Errorf("%w: cut ledger seq %d digest differs", ErrLedgerIntegrity, c.LastLedgerSeq)
-	}
-	return nil
+	return verifyLedger(ctx, s.db, c)
 }
 
 // Snapshot writes a consistent copy of the store to dst (VACUUM INTO), verifies the
@@ -80,7 +63,7 @@ func (s *Store) Snapshot(ctx context.Context, dst string) (Cut, error) {
 	if err != nil {
 		return c, err
 	}
-	if err := verifyLedger(ctx, cp); err != nil {
+	if err := verifyLedger(ctx, cp, Cut{}); err != nil {
 		return c, err
 	}
 	c.CutSeq = m.cutSeq

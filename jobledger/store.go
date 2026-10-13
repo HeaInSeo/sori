@@ -355,24 +355,35 @@ func chainDigest(seq int64, prev, kind, subject, record string) string {
 // ledgerHead returns the last ledger row and refuses with ErrLedgerIntegrity when it
 // is not the head recorded with the newest append: the chain alone cannot see that
 // only the newest rows were lost, because the remaining prefix still verifies.
+//
+// The last row and the recorded head are read by one statement, so outside a
+// transaction they still come from one snapshot: an append committed between two
+// reads would otherwise make a healthy store look truncated.
 func ledgerHead(ctx context.Context, q queryRower) (int64, string, error) {
 	var seq int64
 	var digest string
-	err := q.QueryRowContext(ctx, `SELECT seq, digest FROM ledger ORDER BY seq DESC LIMIT 1`).Scan(&seq, &digest)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	var recorded sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT
+		COALESCE((SELECT seq FROM ledger ORDER BY seq DESC LIMIT 1), 0),
+		COALESCE((SELECT digest FROM ledger ORDER BY seq DESC LIMIT 1), ''),
+		(SELECT value FROM ledger_meta WHERE key = ?)`, metaLedgerHead).Scan(&seq, &digest, &recorded)
+	if err != nil {
 		return 0, "", fmt.Errorf("jobledger: read ledger head: %w", err)
 	}
-	recorded, ok, err := getMeta(ctx, q, metaLedgerHead)
-	if err != nil {
-		return 0, "", err
+	return seq, digest, checkHead(seq, digest, recorded)
+}
+
+// checkHead refuses a ledger that does not end at the recorded head; a missing
+// record stands for the empty ledger.
+func checkHead(seq int64, digest string, recorded sql.NullString) error {
+	want := headValue(0, "")
+	if recorded.Valid {
+		want = recorded.String
 	}
-	if !ok {
-		recorded = headValue(0, "")
+	if got := headValue(seq, digest); got != want {
+		return fmt.Errorf("%w: ledger ends at %s, recorded head %s", ErrLedgerIntegrity, got, want)
 	}
-	if got := headValue(seq, digest); got != recorded {
-		return 0, "", fmt.Errorf("%w: ledger ends at %s, recorded head %s", ErrLedgerIntegrity, got, recorded)
-	}
-	return seq, digest, nil
+	return nil
 }
 
 // LedgerHead returns the last ledger sequence number and its chained digest; an
@@ -389,19 +400,25 @@ func (s *Store) LedgerHead(ctx context.Context) (seq int64, digest string, err e
 // The recorded head lives in the same database, so a rewrite that also moves it
 // back still verifies here; VerifyCut checks against evidence kept elsewhere.
 func (s *Store) VerifyLedger(ctx context.Context) error {
-	return verifyLedger(ctx, s.db)
+	return verifyLedger(ctx, s.db, Cut{})
 }
 
-func verifyLedger(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `SELECT seq, kind, subject, record, digest FROM ledger ORDER BY seq`)
+// verifyLedger checks the chain, the recorded head and, when c names a ledger row,
+// that row's digest. One statement reads all of them, so the whole check sees one
+// snapshot and a concurrent append cannot make it report a healthy store as broken.
+func verifyLedger(ctx context.Context, db *sql.DB, c Cut) error {
+	rows, err := db.QueryContext(ctx, `SELECT seq, kind, subject, record, digest,
+		(SELECT value FROM ledger_meta WHERE key = ?) FROM ledger ORDER BY seq`, metaLedgerHead)
 	if err != nil {
 		return fmt.Errorf("jobledger: read ledger: %w", err)
 	}
 	prev, want := "", int64(1)
+	var recorded sql.NullString
+	cutSeen := false
 	for rows.Next() {
 		var seq int64
 		var kind, subject, record, digest string
-		if err := rows.Scan(&seq, &kind, &subject, &record, &digest); err != nil {
+		if err := rows.Scan(&seq, &kind, &subject, &record, &digest, &recorded); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("jobledger: read ledger: %w", err)
 		}
@@ -413,12 +430,28 @@ func verifyLedger(ctx context.Context, db *sql.DB) error {
 			_ = rows.Close()
 			return fmt.Errorf("%w: ledger seq %d", ErrLedgerIntegrity, seq)
 		}
+		if seq == c.LastLedgerSeq {
+			if digest != c.LedgerHeadDigest {
+				_ = rows.Close()
+				return fmt.Errorf("%w: cut ledger seq %d digest differs", ErrLedgerIntegrity, seq)
+			}
+			cutSeen = true
+		}
 		prev, want = digest, want+1
 	}
-	// Close before reading the head: the store holds a single connection.
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return fmt.Errorf("jobledger: read ledger: %w", err)
 	}
-	_, _, err = ledgerHead(ctx, db)
-	return err
+	if want == 1 {
+		// No row carried the recorded head; an empty ledger is checked on its own.
+		if _, _, err := ledgerHead(ctx, db); err != nil {
+			return err
+		}
+	} else if err := checkHead(want-1, prev, recorded); err != nil {
+		return err
+	}
+	if c.LastLedgerSeq != 0 && !cutSeen {
+		return fmt.Errorf("%w: cut ledger seq %d is missing", ErrLedgerIntegrity, c.LastLedgerSeq)
+	}
+	return nil
 }

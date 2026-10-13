@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/HeaInSeo/sori/jobledger"
@@ -360,6 +362,77 @@ func TestLedgerTailLossRefused(t *testing.T) {
 	}
 	if err := s.VerifyCut(ctx, cut); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
 		t.Errorf("VerifyCut after rewrite below the cut: %v, want ErrLedgerIntegrity", err)
+	}
+}
+
+// TestLedgerReadsDuringConcurrentAppend covers GR-P2-HEADREAD: a head or chain check
+// that reads the last row and the recorded head separately reports a healthy store
+// as truncated when an append commits in between. Readers on the writer's handle and
+// on a second handle must never see ErrLedgerIntegrity while appends run.
+func TestLedgerReadsDuringConcurrentAppend(t *testing.T) {
+	ctx := context.Background()
+	s, path := newStore(t)
+	ns := mustNamespace(t, s, guard1)
+	if _, err := s.Accept(ctx, guard1, req(ns, "k0", meaningA)); err != nil {
+		t.Fatal(err)
+	}
+	cut, err := s.Snapshot(ctx, filepath.Join(t.TempDir(), "cut.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := open(t, path)
+
+	const appends = 150
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	var reads, spurious atomic.Int64
+	var mu sync.Mutex
+	var firstErr error
+	read := func(st *jobledger.Store) {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			for _, err := range []error{
+				func() error { _, _, err := st.LedgerHead(ctx); return err }(),
+				st.VerifyLedger(ctx),
+				st.VerifyCut(ctx, cut),
+			} {
+				reads.Add(1)
+				if err != nil {
+					spurious.Add(1)
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+				}
+			}
+		}
+	}
+	wg.Add(2)
+	go read(s)
+	go read(other)
+	for i := 1; i <= appends; i++ {
+		if _, err := s.Accept(ctx, guard1, req(ns, fmt.Sprintf("k%d", i), meaningA)); err != nil {
+			close(done)
+			wg.Wait()
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	close(done)
+	wg.Wait()
+	if n := spurious.Load(); n != 0 {
+		t.Fatalf("%d of %d reads failed during concurrent appends; first: %v", n, reads.Load(), firstErr)
+	}
+	if reads.Load() == 0 {
+		t.Fatal("no read ran during the appends")
+	}
+	if err := s.VerifyCut(ctx, cut); err != nil {
+		t.Fatalf("quiescent VerifyCut: %v", err)
 	}
 }
 
