@@ -111,6 +111,9 @@ const (
 	metaActiveEpoch    = "store_active_epoch"
 	metaCutSeq         = "store_cut_seq"
 	metaRestoreNonce   = "restore_nonce"
+	// metaLedgerHead records "seq:digest" of the last ledger row, written in the same
+	// transaction as that row, so losing only the newest rows is detectable.
+	metaLedgerHead = "ledger_head"
 )
 
 // Restore states of the store marker (D01.3).
@@ -329,7 +332,12 @@ func appendLedger(ctx context.Context, tx *sql.Tx, kind, subject string, record 
 	if err != nil {
 		return fmt.Errorf("jobledger: append ledger: %w", err)
 	}
-	return nil
+	return setMeta(ctx, tx, metaLedgerHead, headValue(seq, digest))
+}
+
+// headValue is the metaLedgerHead encoding of a ledger head.
+func headValue(seq int64, digest string) string {
+	return strconv.FormatInt(seq, 10) + ":" + digest
 }
 
 // chainDigest covers the row's own sequence number, so renumbering a row breaks
@@ -344,48 +352,73 @@ func chainDigest(seq int64, prev, kind, subject, record string) string {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
+// ledgerHead returns the last ledger row and refuses with ErrLedgerIntegrity when it
+// is not the head recorded with the newest append: the chain alone cannot see that
+// only the newest rows were lost, because the remaining prefix still verifies.
 func ledgerHead(ctx context.Context, q queryRower) (int64, string, error) {
 	var seq int64
 	var digest string
 	err := q.QueryRowContext(ctx, `SELECT seq, digest FROM ledger ORDER BY seq DESC LIMIT 1`).Scan(&seq, &digest)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, "", fmt.Errorf("jobledger: read ledger head: %w", err)
+	}
+	recorded, ok, err := getMeta(ctx, q, metaLedgerHead)
+	if err != nil {
+		return 0, "", err
+	}
+	if !ok {
+		recorded = headValue(0, "")
+	}
+	if got := headValue(seq, digest); got != recorded {
+		return 0, "", fmt.Errorf("%w: ledger ends at %s, recorded head %s", ErrLedgerIntegrity, got, recorded)
 	}
 	return seq, digest, nil
 }
 
 // LedgerHead returns the last ledger sequence number and its chained digest; an
-// empty ledger is (0, "").
+// empty ledger is (0, ""). It returns ErrLedgerIntegrity when the newest rows are
+// missing.
 func (s *Store) LedgerHead(ctx context.Context) (seq int64, digest string, err error) {
 	return ledgerHead(ctx, s.db)
 }
 
 // VerifyLedger recomputes the whole chain and returns ErrLedgerIntegrity at the
 // first row that is not the next sequence number or whose digest does not follow
-// from its predecessor.
+// from its predecessor, or when the chain does not end at the recorded head.
+//
+// The recorded head lives in the same database, so a rewrite that also moves it
+// back still verifies here; VerifyCut checks against evidence kept elsewhere.
 func (s *Store) VerifyLedger(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT seq, kind, subject, record, digest FROM ledger ORDER BY seq`)
+	return verifyLedger(ctx, s.db)
+}
+
+func verifyLedger(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `SELECT seq, kind, subject, record, digest FROM ledger ORDER BY seq`)
 	if err != nil {
 		return fmt.Errorf("jobledger: read ledger: %w", err)
 	}
-	defer rows.Close()
 	prev, want := "", int64(1)
 	for rows.Next() {
 		var seq int64
 		var kind, subject, record, digest string
 		if err := rows.Scan(&seq, &kind, &subject, &record, &digest); err != nil {
+			_ = rows.Close()
 			return fmt.Errorf("jobledger: read ledger: %w", err)
 		}
 		if seq != want {
+			_ = rows.Close()
 			return fmt.Errorf("%w: ledger seq %d, want %d", ErrLedgerIntegrity, seq, want)
 		}
 		if chainDigest(seq, prev, kind, subject, record) != digest {
+			_ = rows.Close()
 			return fmt.Errorf("%w: ledger seq %d", ErrLedgerIntegrity, seq)
 		}
 		prev, want = digest, want+1
 	}
-	return rows.Err()
+	// Close before reading the head: the store holds a single connection.
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return fmt.Errorf("jobledger: read ledger: %w", err)
+	}
+	_, _, err = ledgerHead(ctx, db)
+	return err
 }

@@ -3,6 +3,7 @@ package jobledger_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -269,6 +270,8 @@ func TestLedgerTamperDetected(t *testing.T) {
 		"renumbered head":   `UPDATE ledger SET seq = 500 WHERE seq = (SELECT MAX(seq) FROM ledger)`,
 		"renumbered middle": `UPDATE ledger SET seq = seq + 1000 WHERE seq >= 2`,
 		"dropped row":       `DELETE FROM ledger WHERE seq = 2`,
+		"truncated tail":    `DELETE FROM ledger WHERE seq = (SELECT MAX(seq) FROM ledger)`,
+		"truncated all":     `DELETE FROM ledger`,
 	}
 	for name, stmt := range tampers {
 		s, _ := newStore(t)
@@ -285,6 +288,78 @@ func TestLedgerTamperDetected(t *testing.T) {
 		if err := s.VerifyLedger(ctx); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
 			t.Errorf("%s: %v, want ErrLedgerIntegrity", name, err)
 		}
+		if _, err := s.Snapshot(ctx, filepath.Join(t.TempDir(), "cut.db")); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
+			t.Errorf("%s: Snapshot %v, want ErrLedgerIntegrity", name, err)
+		}
+	}
+}
+
+// TestLedgerTailLossRefused covers Codex P2 r4243714642: losing only the highest
+// ledger rows leaves a contiguous, correctly chained prefix, so the chain alone
+// cannot see it. The recorded head and an independently retained Cut must.
+func TestLedgerTailLossRefused(t *testing.T) {
+	ctx := context.Background()
+	const dropTail = `DELETE FROM ledger WHERE seq = (SELECT MAX(seq) FROM ledger)`
+
+	s, _ := newStore(t)
+	ns := mustNamespace(t, s, guard1)
+	if _, err := s.Accept(ctx, guard1, req(ns, "k1", meaningA)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ExecForTest(dropTail); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.LedgerHead(ctx); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
+		t.Errorf("LedgerHead after tail loss: %v, want ErrLedgerIntegrity", err)
+	}
+	if _, err := s.Snapshot(ctx, filepath.Join(t.TempDir(), "cut.db")); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
+		t.Errorf("Snapshot after tail loss: %v, want ErrLedgerIntegrity", err)
+	}
+	if _, err := s.Accept(ctx, guard1, req(ns, "k2", meaningA)); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
+		t.Errorf("append after tail loss: %v, want ErrLedgerIntegrity", err)
+	}
+
+	// A rewrite that also moves the recorded head back is caught only by evidence
+	// kept outside the store, here a Cut taken earlier.
+	s, _ = newStore(t)
+	ns = mustNamespace(t, s, guard1)
+	if _, err := s.Accept(ctx, guard1, req(ns, "k1", meaningA)); err != nil {
+		t.Fatal(err)
+	}
+	cut, err := s.Snapshot(ctx, filepath.Join(t.TempDir(), "cut.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.VerifyCut(ctx, cut); err != nil {
+		t.Fatalf("intact ledger against its cut: %v", err)
+	}
+	if _, err := s.Accept(ctx, guard1, req(ns, "k2", meaningA)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.VerifyCut(ctx, cut); err != nil {
+		t.Fatalf("grown ledger against an older cut: %v", err)
+	}
+	stale := cut
+	stale.LedgerHeadDigest = "sha256:00"
+	if err := s.VerifyCut(ctx, stale); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
+		t.Errorf("cut with another digest: %v, want ErrLedgerIntegrity", err)
+	}
+	if err := s.ExecForTest(`DELETE FROM ledger WHERE seq >= ?`, cut.LastLedgerSeq); err != nil {
+		t.Fatal(err)
+	}
+	var seq int64
+	var digest string
+	if err := s.QueryRowForTest(`SELECT seq, digest FROM ledger ORDER BY seq DESC LIMIT 1`).Scan(&seq, &digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ExecForTest(`UPDATE ledger_meta SET value = ? WHERE key = 'ledger_head'`, fmt.Sprintf("%d:%s", seq, digest)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.VerifyLedger(ctx); err != nil {
+		t.Fatalf("rewritten head is self-consistent, VerifyLedger: %v", err)
+	}
+	if err := s.VerifyCut(ctx, cut); !errors.Is(err, jobledger.ErrLedgerIntegrity) {
+		t.Errorf("VerifyCut after rewrite below the cut: %v, want ErrLedgerIntegrity", err)
 	}
 }
 

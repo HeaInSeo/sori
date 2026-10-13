@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 )
@@ -37,9 +38,34 @@ func (s *Store) AbsorbCut(ctx context.Context, g Guard) error {
 	})
 }
 
-// Snapshot writes a consistent copy of the store to dst (VACUUM INTO) and returns the
-// cut evidence read back from that copy. It stands in for the backup half of
-// capture-cut.
+// VerifyCut verifies the ledger (VerifyLedger) and that it still holds the cut's last
+// row with the cut's digest. The Cut is evidence retained outside this database (the
+// admin-control cut record), so it also catches a rewrite that dropped rows up to and
+// including the cut and moved the recorded head back with them. Rows appended after
+// the cut are allowed.
+func (s *Store) VerifyCut(ctx context.Context, c Cut) error {
+	if err := s.VerifyLedger(ctx); err != nil {
+		return err
+	}
+	if c.LastLedgerSeq == 0 {
+		return nil
+	}
+	var digest string
+	err := s.db.QueryRowContext(ctx, `SELECT digest FROM ledger WHERE seq = ?`, c.LastLedgerSeq).Scan(&digest)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("%w: cut ledger seq %d is missing", ErrLedgerIntegrity, c.LastLedgerSeq)
+	case err != nil:
+		return fmt.Errorf("jobledger: read ledger: %w", err)
+	case digest != c.LedgerHeadDigest:
+		return fmt.Errorf("%w: cut ledger seq %d digest differs", ErrLedgerIntegrity, c.LastLedgerSeq)
+	}
+	return nil
+}
+
+// Snapshot writes a consistent copy of the store to dst (VACUUM INTO), verifies the
+// copy's ledger and returns the cut evidence read back from it. It stands in for the
+// backup half of capture-cut.
 func (s *Store) Snapshot(ctx context.Context, dst string) (Cut, error) {
 	var c Cut
 	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, dst); err != nil {
@@ -52,6 +78,9 @@ func (s *Store) Snapshot(ctx context.Context, dst string) (Cut, error) {
 	defer cp.Close()
 	m, err := readMarker(ctx, cp)
 	if err != nil {
+		return c, err
+	}
+	if err := verifyLedger(ctx, cp); err != nil {
 		return c, err
 	}
 	c.CutSeq = m.cutSeq
