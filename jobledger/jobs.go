@@ -359,13 +359,15 @@ type Transition struct {
 }
 
 // allowed lists the phase edges. RUNNING→RUNNING records progress such as the
-// accepted RevisionID. CANCEL_REQUESTED can still end SUCCEEDED or FAILED: an effect
-// that already committed is reported, not undone.
+// accepted RevisionID. CANCEL_REQUESTED and HOLD can still end SUCCEEDED or FAILED:
+// an effect that already committed is reported, not undone. HOLD keeps its phase
+// when cancel intent is recorded, so reconciliation records a committed success
+// directly from HOLD rather than resuming through RUNNING.
 var allowed = map[Phase][]Phase{
 	PhaseQueued:          {PhaseRunning, PhaseCancelled, PhaseFailed, PhaseHold},
 	PhaseRunning:         {PhaseRunning, PhaseSucceeded, PhaseFailed, PhaseHold},
 	PhaseCancelRequested: {PhaseCancelled, PhaseSucceeded, PhaseFailed, PhaseHold},
-	PhaseHold:            {PhaseRunning, PhaseFailed, PhaseCancelled},
+	PhaseHold:            {PhaseRunning, PhaseSucceeded, PhaseFailed, PhaseCancelled},
 }
 
 func edgeAllowed(from, to Phase) bool {

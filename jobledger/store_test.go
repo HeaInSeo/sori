@@ -209,6 +209,61 @@ func TestCancelInHoldIsNotResumed(t *testing.T) {
 	}
 }
 
+// A Job in HOLD with cancel intent whose effect turns out to have committed records
+// that success: HOLD -> SUCCEEDED writes the terminal receipt with the accepted
+// RevisionID and keeps the cancel intent. It is still never resumed, and the
+// terminal receipt is what a replay of the same key returns; nothing re-executes.
+func TestCancelInHoldRecordsCommittedSuccess(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	ns := mustNamespace(t, s, guard1)
+	d, _ := s.Accept(ctx, guard1, req(ns, "k-hold-ok", meaningA))
+	r, err := s.Advance(ctx, guard1, d.Job.JobID, 1, jobledger.Transition{Phase: jobledger.PhaseRunning, RevisionID: "rev_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := s.Advance(ctx, guard1, r.JobID, r.RecordVersion, jobledger.Transition{Phase: jobledger.PhaseHold})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.RequestCancel(ctx, guard1, h.JobID, "bob")
+	if err != nil || c.Phase != jobledger.PhaseHold || !c.CancelRequested || c.Dispatchable() {
+		t.Fatalf("cancel in hold = %+v, %v", c, err)
+	}
+	for _, p := range []jobledger.Phase{jobledger.PhaseRunning, jobledger.PhaseQueued} {
+		if _, err := s.Advance(ctx, guard1, c.JobID, c.RecordVersion, jobledger.Transition{Phase: p}); !errors.Is(err, jobledger.ErrInvalidTransition) {
+			t.Fatalf("hold with cancel intent -> %s: %v, want ErrInvalidTransition", p, err)
+		}
+	}
+
+	done, err := s.Advance(ctx, guard1, c.JobID, c.RecordVersion, jobledger.Transition{Phase: jobledger.PhaseSucceeded})
+	if err != nil {
+		t.Fatalf("committed success from hold with cancel intent: %v", err)
+	}
+	if done.Phase != jobledger.PhaseSucceeded || done.Terminal == nil || done.Terminal.Phase != jobledger.PhaseSucceeded ||
+		done.Terminal.RevisionID != "rev_1" || done.RevisionID != "rev_1" || !done.CancelRequested || done.CancelRequestedBy != "bob" {
+		t.Fatalf("succeeded = %+v (terminal %+v)", done, done.Terminal)
+	}
+	if got, _, _ := s.GetJob(ctx, done.JobID); !reflect.DeepEqual(got, done) {
+		t.Fatalf("stored job %+v, want %+v", got, done)
+	}
+
+	// The receipt is final: no further transition, cancel or re-execution.
+	if _, err := s.Advance(ctx, guard1, done.JobID, done.RecordVersion, jobledger.Transition{Phase: jobledger.PhaseRunning}); !errors.Is(err, jobledger.ErrAlreadyTerminal) {
+		t.Fatalf("advance after terminal: %v", err)
+	}
+	if _, err := s.RequestCancel(ctx, guard1, done.JobID, "carol"); !errors.Is(err, jobledger.ErrAlreadyTerminal) {
+		t.Fatalf("cancel after terminal: %v", err)
+	}
+	again, err := s.Accept(ctx, guard1, req(ns, "k-hold-ok", meaningA))
+	if err != nil || again.Outcome != jobledger.OutcomeExisting || again.Job == nil || !reflect.DeepEqual(*again.Job, done) {
+		t.Fatalf("replay = %+v, %v; want existing %+v", again, err, done)
+	}
+	if jobs, _ := s.UnfinishedJobs(ctx); len(jobs) != 0 {
+		t.Fatalf("unfinished after committed success: %+v", jobs)
+	}
+}
+
 func TestPolicyHistory(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
