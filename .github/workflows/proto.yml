@@ -1,0 +1,49 @@
+name: Proto
+
+# Restored sori.ops.v1 contract (D01.4-r3 + r4 comment patch). This job proves
+# the committed Go code and api/provenance.json are exactly what the pinned
+# toolchain generates from the committed .proto files. It does not run buf
+# breaking: no accepted wire baseline exists yet.
+on:
+  push:
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: proto-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regenerate:
+    name: Proto regenerate-diff
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install pinned generators
+        run: |
+          GOBIN="$RUNNER_TEMP/protobin" go install github.com/bufbuild/buf/cmd/buf@v1.73.0
+          GOBIN="$RUNNER_TEMP/protobin" go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          GOBIN="$RUNNER_TEMP/protobin" go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
+          echo "$RUNNER_TEMP/protobin" >> "$GITHUB_PATH"
+
+      - name: Regenerate (build, lint, format, generate, provenance)
+        run: ./scripts/proto-gen.sh
+
+      - name: Fail on generated drift or untracked output
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
+
+      - name: Contract and provenance checks
+        run: go test -count=1 ./api/...

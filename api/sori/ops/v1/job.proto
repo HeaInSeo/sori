@@ -1,0 +1,230 @@
+// D01.4-r4 READ-ONLY PREP draft. Sori-local contract, not a platform-global wire.
+syntax = "proto3";
+
+package sori.ops.v1;
+
+import "sori/ops/v1/common.proto";
+
+option csharp_namespace = "Sori.Ops.V1";
+option go_package = "github.com/HeaInSeo/sori/api/sori/ops/v1;opsv1";
+
+service JobService {
+  // Atomic durable acceptance boundary: scope/key -> Job + domain operation +
+  // dispatchable intent. The server recomputes the request meaning; a replay
+  // with the same key and meaning returns the same Job (EXISTING).
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+  // Reconnect/restore replay for a caller that never received job_id. Carries
+  // the same JobSpec so the server can recompute the meaning; key + client
+  // digest alone never yields FOUND.
+  rpc LookupJobByKey(LookupJobByKeyRequest) returns (LookupJobByKeyResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  // Closing this stream never cancels a Job.
+  rpc WatchJobs(WatchJobsRequest) returns (stream WatchJobsResponse);
+  // The only way to cancel. Durable and idempotent.
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+}
+
+enum JobKind {
+  JOB_KIND_UNSPECIFIED = 0;
+  // Accept a FROZEN upload under AcceptProfile sori-local-import:v1.
+  JOB_KIND_LOCAL_IMPORT = 1;
+  // Existing I4A OCI acquisition, unchanged.
+  JOB_KIND_OCI_ACQUIRE = 2;
+  // Prepare an exact PhysicalBinding for download.
+  JOB_KIND_EXPORT = 3;
+}
+
+enum JobPhase {
+  JOB_PHASE_UNSPECIFIED = 0;
+  JOB_PHASE_QUEUED = 1;
+  JOB_PHASE_RUNNING = 2;
+  JOB_PHASE_CANCEL_REQUESTED = 3;
+  JOB_PHASE_SUCCEEDED = 4;
+  JOB_PHASE_FAILED = 5;
+  JOB_PHASE_CANCELLED = 6;
+  // Reconcile/fence hold; needs explicit operator or reconcile action.
+  JOB_PHASE_HOLD = 7;
+}
+
+message Job {
+  // "job_" + 256-bit random, lowercase base32 no padding (B.4).
+  string job_id = 1;
+  JobKind kind = 2;
+  JobPhase phase = 3;
+  AcceptanceState acceptance = 4;
+  EffectState effect = 5;
+  VerificationState verification = 6;
+  // Set once an AssetRevision is accepted ("rev_" form).
+  string revision_id = 7;
+  // Activation epoch at creation (provenance only, not dedup scope).
+  uint64 created_activation_epoch = 8;
+  ErrorDetail last_error = 9;
+  // Monotonic per-Job record version.
+  uint64 record_version = 10;
+}
+
+// Explicit logical target. CREATE and ATTACH are distinct intents; the same
+// string is never reinterpreted across them.
+message AssetTarget {
+  oneof target {
+    // Create a new logical asset with this display name (1..256 bytes UTF-8
+    // NFC, no control characters). Name already exists -> ASSET_NAME_EXISTS.
+    string create_asset_name = 1;
+    // Attach a new revision to this existing opaque asset id. Not visible to
+    // the caller -> NOT_FOUND parity.
+    string existing_asset_id = 2;
+  }
+}
+
+message LocalImportSpec {
+  // A FROZEN upload transfer ("xfer_" form). Locator only: excluded from meaning.
+  string transfer_id = 1;
+  AssetTarget target = 2;
+  // Must be "sori-local-import:v1" and equal to the transfer's accept_profile.
+  string accept_profile = 3;
+}
+
+message OciAcquireSpec {
+  // Server-normalized "registry-host[:port]/repository" (lowercase host, no
+  // tag, no digest). A tag is a locator and is not accepted here.
+  string acquisition_target = 1;
+  // Required exact manifest digest (I4A): sha256 only, 32 raw bytes.
+  bytes expected_digest_sha256 = 2;
+}
+
+message ExportSpec {
+  string revision_id = 1;
+  // Exact PhysicalBinding id ("bind_" form); no "latest" resolution.
+  string binding_id = 2;
+}
+
+// The job kind is the populated oneof case; there is no separate kind field
+// that could disagree with it.
+message JobSpec {
+  oneof spec {
+    LocalImportSpec local_import = 1;
+    OciAcquireSpec oci_acquire = 2;
+    ExportSpec export = 3;
+  }
+}
+
+message SubmitJobRequest {
+  RequestHeader header = 1;
+  OperationKey key = 2;
+  JobSpec spec = 3;
+}
+
+enum SubmitOutcome {
+  SUBMIT_OUTCOME_UNSPECIFIED = 0;
+  // N4: proven absent in a current-epoch namespace on a live RW store with no
+  // pending restore cut; a new Job was accepted.
+  SUBMIT_OUTCOME_NEW = 1;
+  // N2/N6: same key and same recomputed meaning; same Job under current auth.
+  SUBMIT_OUTCOME_EXISTING = 2;
+  // Key tombstone with the same meaning: original job_id, payload unavailable.
+  SUBMIT_OUTCOME_EXPIRED = 3;
+}
+
+message SubmitJobResponse {
+  // Set for NEW and EXISTING. For EXPIRED only job_id is set.
+  Job job = 1;
+  SubmitOutcome outcome = 2;
+  ReadBasis basis = 3;
+}
+
+enum KeyLookupResult {
+  KEY_LOOKUP_RESULT_UNSPECIFIED = 0;
+  // Mapping present and stored meaning == recomputed meaning.
+  KEY_LOOKUP_RESULT_FOUND = 1;
+  // Only case N4 (current-epoch namespace with a present record, served by a
+  // live RW store with no pending restore cut): the caller may submit as NEW
+  // with the same namespace and key.
+  KEY_LOOKUP_RESULT_NOT_FOUND = 2;
+  // Mapping cannot be proven (N0/N4H/N5/N7/N8). No NEW, no automatic new
+  // namespace.
+  KEY_LOOKUP_RESULT_RECONCILE_HOLD = 3;
+  // Mapping present but the recomputed meaning differs (N3, or N6 with a
+  // different meaning). No Job is returned.
+  KEY_LOOKUP_RESULT_CONFLICT = 4;
+  // Key tombstone with the same meaning (B.2.4).
+  KEY_LOOKUP_RESULT_EXPIRED = 5;
+}
+
+message LookupJobByKeyRequest {
+  RequestHeader header = 1;
+  OperationKey key = 2;
+  // The same immutable spec the caller persisted for this key.
+  JobSpec spec = 3;
+}
+
+message LookupJobByKeyResponse {
+  KeyLookupResult result = 1;
+  // Set only when result is FOUND.
+  Job job = 2;
+  // Set only when result is EXPIRED.
+  string expired_job_id = 3;
+  ReadBasis basis = 4;
+}
+
+message GetJobRequest {
+  RequestHeader header = 1;
+  string job_id = 2;
+}
+
+message GetJobResponse {
+  Job job = 1;
+  ReadBasis basis = 2;
+}
+
+message JobFilter {
+  repeated JobPhase phases = 1;
+  JobKind kind = 2;
+}
+
+message ListJobsRequest {
+  RequestHeader header = 1;
+  uint32 page_size = 2;
+  // Opaque; bound to caller, installation, activation epoch, filter and
+  // contract revision. Any change -> CURSOR_INVALID_RELIST.
+  string cursor = 3;
+  JobFilter filter = 4;
+}
+
+message ListJobsResponse {
+  repeated Job jobs = 1;
+  string next_cursor = 2;
+  Coverage coverage = 3;
+  ReadBasis basis = 4;
+}
+
+message JobEvent {
+  Job job = 1;
+  uint64 sequence = 2;
+}
+
+message WatchJobsRequest {
+  RequestHeader header = 1;
+  // Opaque resume cursor; scope/epoch/cut change or expiry -> CURSOR_INVALID_RELIST.
+  string cursor = 2;
+  JobFilter filter = 3;
+}
+
+message WatchJobsResponse {
+  repeated JobEvent events = 1;
+  string cursor = 2;
+  Coverage coverage = 3;
+  ReadBasis basis = 4;
+}
+
+message CancelJobRequest {
+  RequestHeader header = 1;
+  string job_id = 2;
+  // Dedup for the cancel request itself; meaning = exact job_id.
+  OperationKey key = 3;
+}
+
+message CancelJobResponse {
+  Job job = 1;
+  ReadBasis basis = 2;
+}

@@ -1,0 +1,51 @@
+// D01.4-r3 READ-ONLY PREP draft. Sori-local contract, not a platform-global wire.
+syntax = "proto3";
+
+package sori.ops.v1;
+
+import "sori/ops/v1/common.proto";
+
+option csharp_namespace = "Sori.Ops.V1";
+option go_package = "github.com/HeaInSeo/sori/api/sori/ops/v1;opsv1";
+
+service DiscoveryService {
+  // Returns installation identity, activation epoch, write mode, supported
+  // revisions and transfer limits. No counts.
+  rpc Discover(DiscoverRequest) returns (DiscoverResponse);
+  // Issues a new durable dedup namespace (D01.1-3-r2 B.2.2). The record is
+  // committed before the response. Not idempotent by design: a lost response
+  // leaves an unused namespace, which is harmless. The client persists the
+  // returned token and epoch before using them in any OperationKey.
+  rpc AllocateNamespace(AllocateNamespaceRequest) returns (AllocateNamespaceResponse);
+}
+
+message DiscoverRequest {}
+
+message DiscoverResponse {
+  string installation_id = 1;
+  // Admin-control activation epoch (renamed from lineage_generation; same
+  // number, pre-baseline).
+  uint64 activation_epoch = 2;
+  repeated uint32 supported_contract_revisions = 3;
+  TransferLimits transfer_limits = 4;
+  // Informational build string; never used for compatibility decisions.
+  string server_build = 5;
+  Writability writable = 6;
+  // Sori-local auth profile names the server accepts (CAD D01.2-4).
+  repeated string auth_profiles = 7;
+}
+
+message AllocateNamespaceRequest {
+  // header.installation.activation_epoch must equal the current epoch,
+  // otherwise FENCE_STALE. RO_HOLD servers return RO_HOLD.
+  RequestHeader header = 1;
+  // Human label for diagnostics only; never part of the token or MAC.
+  string client_label = 2;
+}
+
+message AllocateNamespaceResponse {
+  // "sns1." + base64url_nopad(u64be(epoch) || nonce[32] || key_id[16] || mac[32]).
+  string namespace_id = 1;
+  // Epoch bound into the token; the client stores it as activation_epoch_at_issue.
+  uint64 activation_epoch = 2;
+}
