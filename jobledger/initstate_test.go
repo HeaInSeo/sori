@@ -40,6 +40,50 @@ func mutated(t *testing.T, stmt string) string {
 	return path
 }
 
+// internalObjects are statements that leave SQLite internal objects this schema
+// never creates: an AUTOINCREMENT counter table, with and without a row, and the
+// planner statistics of ANALYZE.
+var internalObjects = map[string]string{
+	"leftover sqlite_sequence": `CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT); DROP TABLE t`,
+	"sqlite_sequence row":      `CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT); DROP TABLE t; INSERT INTO sqlite_sequence (name, seq) VALUES ('ghost', 7)`,
+	"analyze statistics":       `ANALYZE`,
+}
+
+// contentRows puts one row in each content table, with foreign keys off so that
+// each table is the only one with a row.
+var contentRows = map[string]string{
+	"ledger":        `INSERT INTO ledger (seq, kind, subject, record, digest) VALUES (1, 'namespace', 'n', '{}', 'd')`,
+	"namespaces":    `INSERT INTO namespaces (namespace_id, record) VALUES ('n', '{}')`,
+	"idempotency":   `INSERT INTO idempotency (namespace_id, client_key, meaning_digest, job_id, domain_op_key, record) VALUES ('n', 'k', 'm', 'j', 'o', '{}')`,
+	"jobs":          `INSERT INTO jobs (job_id, record_version, record) VALUES ('j', 1, '{}')`,
+	"policy":        `INSERT INTO policy (resource, revision, record) VALUES ('r', 1, '{}')`,
+	"policy_events": `INSERT INTO policy_events (seq, resource, record) VALUES (1, 'r', '{}')`,
+	"prepared":      `INSERT INTO prepared (prepared_id, operation_key, record) VALUES ('p', 'o', '{}')`,
+	"bindings":      `INSERT INTO bindings (binding_id, prepared_id, revision_id, record_version, record) VALUES ('b', 'p', 'r', 1, '{}')`,
+}
+
+// TestContentRowsCoverEverySchemaTable keeps contentRows in step with the schema,
+// so a table added later is also tested as content.
+func TestContentRowsCoverEverySchemaTable(t *testing.T) {
+	s := open(t, schemaOnly(t))
+	var n int
+	if err := s.QueryRowForTest(`SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name <> 'ledger_meta'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != len(contentRows) {
+		t.Fatalf("schema has %d content tables, contentRows covers %d", n, len(contentRows))
+	}
+	for table := range contentRows {
+		var ok bool
+		if err := s.QueryRowForTest(`SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?)`, table).Scan(&ok); err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatalf("contentRows names %s, which the schema does not have", table)
+		}
+	}
+}
+
 // dirFiles maps each regular file name in dir to its bytes.
 func dirFiles(t *testing.T, dir string) map[string][]byte {
 	t.Helper()
@@ -106,6 +150,18 @@ func TestInspectInitStatePristine(t *testing.T) {
 	}
 	if got, err := inspectUnchanged(t, orphan); !errors.Is(err, jobledger.ErrInitRefused) || got.State != jobledger.InitRefused {
 		t.Fatalf("wal without database: %v %v", got.State, err)
+	}
+	for _, suffix := range []string{"-wal", "-journal"} {
+		emptyWithLog := filepath.Join(t.TempDir(), "ledger.db")
+		if err := os.WriteFile(emptyWithLog, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(emptyWithLog+suffix, []byte("frames"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := inspectUnchanged(t, emptyWithLog); !errors.Is(err, jobledger.ErrInitRefused) || got.State != jobledger.InitRefused {
+			t.Fatalf("empty database with a non-empty %s: %v %v", suffix, got.State, err)
+		}
 	}
 	if got, err := jobledger.InspectInitState(context.Background(), ":memory:"); !errors.Is(err, jobledger.ErrTransientPath) || got.State != jobledger.InitRefused {
 		t.Fatalf(":memory: %v %v", got.State, err)
@@ -204,6 +260,12 @@ func TestInspectInitStateRefused(t *testing.T) {
 		"empty installation":  mutated(t, `INSERT INTO ledger_meta (key, value) VALUES ('installation_id', ''), ('restore_state', 'LIVE'), ('store_active_epoch', '1'), ('store_cut_seq', '0')`),
 		"markers plus a head": mutated(t, `INSERT INTO ledger_meta (key, value) VALUES ('installation_id', 'i'), ('restore_state', 'LIVE'), ('store_active_epoch', '1'), ('store_cut_seq', '0'), ('ledger_head', '0:')`),
 	}
+	for name, stmt := range internalObjects {
+		cases[name] = mutated(t, stmt)
+	}
+	for table, stmt := range contentRows {
+		cases["row in "+table] = mutated(t, `PRAGMA foreign_keys = OFF; `+stmt)
+	}
 	for name, path := range cases {
 		t.Run(name, func(t *testing.T) {
 			got, err := inspectUnchanged(t, path)
@@ -249,6 +311,12 @@ func TestInitRefusesNonEmptyStoreUnchanged(t *testing.T) {
 		"restore nonce":  `INSERT INTO ledger_meta (key, value) VALUES ('restore_nonce', 'n')`,
 		"ledger head":    `INSERT INTO ledger_meta (key, value) VALUES ('ledger_head', '0:')`,
 		"unknown marker": `INSERT INTO ledger_meta (key, value) VALUES ('x', 'y')`,
+	}
+	for name, stmt := range internalObjects {
+		cases[name] = stmt
+	}
+	for table, stmt := range contentRows {
+		cases["row in "+table] = `PRAGMA foreign_keys = OFF; ` + stmt
 	}
 	for name, stmt := range cases {
 		t.Run(name, func(t *testing.T) {

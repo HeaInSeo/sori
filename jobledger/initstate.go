@@ -49,10 +49,6 @@ type InitInspection struct {
 	InstallationID string
 }
 
-// contentTables are the tables whose rows are store content. Only ledger_meta may
-// hold rows in a store that offline init may touch.
-var contentTables = []string{"ledger", "namespaces", "idempotency", "jobs", "policy", "policy_events", "prepared", "bindings"}
-
 // sqliteSidecars are the files SQLite keeps next to a database.
 var sqliteSidecars = []string{"-wal", "-shm", "-journal"}
 
@@ -184,14 +180,18 @@ func classifyMarkers(meta map[string]string) (InitState, string, error) {
 	return InitMarkerEmpty, id, nil
 }
 
-// schemaObject is one row of sqlite_schema, internal objects excluded.
+// schemaObject is one row of sqlite_schema.
 type schemaObject struct{ typ, name, table, sql string }
 
+// schemaObjects lists every sqlite_schema row except the automatic indexes behind
+// PRIMARY KEY and UNIQUE, whose names SQLite assigns. Other internal objects such
+// as sqlite_sequence or sqlite_stat1 are listed: this schema creates none, so one
+// present means the file was used for something else.
 func schemaObjects(ctx context.Context, q interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }) ([]schemaObject, error) {
 	rows, err := q.QueryContext(ctx, `SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_schema
-		WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY type, name`)
+		WHERE name NOT LIKE 'sqlite\_autoindex\_%' ESCAPE '\' ORDER BY type, name`)
 	if err != nil {
 		return nil, fmt.Errorf("jobledger: read schema: %w", err)
 	}
@@ -243,11 +243,32 @@ func checkSchemaObjects(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// contentTables are the tables whose rows are store content: every table of this
+// version's schema except ledger_meta, which alone may hold rows in a store that
+// offline init may touch.
+func contentTables() ([]string, error) {
+	objects, err := expectedSchema()
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, o := range objects {
+		if o.typ == "table" && o.name != "ledger_meta" {
+			out = append(out, o.name)
+		}
+	}
+	return out, nil
+}
+
 // checkNoContent refuses a store with a row in any content table.
 func checkNoContent(ctx context.Context, tx *sql.Tx) error {
-	for _, table := range contentTables {
+	tables, err := contentTables()
+	if err != nil {
+		return err
+	}
+	for _, table := range tables {
 		var n int
-		// table comes from contentTables, never from input.
+		// table comes from the reference schema, never from input.
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM `+table+`)`).Scan(&n); err != nil {
 			return fmt.Errorf("jobledger: read %s: %w", table, err)
 		}
