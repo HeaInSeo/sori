@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protowire"
+
 	opsv1 "github.com/HeaInSeo/sori/api/sori/ops/v1"
 	"github.com/HeaInSeo/sori/internal/opsfacade"
 	"github.com/HeaInSeo/sori/jobledger"
@@ -216,6 +218,34 @@ func TestIdempotencyKeyFormBoundaries(t *testing.T) {
 		if want := []string{"startup"}; !reflect.DeepEqual(e.tr.calls, want) {
 			t.Fatalf("key %q: calls = %v, want %v", k, e.tr.calls, want)
 		}
+	}
+}
+
+// A JobSpec carrying fields this contract revision does not define, at the
+// top level or in a nested message, is FIELD_UNKNOWN before the namespace
+// port is asked. An unknown field is never hashed into the meaning.
+func TestUnknownSpecFieldsRefusedBeforeNamespace(t *testing.T) {
+	unknown := protowire.AppendVarint(protowire.AppendTag(nil, 999, protowire.VarintType), 1)
+	cases := map[string]func(*opsv1.JobSpec){
+		"top level":    func(s *opsv1.JobSpec) { s.ProtoReflect().SetUnknown(unknown) },
+		"local import": func(s *opsv1.JobSpec) { s.GetLocalImport().ProtoReflect().SetUnknown(unknown) },
+		"asset target": func(s *opsv1.JobSpec) { s.GetLocalImport().GetTarget().ProtoReflect().SetUnknown(unknown) },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			s := spec("genome-a")
+			opKey := key(e, "k1", s)
+			mutate(s)
+			e.tr.calls = nil
+			_, err := e.f.SubmitJob(e.ctx, alice, &opsv1.SubmitJobRequest{Header: header(), Key: opKey, Spec: s})
+			if got := opsfacade.ReasonOf(err); got != opsv1.ErrorReason_ERROR_REASON_FIELD_UNKNOWN {
+				t.Fatalf("reason = %v (%v), want FIELD_UNKNOWN", got, err)
+			}
+			if want := []string{"startup"}; !reflect.DeepEqual(e.tr.calls, want) {
+				t.Fatalf("calls = %v, want %v", e.tr.calls, want)
+			}
+		})
 	}
 }
 

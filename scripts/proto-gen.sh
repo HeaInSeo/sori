@@ -30,6 +30,10 @@ check_version protoc-gen-go-grpc "$PROTOC_GEN_GO_GRPC_VERSION"
 buf build
 buf lint
 buf format -d --exit-code
+# Generated code comes only from the current .proto set: drop the old files
+# first, so a removed or renamed .proto cannot leave a stale .pb.go that would
+# then be hashed into GENERATED.provenance.
+find api/sori/ops/v1 -maxdepth 1 -name '*.pb.go' -delete
 buf generate
 
 # sha256sum lines ("<hex>  <path>"), paths relative to api/, sorted by path.

@@ -16,6 +16,8 @@ import (
 	"encoding/hex"
 	"errors"
 
+	"google.golang.org/protobuf/reflect/protoreflect"
+
 	opsv1 "github.com/HeaInSeo/sori/api/sori/ops/v1"
 	"github.com/HeaInSeo/sori/jobledger"
 )
@@ -188,6 +190,9 @@ func (f *Facade) prepare(ctx context.Context, c Caller, op Operation, h *opsv1.R
 	if !validIdempotencyKey(key.GetIdempotencyKey()) {
 		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID)
 	}
+	if hasUnknownFields(spec.ProtoReflect()) {
+		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_FIELD_UNKNOWN)
+	}
 	if f.Namespaces == nil {
 		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_NAMESPACE_INVALID)
 	}
@@ -235,6 +240,39 @@ func validIdempotencyKey(k string) bool {
 		}
 	}
 	return true
+}
+
+// hasUnknownFields reports whether m, or any message it holds directly, in a
+// list or as a map value, carries fields this contract revision does not
+// define. A JobSpec with such fields would have a meaning the server cannot
+// see, so the structure step refuses it.
+func hasUnknownFields(m protoreflect.Message) bool {
+	if len(m.GetUnknown()) > 0 {
+		return true
+	}
+	found := false
+	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		switch {
+		case fd.IsMap():
+			if fd.MapValue().Message() != nil {
+				v.Map().Range(func(_ protoreflect.MapKey, mv protoreflect.Value) bool {
+					found = hasUnknownFields(mv.Message())
+					return !found
+				})
+			}
+		case fd.IsList():
+			if fd.Message() != nil {
+				l := v.List()
+				for i := 0; i < l.Len() && !found; i++ {
+					found = hasUnknownFields(l.Get(i).Message())
+				}
+			}
+		case fd.Message() != nil:
+			found = hasUnknownFields(v.Message())
+		}
+		return !found
+	})
+	return found
 }
 
 // meaningReasons are the typed verifier refusals the contract defines for a
