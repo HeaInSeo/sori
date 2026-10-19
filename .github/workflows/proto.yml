@@ -1,7 +1,7 @@
 name: Proto
 
 # Restored sori.ops.v1 contract (D01.4-r3 + r4 comment patch). This job proves
-# the committed Go code and api/provenance.json are exactly what the pinned
+# the committed Go code and api/sori/ops/v1/GENERATED.provenance are exactly what the pinned
 # toolchain generates from the committed .proto files. It does not run buf
 # breaking: no accepted wire baseline exists yet.
 on:
@@ -19,6 +19,7 @@ jobs:
   regenerate:
     name: Proto regenerate-diff
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:

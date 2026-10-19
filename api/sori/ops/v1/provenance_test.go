@@ -16,7 +16,7 @@ import (
 
 // acceptedProto is the accepted D01.4 contract (r3 blocks + r4 comment-only
 // patch; unchanged through r7). The values are copied from the central record,
-// not from api/provenance.json, so a regenerated provenance cannot silently
+// not from api/sori/ops/v1/GENERATED.provenance, so a regenerated provenance cannot silently
 // move the contract.
 var acceptedProto = map[string]string{
 	"sori/ops/v1/common.proto":    "7f844f6d0310ffd13ed46f8cf265b0fd38823d0e86497a9fd1d601ae1000e6d8",

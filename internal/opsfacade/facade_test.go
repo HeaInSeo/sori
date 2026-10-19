@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	opsv1 "github.com/HeaInSeo/sori/api/sori/ops/v1"
@@ -70,6 +72,17 @@ type specMeanings struct {
 	t     *trace
 	state map[string]string // transfer_id -> verified frozen content id
 	err   error
+}
+
+// fixedMeaning answers every spec with the same VerifiedMeaning and no error.
+type fixedMeaning struct {
+	t *trace
+	m opsfacade.VerifiedMeaning
+}
+
+func (m fixedMeaning) Meaning(context.Context, opsfacade.Caller, *opsv1.JobSpec) (opsfacade.VerifiedMeaning, error) {
+	m.t.add("meaning")
+	return m.m, nil
 }
 
 func (m specMeanings) Meaning(_ context.Context, _ opsfacade.Caller, spec *opsv1.JobSpec) (opsfacade.VerifiedMeaning, error) {
@@ -178,6 +191,33 @@ func key(e *env, k string, s *opsv1.JobSpec) *opsv1.OperationKey {
 }
 
 var alice = opsfacade.Caller{Principal: principal}
+
+// The common.proto key form is 1..128 bytes of [A-Za-z0-9._~-]. The longest
+// key that uses every allowed character class is accepted; one byte longer, or
+// one disallowed byte, is FIELD_INVALID before the namespace port is asked.
+func TestIdempotencyKeyFormBoundaries(t *testing.T) {
+	longest := strings.Repeat("aZ09._~-", 16)
+	if len(longest) != 128 {
+		t.Fatalf("fixture key is %d bytes", len(longest))
+	}
+	e := newEnv(t)
+	s := spec("genome-a")
+	sub, err := e.f.SubmitJob(e.ctx, alice, &opsv1.SubmitJobRequest{Header: header(), Key: key(e, longest, s), Spec: s})
+	if err != nil || sub.Outcome != opsv1.SubmitOutcome_SUBMIT_OUTCOME_NEW {
+		t.Fatalf("128-byte key: %v, %v", sub, err)
+	}
+	for _, k := range []string{longest + "a", "a\x00b", "a+b", "a:b", "a\nb"} {
+		opKey := key(e, k, s)
+		e.tr.calls = nil
+		_, err := e.f.SubmitJob(e.ctx, alice, &opsv1.SubmitJobRequest{Header: header(), Key: opKey, Spec: s})
+		if got := opsfacade.ReasonOf(err); got != opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID {
+			t.Fatalf("key %q: reason = %v (%v), want FIELD_INVALID", k, got, err)
+		}
+		if want := []string{"startup"}; !reflect.DeepEqual(e.tr.calls, want) {
+			t.Fatalf("key %q: calls = %v, want %v", k, e.tr.calls, want)
+		}
+	}
+}
 
 func TestAckLossReplayConvergesOnSameJob(t *testing.T) {
 	e := newEnv(t)
@@ -293,9 +333,42 @@ func TestRefusalsHappenBeforeAnyLedgerCall(t *testing.T) {
 		{"client digest mismatch", func(_ *env, k *opsv1.OperationKey, _ *opsv1.RequestHeader) {
 			k.RequestMeaningSha256 = make([]byte, 32)
 		}, opsv1.ErrorReason_ERROR_REASON_MEANING_DIGEST_MISMATCH},
-		{"meaning not server-verifiable", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) {
-			e.f.Meanings = specMeanings{t: e.tr, err: errors.New("transfer not frozen")}
+		{"meaning verifier unavailable", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) {
+			e.f.Meanings = specMeanings{t: e.tr, err: errors.New("verifier unavailable")}
 		}, opsv1.ErrorReason_ERROR_REASON_RO_HOLD},
+		{"meaning typed out-of-set reason", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) {
+			e.f.Meanings = specMeanings{t: e.tr, err: &opsfacade.Error{Reason: opsv1.ErrorReason_ERROR_REASON_AUTH_REQUIRED}}
+		}, opsv1.ErrorReason_ERROR_REASON_RO_HOLD},
+		{"transfer not frozen", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) {
+			e.f.Meanings = specMeanings{t: e.tr, err: &opsfacade.Error{Reason: opsv1.ErrorReason_ERROR_REASON_TRANSFER_NOT_FROZEN}}
+		}, opsv1.ErrorReason_ERROR_REASON_TRANSFER_NOT_FROZEN},
+		{"meaning field unknown", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) {
+			e.f.Meanings = specMeanings{t: e.tr, err: &opsfacade.Error{Reason: opsv1.ErrorReason_ERROR_REASON_FIELD_UNKNOWN}}
+		}, opsv1.ErrorReason_ERROR_REASON_FIELD_UNKNOWN},
+		{"meaning field invalid (wrapped)", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) {
+			e.f.Meanings = specMeanings{t: e.tr, err: fmt.Errorf("adapter: %w", &opsfacade.Error{Reason: opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID})}
+		}, opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID},
+		{"member kind rejected", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) {
+			e.f.Meanings = specMeanings{t: e.tr, err: &opsfacade.Error{Reason: opsv1.ErrorReason_ERROR_REASON_MEMBER_KIND_REJECTED}}
+		}, opsv1.ErrorReason_ERROR_REASON_MEMBER_KIND_REJECTED},
+		{"meaning digest not 32 bytes", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) {
+			e.f.Meanings = fixedMeaning{t: e.tr, m: opsfacade.VerifiedMeaning{SHA256: make([]byte, 31), Kind: "LOCAL_IMPORT"}}
+		}, opsv1.ErrorReason_ERROR_REASON_RO_HOLD},
+		{"meaning without kind", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) {
+			e.f.Meanings = fixedMeaning{t: e.tr, m: opsfacade.VerifiedMeaning{SHA256: make([]byte, 32)}}
+		}, opsv1.ErrorReason_ERROR_REASON_RO_HOLD},
+		{"empty key", func(_ *env, k *opsv1.OperationKey, _ *opsv1.RequestHeader) { k.IdempotencyKey = "" },
+			opsv1.ErrorReason_ERROR_REASON_FIELD_UNSPECIFIED},
+		{"key 129 bytes", func(_ *env, k *opsv1.OperationKey, _ *opsv1.RequestHeader) {
+			k.IdempotencyKey = strings.Repeat("a", 129)
+		},
+			opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID},
+		{"key with space", func(_ *env, k *opsv1.OperationKey, _ *opsv1.RequestHeader) { k.IdempotencyKey = "a b" },
+			opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID},
+		{"key with slash", func(_ *env, k *opsv1.OperationKey, _ *opsv1.RequestHeader) { k.IdempotencyKey = "a/b" },
+			opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID},
+		{"key non-ascii", func(_ *env, k *opsv1.OperationKey, _ *opsv1.RequestHeader) { k.IdempotencyKey = "kéy" },
+			opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID},
 		{"no meaning port", func(e *env, _ *opsv1.OperationKey, _ *opsv1.RequestHeader) { e.f.Meanings = nil },
 			opsv1.ErrorReason_ERROR_REASON_RO_HOLD},
 	}

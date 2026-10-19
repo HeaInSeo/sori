@@ -94,7 +94,10 @@ type VerifiedMeaning struct {
 	Kind   string
 }
 
-// Meanings computes the server-side request meaning.
+// Meanings computes the server-side request meaning. A refusal the contract
+// types (MEMBER_KIND_REJECTED, TRANSFER_NOT_FROZEN, FIELD_UNKNOWN,
+// FIELD_INVALID) is returned as an *Error with that reason; any other error
+// means the meaning cannot be verified now and maps to RO_HOLD.
 type Meanings interface {
 	Meaning(ctx context.Context, c Caller, spec *opsv1.JobSpec) (VerifiedMeaning, error)
 }
@@ -182,6 +185,9 @@ func (f *Facade) prepare(ctx context.Context, c Caller, op Operation, h *opsv1.R
 	if key == nil || spec == nil || key.GetIdempotencyKey() == "" {
 		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_FIELD_UNSPECIFIED)
 	}
+	if !validIdempotencyKey(key.GetIdempotencyKey()) {
+		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID)
+	}
 	if f.Namespaces == nil {
 		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_NAMESPACE_INVALID)
 	}
@@ -196,7 +202,10 @@ func (f *Facade) prepare(ctx context.Context, c Caller, op Operation, h *opsv1.R
 		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_RO_HOLD)
 	}
 	m, err := f.Meanings.Meaning(ctx, c, spec)
-	if err != nil || len(m.SHA256) != 32 || m.Kind == "" {
+	if err != nil {
+		return prepared{}, meaningFailure(err)
+	}
+	if len(m.SHA256) != 32 || m.Kind == "" {
 		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_RO_HOLD)
 	}
 	if !bytes.Equal(m.SHA256, key.GetRequestMeaningSha256()) {
@@ -206,6 +215,47 @@ func (f *Facade) prepare(ctx context.Context, c Caller, op Operation, h *opsv1.R
 		Namespace: ns, Principal: c.Principal, IdempotencyKey: key.GetIdempotencyKey(),
 		MeaningDigest: "sha256:" + hex.EncodeToString(m.SHA256), Kind: m.Kind,
 	}}, nil
+}
+
+// maxIdempotencyKeyBytes is the common.proto bound on OperationKey.idempotency_key.
+const maxIdempotencyKeyBytes = 128
+
+// validIdempotencyKey reports whether k is 1..128 bytes of [A-Za-z0-9._~-],
+// the form common.proto defines for OperationKey.idempotency_key.
+func validIdempotencyKey(k string) bool {
+	if len(k) == 0 || len(k) > maxIdempotencyKeyBytes {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		switch c := k[i]; {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9',
+			c == '.', c == '_', c == '~', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// meaningReasons are the typed verifier refusals the contract defines for a
+// JobSpec the server cannot accept as given. A Meanings port that returns one
+// of them as an *Error keeps that reason.
+var meaningReasons = map[opsv1.ErrorReason]bool{
+	opsv1.ErrorReason_ERROR_REASON_MEMBER_KIND_REJECTED: true,
+	opsv1.ErrorReason_ERROR_REASON_TRANSFER_NOT_FROZEN:  true,
+	opsv1.ErrorReason_ERROR_REASON_FIELD_UNKNOWN:        true,
+	opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID:        true,
+}
+
+// meaningFailure maps a Meanings port error. A typed verifier refusal keeps
+// its reason; any other error (unavailable state, untyped or out-of-set
+// reason) is RO_HOLD.
+func meaningFailure(err error) error {
+	var e *Error
+	if errors.As(err, &e) && meaningReasons[e.Reason] {
+		return fail(e.Reason)
+	}
+	return fail(opsv1.ErrorReason_ERROR_REASON_RO_HOLD)
 }
 
 func (f *Facade) startup(ctx context.Context, h *opsv1.RequestHeader, mutation bool) (StartupState, error) {
