@@ -8,7 +8,9 @@
 // eligibility/block history of resources, and the PreparedPublication and
 // PhysicalBinding records of D01.1/D01.3. Every mutation runs in one BEGIN IMMEDIATE
 // transaction committed with synchronous=FULL, and appends one record to a
-// hash-chained ledger in the same transaction.
+// hash-chained ledger in the same transaction. The single exception is the first
+// Init, a marker-only bootstrap of an empty store that appends no record (RW-C1
+// §5.1); InspectInitState classifies a store before any writing Open.
 //
 // Protected mutations are fenced by a Guard: the installation, activation epoch and
 // capture-cut counter read from the admin-control area, which is outside this

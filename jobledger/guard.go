@@ -52,6 +52,9 @@ var (
 	ErrActivationRefused = errors.New("jobledger: activation refused")
 	// ErrLedgerIntegrity: the hash-chained ledger does not verify.
 	ErrLedgerIntegrity = errors.New("jobledger: ledger integrity failure")
+	// ErrInitRefused: InspectInitState found a store that is not pristine, schema-only
+	// or exactly marker-empty, so offline init must not touch it.
+	ErrInitRefused = errors.New("jobledger: store refused for init")
 )
 
 // Guard is the fence a caller reads from the admin-control area before a request
@@ -142,6 +145,14 @@ func fence(ctx context.Context, q queryRower, g Guard) (marker, error) {
 // Init writes the installation marker of a fresh store: LIVE at activation epoch 1
 // and cut 0 (D01.3 C.5.7, data side of `sori-admin init`). It refuses a store that
 // already has a marker.
+//
+// It is a marker-only bootstrap (RW-C1 §5.1): one transaction checks that the store
+// is exactly this version's schema, has no content and no marker besides
+// schema_version, then writes the four markers and nothing else. It appends no
+// ledger row and no ledger head. A store with any other content, object or marker
+// is refused unchanged. A rerun after a lost acknowledgement does not call Init:
+// InspectInitState reports INIT_MARKER_EMPTY with the recorded installation id.
+// Ledgers written by older versions, which start with an "init" row, stay readable.
 func (s *Store) Init(ctx context.Context, installationID string) error {
 	if installationID == "" {
 		return fmt.Errorf("%w: empty installation id", ErrNotInitialized)
@@ -154,15 +165,37 @@ func (s *Store) Init(ctx context.Context, installationID string) error {
 		if ok {
 			return fmt.Errorf("%w: store already initialized", ErrActivationRefused)
 		}
-		for k, v := range map[string]string{
-			metaInstallationID: installationID, metaRestoreState: RestoreLive, metaActiveEpoch: "1", metaCutSeq: "0",
-		} {
+		// Marker-only bootstrap (RW-C1 §5.1): the store must be exactly this
+		// version's schema with no content and no marker but schema_version. This is
+		// the only mutation that appends no ledger row, so the ledger stays empty and
+		// its head stays (0, "").
+		if err := checkSchemaObjects(ctx, tx); err != nil {
+			return fmt.Errorf("%w: %w", ErrActivationRefused, err)
+		}
+		if err := checkNoContent(ctx, tx); err != nil {
+			return fmt.Errorf("%w: %w", ErrActivationRefused, err)
+		}
+		meta, err := readMeta(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if len(meta) != 1 || meta[metaSchemaVersion] != strconv.Itoa(SchemaVersion) {
+			return fmt.Errorf("%w: store has markers other than schema_version", ErrActivationRefused)
+		}
+		for k, v := range initMarkers(installationID) {
 			if err := setMeta(ctx, tx, k, v); err != nil {
 				return err
 			}
 		}
-		return appendLedger(ctx, tx, "init", installationID, map[string]any{"activation_epoch": 1})
+		return nil
 	})
+}
+
+// initMarkers are the exact markers Init writes besides schema_version.
+func initMarkers(installationID string) map[string]string {
+	return map[string]string{
+		metaInstallationID: installationID, metaRestoreState: RestoreLive, metaActiveEpoch: "1", metaCutSeq: "0",
+	}
 }
 
 // newID returns "<prefix>_" + a 256-bit CSPRNG value in lowercase base32 without
