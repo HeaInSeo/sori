@@ -193,6 +193,12 @@ func (f *Facade) prepare(ctx context.Context, c Caller, op Operation, h *opsv1.R
 	if hasUnknownFields(spec.ProtoReflect()) {
 		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_FIELD_UNKNOWN)
 	}
+	if specKind(spec) == "" || len(key.GetRequestMeaningSha256()) == 0 {
+		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_FIELD_UNSPECIFIED)
+	}
+	if len(key.GetRequestMeaningSha256()) != meaningDigestBytes {
+		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID)
+	}
 	if f.Namespaces == nil {
 		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_NAMESPACE_INVALID)
 	}
@@ -210,7 +216,9 @@ func (f *Facade) prepare(ctx context.Context, c Caller, op Operation, h *opsv1.R
 	if err != nil {
 		return prepared{}, meaningFailure(err)
 	}
-	if len(m.SHA256) != 32 || m.Kind == "" {
+	// A port answer the server cannot project, or one for another JobSpec case,
+	// is not a verified meaning of this request, so nothing reaches the ledger.
+	if len(m.SHA256) != meaningDigestBytes || m.Kind != specKind(spec) {
 		return prepared{}, fail(opsv1.ErrorReason_ERROR_REASON_RO_HOLD)
 	}
 	if !bytes.Equal(m.SHA256, key.GetRequestMeaningSha256()) {
@@ -224,6 +232,26 @@ func (f *Facade) prepare(ctx context.Context, c Caller, op Operation, h *opsv1.R
 
 // maxIdempotencyKeyBytes is the common.proto bound on OperationKey.idempotency_key.
 const maxIdempotencyKeyBytes = 128
+
+// meaningDigestBytes is the SHA-256 length of OperationKey.request_meaning_sha256
+// and of a verified meaning.
+const meaningDigestBytes = 32
+
+// specKind returns the ledger kind of the JobSpec case that is set, or the
+// empty string when no case is set. Every kind it returns is one ProjectJob
+// can project.
+func specKind(spec *opsv1.JobSpec) string {
+	switch spec.GetSpec().(type) {
+	case *opsv1.JobSpec_LocalImport:
+		return "LOCAL_IMPORT"
+	case *opsv1.JobSpec_OciAcquire:
+		return "OCI_ACQUIRE"
+	case *opsv1.JobSpec_Export:
+		return "EXPORT"
+	default:
+		return ""
+	}
+}
 
 // validIdempotencyKey reports whether k is 1..128 bytes of [A-Za-z0-9._~-],
 // the form common.proto defines for OperationKey.idempotency_key.
@@ -407,8 +435,13 @@ func (f *Facade) LookupJobByKey(ctx context.Context, c Caller, r *opsv1.LookupJo
 }
 
 // GetJob reads a Job through jobledger.Store.GetJob. A denied caller gets the
-// same ErrNotFound as a missing Job.
+// same ErrNotFound as a missing Job. As in prepare, the authenticated caller is
+// checked first, so an unauthenticated caller learns nothing about the header,
+// the startup state or the request fields.
 func (f *Facade) GetJob(ctx context.Context, c Caller, r *opsv1.GetJobRequest) (*opsv1.Job, error) {
+	if c.Principal == "" {
+		return nil, fail(opsv1.ErrorReason_ERROR_REASON_AUTH_REQUIRED)
+	}
 	if _, err := f.startup(ctx, r.GetHeader(), false); err != nil {
 		return nil, err
 	}

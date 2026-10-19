@@ -249,6 +249,142 @@ func TestUnknownSpecFieldsRefusedBeforeNamespace(t *testing.T) {
 	}
 }
 
+// request_meaning_sha256 is a 32-byte SHA-256 value (common.proto). An absent
+// digest is FIELD_UNSPECIFIED and any other length is FIELD_INVALID, both in
+// the structure step: the namespace, authorization and meaning ports are never
+// asked. A JobSpec with no case set is FIELD_UNSPECIFIED there too.
+func TestMalformedClientMeaningDigestRefusedBeforePorts(t *testing.T) {
+	cases := map[string]struct {
+		digest []byte
+		spec   func() *opsv1.JobSpec
+		want   opsv1.ErrorReason
+	}{
+		"digest absent":   {nil, func() *opsv1.JobSpec { return spec("genome-a") }, opsv1.ErrorReason_ERROR_REASON_FIELD_UNSPECIFIED},
+		"digest empty":    {[]byte{}, func() *opsv1.JobSpec { return spec("genome-a") }, opsv1.ErrorReason_ERROR_REASON_FIELD_UNSPECIFIED},
+		"digest 1 byte":   {[]byte{1}, func() *opsv1.JobSpec { return spec("genome-a") }, opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID},
+		"digest 31 bytes": {make([]byte, 31), func() *opsv1.JobSpec { return spec("genome-a") }, opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID},
+		"digest 33 bytes": {make([]byte, 33), func() *opsv1.JobSpec { return spec("genome-a") }, opsv1.ErrorReason_ERROR_REASON_FIELD_INVALID},
+		"spec no case":    {make([]byte, 32), func() *opsv1.JobSpec { return &opsv1.JobSpec{} }, opsv1.ErrorReason_ERROR_REASON_FIELD_UNSPECIFIED},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			s := c.spec()
+			k := &opsv1.OperationKey{NamespaceId: "sns1.tok", IdempotencyKey: "k1", RequestMeaningSha256: c.digest}
+			e.tr.calls = nil
+			_, err := e.f.SubmitJob(e.ctx, alice, &opsv1.SubmitJobRequest{Header: header(), Key: k, Spec: s})
+			if got := opsfacade.ReasonOf(err); got != c.want {
+				t.Fatalf("submit reason = %v (%v), want %v", got, err, c.want)
+			}
+			if want := []string{"startup"}; !reflect.DeepEqual(e.tr.calls, want) {
+				t.Fatalf("submit calls = %v, want %v", e.tr.calls, want)
+			}
+			e.tr.calls = nil
+			_, err = e.f.LookupJobByKey(e.ctx, alice, &opsv1.LookupJobByKeyRequest{Header: header(), Key: k, Spec: s})
+			if got := opsfacade.ReasonOf(err); got != c.want {
+				t.Fatalf("lookup reason = %v (%v), want %v", got, err, c.want)
+			}
+			if want := []string{"startup"}; !reflect.DeepEqual(e.tr.calls, want) {
+				t.Fatalf("lookup calls = %v, want %v", e.tr.calls, want)
+			}
+		})
+	}
+}
+
+// A Meanings answer whose kind the server cannot project, or whose kind belongs
+// to another JobSpec case, is RO_HOLD before any ledger call. Even with the
+// client digest matching, no Job is stored that ProjectJob would later refuse.
+func TestUnsupportedOrMismatchedMeaningKindRefusedBeforeLedger(t *testing.T) {
+	for name, kind := range map[string]string{
+		"typo kind":        "LOCAL_IMPORTS",
+		"lowercase kind":   "local_import",
+		"other spec case":  "EXPORT",
+		"other spec case2": "OCI_ACQUIRE",
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			s := spec("genome-a")
+			k := key(e, "k1", s)
+			e.f.Meanings = fixedMeaning{t: e.tr, m: opsfacade.VerifiedMeaning{SHA256: k.GetRequestMeaningSha256(), Kind: kind}}
+			e.tr.calls = nil
+			sub, err := e.f.SubmitJob(e.ctx, alice, &opsv1.SubmitJobRequest{Header: header(), Key: k, Spec: s})
+			if got := opsfacade.ReasonOf(err); got != opsv1.ErrorReason_ERROR_REASON_RO_HOLD || sub.Job != nil {
+				t.Fatalf("submit = %v, reason %v (%v), want RO_HOLD and no job", sub, got, err)
+			}
+			if want := []string{"startup", "namespace", "authorize", "meaning"}; !reflect.DeepEqual(e.tr.calls, want) {
+				t.Fatalf("submit calls = %v, want %v", e.tr.calls, want)
+			}
+			if jobs, _ := e.store.UnfinishedJobs(e.ctx); len(jobs) != 0 {
+				t.Fatalf("ledger stored %d jobs for kind %q", len(jobs), kind)
+			}
+			e.tr.calls = nil
+			lk, err := e.f.LookupJobByKey(e.ctx, alice, &opsv1.LookupJobByKeyRequest{Header: header(), Key: k, Spec: s})
+			if got := opsfacade.ReasonOf(err); got != opsv1.ErrorReason_ERROR_REASON_RO_HOLD || lk.Job != nil {
+				t.Fatalf("lookup = %v, reason %v (%v), want RO_HOLD and no job", lk, got, err)
+			}
+			if want := []string{"startup", "namespace", "authorize", "meaning"}; !reflect.DeepEqual(e.tr.calls, want) {
+				t.Fatalf("lookup calls = %v, want %v", e.tr.calls, want)
+			}
+		})
+	}
+}
+
+// Each JobSpec case with the matching kind from the Meanings port is accepted
+// and projects to that case's JobKind.
+func TestMatchingMeaningKindAcceptedForEachSpecCase(t *testing.T) {
+	cases := map[string]struct {
+		spec *opsv1.JobSpec
+		kind string
+		want opsv1.JobKind
+	}{
+		"local import": {spec("genome-a"), "LOCAL_IMPORT", opsv1.JobKind_JOB_KIND_LOCAL_IMPORT},
+		"oci acquire": {&opsv1.JobSpec{Spec: &opsv1.JobSpec_OciAcquire{OciAcquire: &opsv1.OciAcquireSpec{}}},
+			"OCI_ACQUIRE", opsv1.JobKind_JOB_KIND_OCI_ACQUIRE},
+		"export": {&opsv1.JobSpec{Spec: &opsv1.JobSpec_Export{Export: &opsv1.ExportSpec{}}},
+			"EXPORT", opsv1.JobKind_JOB_KIND_EXPORT},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			digest := sha256.Sum256([]byte(name))
+			e.f.Meanings = fixedMeaning{t: e.tr, m: opsfacade.VerifiedMeaning{SHA256: digest[:], Kind: c.kind}}
+			k := &opsv1.OperationKey{NamespaceId: "sns1.tok", IdempotencyKey: "k1", RequestMeaningSha256: digest[:]}
+			sub, err := e.f.SubmitJob(e.ctx, alice, &opsv1.SubmitJobRequest{Header: header(), Key: k, Spec: c.spec})
+			if err != nil || sub.Outcome != opsv1.SubmitOutcome_SUBMIT_OUTCOME_NEW || sub.Job.GetKind() != c.want {
+				t.Fatalf("submit = %v (%v), want NEW %v", sub, err, c.want)
+			}
+		})
+	}
+}
+
+// GetJob checks the authenticated caller before the startup port or the
+// request fields, the same order prepare uses: an empty principal is
+// AUTH_REQUIRED whatever the header or job_id say, and no port is asked.
+func TestGetJobAuthenticatesBeforeStartupAndFields(t *testing.T) {
+	cases := map[string]func(*env, *opsv1.GetJobRequest){
+		"valid request":        func(*env, *opsv1.GetJobRequest) {},
+		"unsupported revision": func(_ *env, r *opsv1.GetJobRequest) { r.Header.ContractRevision = 2 },
+		"other installation":   func(_ *env, r *opsv1.GetJobRequest) { r.Header.Installation.InstallationId = "other" },
+		"startup unavailable":  func(e *env, _ *opsv1.GetJobRequest) { e.f.Startup = nil },
+		"empty job id":         func(_ *env, r *opsv1.GetJobRequest) { r.JobId = "" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			r := &opsv1.GetJobRequest{Header: header(), JobId: "job_x"}
+			mutate(e, r)
+			e.tr.calls = nil
+			got, err := e.f.GetJob(e.ctx, opsfacade.Caller{}, r)
+			if reason := opsfacade.ReasonOf(err); reason != opsv1.ErrorReason_ERROR_REASON_AUTH_REQUIRED || got != nil {
+				t.Fatalf("get = %v, reason %v (%v), want AUTH_REQUIRED", got, reason, err)
+			}
+			if len(e.tr.calls) != 0 {
+				t.Fatalf("ports asked before authentication: %v", e.tr.calls)
+			}
+		})
+	}
+}
+
 func TestAckLossReplayConvergesOnSameJob(t *testing.T) {
 	e := newEnv(t)
 	s := spec("genome-a")
