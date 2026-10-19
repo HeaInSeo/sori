@@ -307,6 +307,15 @@ func TestRefusedWritesNothing(t *testing.T) {
 			p.Authority = filepath.Join(link, filepath.Base(p.JobLedger))
 			return p
 		},
+		// filepath.Dir would clean "link/.." away; the kernel follows the link first.
+		"symlinked directory then .., absent authority": func(t *testing.T, p admininit.Paths) admininit.Paths {
+			p.Authority = dotDotAlias(t, p.JobLedger)
+			return p
+		},
+		"symlinked directory then .., absent job ledger": func(t *testing.T, p admininit.Paths) admininit.Paths {
+			p.JobLedger = dotDotAlias(t, p.Authority)
+			return p
+		},
 		"job ledger path unset": func(_ *testing.T, p admininit.Paths) admininit.Paths {
 			p.JobLedger = ""
 			return p
@@ -331,6 +340,21 @@ func TestRefusedWritesNothing(t *testing.T) {
 			checkUnchanged(t, before, snapshot(t, base))
 		})
 	}
+}
+
+// dotDotAlias returns "<other>/link/../<dir name>/<file name>" for path, with link
+// a symlink to path's directory. It names path's file, but its lexical parent
+// <other>/<dir name> does not exist. The path is joined by hand because
+// filepath.Join would clean the "..".
+func dotDotAlias(t *testing.T, path string) string {
+	t.Helper()
+	dir := filepath.Dir(path)
+	other := t.TempDir()
+	if err := os.Symlink(dir, filepath.Join(other, "link")); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	return other + sep + "link" + sep + ".." + sep + filepath.Base(dir) + sep + filepath.Base(path)
 }
 
 func provision(t *testing.T, p admininit.Paths) {

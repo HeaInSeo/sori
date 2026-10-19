@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/HeaInSeo/sori/authority/sqlitestore"
 	"github.com/HeaInSeo/sori/jobledger"
@@ -150,6 +151,10 @@ func checkPaths(p Paths) error {
 // symlinked directory. Two existing files are compared by identity; when neither
 // exists, their directories are compared by identity and their names by value.
 // One existing and one absent path are different files.
+//
+// The directories are the raw parents from rawDir, not filepath.Dir: Dir cleans
+// "link/.." away lexically, while SQLite opens the raw path and the kernel
+// follows the link before the "..".
 func sameFile(a, b string) (bool, error) {
 	ai, aerr := statIfExists(a)
 	bi, berr := statIfExists(b)
@@ -164,8 +169,8 @@ func sameFile(a, b string) (bool, error) {
 	case filepath.Base(a) != filepath.Base(b):
 		return false, nil
 	}
-	ad, aerr := os.Stat(filepath.Dir(a))
-	bd, berr := os.Stat(filepath.Dir(b))
+	ad, aerr := os.Stat(rawDir(a))
+	bd, berr := os.Stat(rawDir(b))
 	if err := errors.Join(aerr, berr); err != nil {
 		// A missing directory leaves the database absent; Open would fail later.
 		if errors.Is(aerr, fs.ErrNotExist) || errors.Is(berr, fs.ErrNotExist) {
@@ -174,6 +179,16 @@ func sameFile(a, b string) (bool, error) {
 		return false, err
 	}
 	return os.SameFile(ad, bd), nil
+}
+
+// rawDir returns path up to and including its last separator, without lexical
+// cleaning, or "." when path has no separator.
+func rawDir(path string) string {
+	i := strings.LastIndexByte(path, os.PathSeparator)
+	if i < 0 {
+		return "."
+	}
+	return path[:i+1]
 }
 
 // statIfExists returns nil info and nil error for an absent path.
