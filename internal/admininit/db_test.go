@@ -316,6 +316,11 @@ func TestRefusedWritesNothing(t *testing.T) {
 			p.JobLedger = dotDotAlias(t, p.Authority)
 			return p
 		},
+		// A case-insensitive volume names one file; a case-sensitive one is refused too.
+		"names differ only in case, both absent": func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			p.Authority = filepath.Join(filepath.Dir(p.JobLedger), strings.ToUpper(filepath.Base(p.JobLedger)))
+			return p
+		},
 		"job ledger path unset": func(_ *testing.T, p admininit.Paths) admininit.Paths {
 			p.JobLedger = ""
 			return p
@@ -328,6 +333,18 @@ func TestRefusedWritesNothing(t *testing.T) {
 			p.JobLedger = ":memory:"
 			return p
 		},
+	}
+	// Opening the database that owns a sidecar would remove or overwrite the other
+	// database as a stale WAL or journal.
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		cases["authority at the job ledger's "+suffix] = func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			p.Authority = p.JobLedger + suffix
+			return p
+		}
+		cases["job ledger at the authority's "+suffix] = func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			p.JobLedger = p.Authority + suffix
+			return p
+		}
 	}
 	for name, setup := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -132,7 +132,14 @@ func step(s Step) error {
 	return afterStep(s)
 }
 
-// checkPaths refuses an empty path or two paths that name one database file.
+// sidecarSuffixes name the files SQLite keeps next to a database: the WAL, its
+// shared-memory index and the rollback journal.
+var sidecarSuffixes = []string{"-wal", "-shm", "-journal"}
+
+// checkPaths refuses an empty path, two paths that name one database file, and
+// a database that is one of the other database's SQLite sidecar files. Opening
+// the database that owns the sidecar would treat the other database as a stale
+// WAL or journal and remove or overwrite it.
 func checkPaths(p Paths) error {
 	if p.JobLedger == "" || p.Authority == "" {
 		return fmt.Errorf("%w: database path not set", ErrRefused)
@@ -144,13 +151,26 @@ func checkPaths(p Paths) error {
 	if same {
 		return fmt.Errorf("%w: job ledger %s and authority %s are one file", ErrRefused, p.JobLedger, p.Authority)
 	}
+	for _, s := range sidecarSuffixes {
+		for _, pair := range [][2]string{{p.Authority, p.JobLedger + s}, {p.JobLedger, p.Authority + s}} {
+			same, err := sameFile(pair[0], pair[1])
+			if err != nil {
+				return fmt.Errorf("%w: %w", ErrRefused, err)
+			}
+			if same {
+				return fmt.Errorf("%w: database %s is the SQLite file %s", ErrRefused, pair[0], pair[1])
+			}
+		}
+	}
 	return nil
 }
 
 // sameFile reports whether a and b name one file, also through a hard link or a
 // symlinked directory. Two existing files are compared by identity; when neither
-// exists, their directories are compared by identity and their names by value.
-// One existing and one absent path are different files.
+// exists, their directories are compared by identity and their names without
+// case, so that a case-insensitive volume cannot alias two absent names. On a
+// case-sensitive volume this refuses names that differ only in case, which is
+// conservative. One existing and one absent path are different files.
 //
 // The directories are the raw parents from rawDir, not filepath.Dir: Dir cleans
 // "link/.." away lexically, while SQLite opens the raw path and the kernel
@@ -166,7 +186,7 @@ func sameFile(a, b string) (bool, error) {
 		return os.SameFile(ai, bi), nil
 	case ai != nil || bi != nil:
 		return false, nil
-	case filepath.Base(a) != filepath.Base(b):
+	case !strings.EqualFold(filepath.Base(a), filepath.Base(b)):
 		return false, nil
 	}
 	ad, aerr := os.Stat(rawDir(a))
