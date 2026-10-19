@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "protoSetDigest": "5c91a0ecdf941b445fce5b21b9ac601142d0bd7fc1663098f134e5501217f1ca",
+  "protoSetDigestRule": "cd api && sha256sum sori/ops/v1/*.proto | LC_ALL=C sort -k2 | sha256sum",
+  "sourceRevision": "D01.4-r3 proto blocks + r4 comment-only patch, unchanged through D01.4-r7; contract_revision 1; not an accepted wire baseline",
+  "bufVersion": "1.73.0",
+  "plugins": [
+    {"name": "protoc-gen-go", "version": "v1.36.11", "opt": "paths=source_relative"},
+    {"name": "protoc-gen-go-grpc", "version": "1.6.1", "opt": "paths=source_relative"}
+  ],
+  "proto": {
+    "sori/ops/v1/common.proto": "7f844f6d0310ffd13ed46f8cf265b0fd38823d0e86497a9fd1d601ae1000e6d8",
+    "sori/ops/v1/discovery.proto": "3ea91f7ab5336a41a8636ec3aacdf090f38fb8dea9b0810b6ea3a12e13ee43be",
+    "sori/ops/v1/job.proto": "14dda4f0d7cc32a32ee90617fb9a578f6c522ea714c2cd4fd2f51b7f8877578f",
+    "sori/ops/v1/transfer.proto": "6f2c4f6156a7ce51e854738ce677b30682f209219f5eae6a9778c562c75af446"
+  },
+  "generated": {
+    "sori/ops/v1/common.pb.go": "236d987e9756d006bde31fb1aae4e9fe6b9a375f26539b76cdf3f236a9bc0f77",
+    "sori/ops/v1/discovery.pb.go": "cfe60bf55dc7739bd79ee8c92b007a3d707446353975b5689220d1049237a8b9",
+    "sori/ops/v1/discovery_grpc.pb.go": "eb543c9d0ecad56506be5c03837f237cc217061c4b4ddb7b19fd275c166efb3c",
+    "sori/ops/v1/job.pb.go": "5c9914a63683e5ff5527ea6d4ad6dd0765db24dba166d8613483c6b5892fd49d",
+    "sori/ops/v1/job_grpc.pb.go": "49d386aab3446b200e13ab6ec63fac4364273ee01b74f38fef6e32f3a61721ca",
+    "sori/ops/v1/transfer.pb.go": "1b0a7534a4f4d420c0a8a48dd2bec263683f6430c91ef540e00fcc7b530e83f0",
+    "sori/ops/v1/transfer_grpc.pb.go": "e681c2e41b3b1d07561080874167084fe8aff0df50bab992720e72e20df60c52"
+  }
+}

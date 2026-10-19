@@ -1,0 +1,168 @@
+// D01.4-r4 READ-ONLY PREP draft. Sori-local contract, not a platform-global wire.
+// Pre-baseline: no accepted baseline exists yet, so r4 edits stay contract_revision 1.
+syntax = "proto3";
+
+package sori.ops.v1;
+
+option csharp_namespace = "Sori.Ops.V1";
+option go_package = "github.com/HeaInSeo/sori/api/sori/ops/v1;opsv1";
+
+// RequestHeader binds every call to one contract revision and one logical
+// installation. The endpoint address is never identity.
+message RequestHeader {
+  // Contract revision the caller speaks. Unsupported -> UNSUPPORTED_CONTRACT.
+  uint32 contract_revision = 1;
+  InstallationBinding installation = 2;
+}
+
+// InstallationBinding comes from Discover. A different installation_id than the
+// one stored with an operation -> INSTALLATION_MISMATCH, never auto re-issue.
+message InstallationBinding {
+  string installation_id = 1;
+  // Current admin-control activation epoch (D01.1-3-r2 B.1). Protected
+  // mutations with a different value -> FENCE_STALE. Not part of the dedup
+  // scope; the namespace token carries its own issue epoch.
+  uint64 activation_epoch = 2;
+}
+
+// OperationKey is persisted by the client before the first send.
+// Dedup scope = installation_id + authenticated principal_subject (from the
+// transport credential, never from this message) + namespace_id.
+message OperationKey {
+  // Opaque "sns1." token from DiscoveryService.AllocateNamespace. Clients
+  // never parse, rewrite or construct it.
+  string namespace_id = 1;
+  // Client-chosen, 1..128 bytes of [A-Za-z0-9._~-].
+  string idempotency_key = 2;
+  // Cross-check only: SHA-256 (32 bytes) of the request-meaning v1 envelope
+  // the client computed. The server recomputes the envelope from the request
+  // and server-verified state; a mismatch -> MEANING_DIGEST_MISMATCH before
+  // any key lookup. The server never trusts this value as the meaning.
+  bytes request_meaning_sha256 = 3;
+}
+
+// Separate axes; never collapsed into one success/failure (CAD D01.2-2).
+enum AcceptanceState {
+  ACCEPTANCE_STATE_UNSPECIFIED = 0;
+  ACCEPTANCE_STATE_NOT_ACCEPTED = 1;
+  ACCEPTANCE_STATE_ACCEPTED = 2;
+  ACCEPTANCE_STATE_UNKNOWN = 3;
+}
+
+enum EffectState {
+  EFFECT_STATE_UNSPECIFIED = 0;
+  EFFECT_STATE_NONE = 1;
+  EFFECT_STATE_PENDING = 2;
+  EFFECT_STATE_COMMITTED = 3;
+  EFFECT_STATE_FAILED = 4;
+  EFFECT_STATE_UNKNOWN = 5;
+}
+
+enum VerificationState {
+  VERIFICATION_STATE_UNSPECIFIED = 0;
+  VERIFICATION_STATE_NOT_RUN = 1;
+  VERIFICATION_STATE_PASSED = 2;
+  VERIFICATION_STATE_FAILED = 3;
+  VERIFICATION_STATE_UNKNOWN = 4;
+}
+
+// Coverage of a read. No totals/counts are exposed (no hidden-row leak).
+enum Coverage {
+  COVERAGE_UNSPECIFIED = 0;
+  COVERAGE_COMPLETE = 1;
+  COVERAGE_PARTIAL_REDACTED = 2;
+  COVERAGE_PARTIAL_UNAVAILABLE = 3;
+}
+
+// Server write mode (D01.3-r3 C.5 startup rows).
+enum Writability {
+  WRITABILITY_UNSPECIFIED = 0;
+  WRITABILITY_RW = 1;
+  WRITABILITY_RO_HOLD = 2;
+}
+
+// Which authoritative record family answered a read.
+enum SourceOwner {
+  SOURCE_OWNER_UNSPECIFIED = 0;
+  // Sori Job/operation ledger.
+  SOURCE_OWNER_SORI_LEDGER = 1;
+  // Sori authority (Asset/Revision/binding records).
+  SOURCE_OWNER_SORI_AUTHORITY = 2;
+}
+
+// ReadBasis says what a read reflects. It is separate from Coverage, so a
+// client can tell a pre-restore, RO or stale read from a current RW one.
+message ReadBasis {
+  SourceOwner source_owner = 1;
+  // Admin-control activation epoch the serving store runs under.
+  uint64 activation_epoch = 2;
+  // Ledger sequence the read is consistent with (as-of). Monotonic within one
+  // activation epoch; not comparable across epochs.
+  uint64 as_of_ledger_seq = 3;
+  // Non-empty only when the store is a restored cut that has not been
+  // activated (RESTORED_INACTIVE, or store cut counter below the admin-control
+  // cut counter). Every absent key then reads RECONCILE_HOLD, never NOT_FOUND.
+  string restore_cut_id = 4;
+  Writability writable = 5;
+}
+
+// Carried in grpc-status details as a packed message. Unknown reason values
+// are treated by clients as a generic failure, never as success.
+enum ErrorReason {
+  ERROR_REASON_UNSPECIFIED = 0;
+  ERROR_REASON_INSTALLATION_MISMATCH = 1;
+  ERROR_REASON_UNSUPPORTED_CONTRACT = 2;
+  ERROR_REASON_CURSOR_INVALID_RELIST = 3;
+  ERROR_REASON_RECONCILE_HOLD = 4;
+  ERROR_REASON_IDEMPOTENCY_CONFLICT = 5;
+  ERROR_REASON_AUTH_REQUIRED = 6;
+  ERROR_REASON_AUTH_DENIED = 7;
+  ERROR_REASON_AUTH_PROVIDER_UNKNOWN = 8;
+  ERROR_REASON_FENCE_STALE = 9;
+  ERROR_REASON_PATH_INVALID = 10;
+  ERROR_REASON_TRANSFER_INVALID_RESTART = 11;
+  ERROR_REASON_TRANSFER_CHUNK_INVALID = 12;
+  ERROR_REASON_TRANSFER_CREDIT_EXCEEDED = 13;
+  ERROR_REASON_FIELD_UNSPECIFIED = 14;
+  // N1: malformed token, unknown key_id, MAC failure, other installation or
+  // other principal. One code for every cause (parity).
+  ERROR_REASON_NAMESPACE_INVALID = 15;
+  // N9: namespace RETIRED by explicit admin action; never NEW.
+  ERROR_REASON_NAMESPACE_RETIRED = 16;
+  // Server is RO/HOLD (any D01.3-r3 C.5 row other than S3/S9); no protected
+  // mutation.
+  ERROR_REASON_RO_HOLD = 17;
+  // Client cross-check digest != server-recomputed meaning. Checked before
+  // key lookup; never returns an existing Job.
+  ERROR_REASON_MEANING_DIGEST_MISMATCH = 18;
+  // Member declaration duplicate / missing binding / bad index / bad
+  // cardinality count / unsupported declaration_version.
+  ERROR_REASON_DECLARATION_INVALID = 19;
+  // Declared role is in the first-profile rejected set (D01.1 CAD-3).
+  ERROR_REASON_MEMBER_KIND_REJECTED = 20;
+  // LOCAL_IMPORT on a transfer that is not FROZEN (A.8.1 row 8).
+  ERROR_REASON_TRANSFER_NOT_FROZEN = 21;
+  // CREATE target names an existing asset; never reinterpreted as ATTACH.
+  ERROR_REASON_ASSET_NAME_EXISTS = 22;
+  // A meaning-bearing message carries fields unknown to this server.
+  ERROR_REASON_FIELD_UNKNOWN = 23;
+  // A value outside the per-RPC limits or form (length, charset, order).
+  ERROR_REASON_FIELD_INVALID = 24;
+}
+
+message ErrorDetail {
+  ErrorReason reason = 1;
+  string message = 2;
+  // Filled for UNSUPPORTED_CONTRACT.
+  repeated uint32 supported_contract_revisions = 3;
+}
+
+// Wire transfer limits (CAD-SORI-D01.4-r3 item 6). Distinct from the 1 GiB CAS chunk.
+message TransferLimits {
+  // Data bytes per chunk. Design default 8388608 (8 MiB).
+  uint32 max_chunk_bytes = 1;
+  // Unacknowledged PutChunk calls per transfer. First profile: exactly 1.
+  uint32 initial_credit = 2;
+  // Serialized message cap. Design default 9437184 (9 MiB).
+  uint32 max_message_bytes = 3;
+}
