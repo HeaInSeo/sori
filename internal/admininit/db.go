@@ -13,6 +13,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 
 	"github.com/HeaInSeo/sori/authority/sqlitestore"
@@ -129,23 +131,58 @@ func step(s Step) error {
 	return afterStep(s)
 }
 
-// checkPaths refuses an empty path or one database path used for both.
+// checkPaths refuses an empty path or two paths that name one database file.
 func checkPaths(p Paths) error {
 	if p.JobLedger == "" || p.Authority == "" {
 		return fmt.Errorf("%w: database path not set", ErrRefused)
 	}
-	l, err := filepath.Abs(p.JobLedger)
+	same, err := sameFile(p.JobLedger, p.Authority)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRefused, err)
 	}
-	a, err := filepath.Abs(p.Authority)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrRefused, err)
-	}
-	if l == a {
-		return fmt.Errorf("%w: job ledger and authority share %s", ErrRefused, l)
+	if same {
+		return fmt.Errorf("%w: job ledger %s and authority %s are one file", ErrRefused, p.JobLedger, p.Authority)
 	}
 	return nil
+}
+
+// sameFile reports whether a and b name one file, also through a hard link or a
+// symlinked directory. Two existing files are compared by identity; when neither
+// exists, their directories are compared by identity and their names by value.
+// One existing and one absent path are different files.
+func sameFile(a, b string) (bool, error) {
+	ai, aerr := statIfExists(a)
+	bi, berr := statIfExists(b)
+	if err := errors.Join(aerr, berr); err != nil {
+		return false, err
+	}
+	switch {
+	case ai != nil && bi != nil:
+		return os.SameFile(ai, bi), nil
+	case ai != nil || bi != nil:
+		return false, nil
+	case filepath.Base(a) != filepath.Base(b):
+		return false, nil
+	}
+	ad, aerr := os.Stat(filepath.Dir(a))
+	bd, berr := os.Stat(filepath.Dir(b))
+	if err := errors.Join(aerr, berr); err != nil {
+		// A missing directory leaves the database absent; Open would fail later.
+		if errors.Is(aerr, fs.ErrNotExist) || errors.Is(berr, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return os.SameFile(ad, bd), nil
+}
+
+// statIfExists returns nil info and nil error for an absent path.
+func statIfExists(path string) (fs.FileInfo, error) {
+	fi, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return fi, err
 }
 
 // preflight classifies both databases before either is written.

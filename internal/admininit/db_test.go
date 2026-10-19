@@ -126,6 +126,20 @@ func TestRerunReusesInstallationID(t *testing.T) {
 	checkInitialized(t, p, first.InstallationID)
 }
 
+// TestSameNameInOtherDirectory checks that the alias check compares files, not
+// names: one base name in two directories is two databases.
+func TestSameNameInOtherDirectory(t *testing.T) {
+	p := admininit.Paths{
+		JobLedger: filepath.Join(t.TempDir(), "sori.db"),
+		Authority: filepath.Join(t.TempDir(), "sori.db"),
+	}
+	res, err := admininit.ProvisionAndBootstrap(context.Background(), p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkInitialized(t, p, res.InstallationID)
+}
+
 func TestNewInstallationIDsDiffer(t *testing.T) {
 	a, err := admininit.NewInstallationID()
 	if err != nil {
@@ -267,6 +281,30 @@ func TestRefusedWritesNothing(t *testing.T) {
 		},
 		"one path for both": func(_ *testing.T, p admininit.Paths) admininit.Paths {
 			p.Authority = filepath.Join(filepath.Dir(p.JobLedger), ".", filepath.Base(p.JobLedger))
+			return p
+		},
+		"hard link to one empty file": func(t *testing.T, p admininit.Paths) admininit.Paths {
+			writeFile(t, p.JobLedger, nil)
+			if err := os.Link(p.JobLedger, p.Authority); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		},
+		"symlinked directory, absent file": func(t *testing.T, p admininit.Paths) admininit.Paths {
+			link := filepath.Join(t.TempDir(), "root")
+			if err := os.Symlink(filepath.Dir(p.JobLedger), link); err != nil {
+				t.Fatal(err)
+			}
+			p.Authority = filepath.Join(link, filepath.Base(p.JobLedger))
+			return p
+		},
+		"symlinked directory, empty file": func(t *testing.T, p admininit.Paths) admininit.Paths {
+			writeFile(t, p.JobLedger, nil)
+			link := filepath.Join(t.TempDir(), "root")
+			if err := os.Symlink(filepath.Dir(p.JobLedger), link); err != nil {
+				t.Fatal(err)
+			}
+			p.Authority = filepath.Join(link, filepath.Base(p.JobLedger))
 			return p
 		},
 		"job ledger path unset": func(_ *testing.T, p admininit.Paths) admininit.Paths {
