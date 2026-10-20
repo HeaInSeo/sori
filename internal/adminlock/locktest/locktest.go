@@ -91,7 +91,7 @@ type Holder struct {
 // called.
 func Hold(t *testing.T, mode Mode, adminDir, dataRoot string) *Holder {
 	t.Helper()
-	// #nosec G204 -- re-executes the running test binary itself as the holder.
+	// #nosec G204 G702 -- re-executes the running test binary itself as the holder.
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), modeEnv+"="+string(mode), adminEnv+"="+adminDir, dataEnv+"="+dataRoot)
 	stdin, err := cmd.StdinPipe()

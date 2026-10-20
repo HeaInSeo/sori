@@ -195,7 +195,8 @@ func (s *Server) Close() error {
 // lockServer opens dataRoot/server.lock, creating it (mode 0660) if needed, and
 // takes it exclusive without waiting.
 func lockServer(dataRoot string) (*os.File, error) {
-	// #nosec G304 -- fixed lock file name inside the configured data root.
+	// #nosec G302 G304 -- fixed lock file name inside the configured data root;
+	// C.5.8 gives server.lock mode 0660 so the sori group can lock it.
 	f, err := os.OpenFile(filepath.Join(dataRoot, ServerLockName), os.O_RDWR|os.O_CREATE, 0o660)
 	if err != nil {
 		return nil, fmt.Errorf("adminlock: open %s: %w", ServerLockName, err)
