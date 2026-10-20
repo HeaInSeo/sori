@@ -82,10 +82,13 @@ func NewInstallationID() (string, error) {
 // PRISTINE, SCHEMA_ONLY or INIT_MARKER_EMPTY again and resumes; after the marker
 // commit it reuses the recorded id and never calls newID.
 //
-// Each database file is held open from its first open here. The held file must
-// be the one the preflight inspected, or a new one if the preflight saw none, and
-// an open is refused once a path stops naming its held file or turns into a
-// symlink, or a sidecar is not a regular file (boundFiles).
+// Both database files are held open from the first durable step until it
+// returns, a SCHEMA_ONLY authority that needs no provisioning too. Each held file
+// must be the one the preflight inspected, or a new one if the preflight saw
+// none, and have no other hard link. A step is refused once a path stops naming
+// its held file or turns into a symlink, a held file gains a link, or a sidecar
+// is not a regular file, and the check runs again after each step even if it
+// failed (boundFiles).
 //
 // newID nil means NewInstallationID.
 func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, error)) (res Result, err error) {
@@ -112,7 +115,7 @@ func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, e
 	if ledger.State == jobledger.InitMarkerEmpty {
 		return Result{InstallationID: ledger.InstallationID}, nil
 	}
-	files := boundFiles{seen: seen}
+	files := boundFiles{seen: seen, paths: []string{p.JobLedger, p.Authority}}
 	defer func() { err = errors.Join(err, files.close()) }()
 
 	if auth == sqlitestore.InitPristine {
@@ -149,6 +152,10 @@ func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, e
 // database.
 var beforeOpen func(Step)
 
+// beforeStep, when set by tests, runs after a durable step's first check and
+// before the step opens its database by path.
+var beforeStep func(Step)
+
 // afterSee, when set by tests, runs after the database paths are recorded and
 // before the preflight inspects them.
 var afterSee func()
@@ -158,7 +165,8 @@ var afterSee func()
 type seenFiles map[string]fs.FileInfo
 
 // seeFiles records both database paths before the preflight inspects them. A
-// path that is neither absent nor a regular file is refused before it is read.
+// path that is neither absent nor a regular file with one link is refused before
+// it is read.
 func seeFiles(p Paths) (seenFiles, error) {
 	seen := seenFiles{}
 	for _, path := range []string{p.JobLedger, p.Authority} {
@@ -170,10 +178,25 @@ func seeFiles(p Paths) (seenFiles, error) {
 			return nil, fmt.Errorf("%w: database %s: %w", ErrRefused, path, err)
 		case !fi.Mode().IsRegular():
 			return nil, fmt.Errorf("%w: database %s is not a regular file (%s)", ErrRefused, path, fi.Mode().Type())
+		default:
+			if err := singleLink(path, fi); err != nil {
+				return nil, err
+			}
 		}
 		seen[path] = fi
 	}
 	return seen, nil
+}
+
+// singleLink refuses a database file with another hard link. The other name may
+// be in another data root, whose server would use the same file under its own
+// server.lock and its own sidecar names, so init cannot exclude it. A count of
+// zero, a held file whose name was removed, is refused too.
+func singleLink(path string, fi fs.FileInfo) error {
+	if n, ok := linkCount(fi); ok && n != 1 {
+		return fmt.Errorf("%w: database %s has %d hard links, want 1", ErrRefused, path, n)
+	}
+	return nil
 }
 
 // unchanged refuses unless each path is still absent, or still names the same
@@ -200,15 +223,22 @@ func sameSeen(a, b fs.FileInfo) bool {
 	return os.SameFile(a, b) && a.Size() == b.Size()
 }
 
-// boundFiles holds each database file open from its first open by
+// boundFiles holds both database files open from the first durable step of
 // ProvisionAndBootstrap until it returns. SQLite opens a database by path, and
 // the preflight only checks the paths: a writer of the directory could put a
 // symlink, a hard link or a renamed-in file at a final name afterwards, and
 // SQLite would use it while server.lock guards only the data root. Each file is
-// therefore bound to what the preflight saw (bind), and each open is checked
-// against the held files before and after it runs.
+// therefore bound to what the preflight saw (bind), and each step is checked
+// against both held files before and after it runs. Both are bound, not only the
+// one a step writes: the markers commit that the authority beside the ledger is
+// the one provisioned or inspected, so a SCHEMA_ONLY authority that no step
+// opens must still be the bound file at the marker commit.
+//
+// The checks detect a replacement; they do not stop SQLite from opening one that
+// is swapped in between a check and SQLite's own open of the path.
 type boundFiles struct {
 	seen  seenFiles
+	paths []string
 	files []boundFile
 }
 
@@ -217,30 +247,43 @@ type boundFile struct {
 	f    *os.File
 }
 
-// open binds path unless it is bound, then runs fn, which opens the database by
-// path, between two checks.
+// open binds the databases, then runs fn, which opens the database at path by
+// path, between two checks. Every database the preflight saw is bound at the
+// first step; one it saw absent is created when its own step opens it, so a
+// crash before then leaves it absent. By the marker step both are bound. The
+// second check runs even if fn fails: fn may have written to a replacement
+// before it failed.
 func (files *boundFiles) open(s Step, path string, fn func() error) error {
 	if beforeOpen != nil {
 		beforeOpen(s)
 	}
-	if !slices.ContainsFunc(files.files, func(b boundFile) bool { return b.path == path }) {
-		seen, ok := files.seen[path]
-		if !ok {
-			return fmt.Errorf("%w: %s was not inspected", ErrRefused, path)
+	if !slices.Contains(files.paths, path) {
+		return fmt.Errorf("%w: %s was not inspected", ErrRefused, path)
+	}
+	for _, p := range files.paths {
+		if slices.ContainsFunc(files.files, func(b boundFile) bool { return b.path == p }) {
+			continue
 		}
-		f, err := bind(path, seen)
+		seen, ok := files.seen[p]
+		if !ok {
+			return fmt.Errorf("%w: %s was not inspected", ErrRefused, p)
+		}
+		if seen == nil && p != path && s != StepMarkers {
+			continue
+		}
+		f, err := bind(p, seen)
 		if err != nil {
 			return err
 		}
-		files.files = append(files.files, boundFile{path: path, f: f})
+		files.files = append(files.files, boundFile{path: p, f: f})
 	}
 	if err := files.check(); err != nil {
 		return err
 	}
-	if err := fn(); err != nil {
-		return err
+	if beforeStep != nil {
+		beforeStep(s)
 	}
-	return files.check()
+	return errors.Join(fn(), files.check())
 }
 
 // bind opens the database file at path as the preflight saw it. If the
@@ -272,6 +315,8 @@ func bind(path string, seen fs.FileInfo) (*os.File, error) {
 		err = fmt.Errorf("%w: %s is not a regular file (%s)", ErrRefused, path, held.Mode().Type())
 	case !sameSeen(seen, held):
 		err = fmt.Errorf("%w: %s is not the database file the preflight inspected", ErrRefused, path)
+	default:
+		err = singleLink(path, held)
 	}
 	if err != nil {
 		return nil, errors.Join(err, f.Close())
@@ -280,7 +325,8 @@ func bind(path string, seen fs.FileInfo) (*os.File, error) {
 }
 
 // check refuses unless each path still names its held file through no symlink,
-// and none of its SQLite sidecar files is anything but a regular file.
+// the held file has no other hard link, and none of its SQLite sidecar files is
+// anything but a regular file.
 func (files boundFiles) check() error {
 	for _, b := range files.files {
 		fi, err := os.Lstat(b.path)
@@ -293,6 +339,9 @@ func (files boundFiles) check() error {
 		}
 		if !fi.Mode().IsRegular() || !os.SameFile(fi, held) {
 			return fmt.Errorf("%w: %s is no longer the database file init bound", ErrRefused, b.path)
+		}
+		if err := singleLink(b.path, held); err != nil {
+			return err
 		}
 		for _, s := range sidecarSuffixes {
 			fi, err := os.Lstat(b.path + s)

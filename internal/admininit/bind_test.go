@@ -8,9 +8,11 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/HeaInSeo/sori/authority/sqlitestore"
 	"github.com/HeaInSeo/sori/internal/admininit"
 	"github.com/HeaInSeo/sori/internal/adminlock"
 	"github.com/HeaInSeo/sori/internal/adminlock/locktest"
+	"github.com/HeaInSeo/sori/jobledger"
 )
 
 // swapAt runs swap once, just before the hook point at.
@@ -240,6 +242,126 @@ func TestInitRefusesDatabaseAppearingDuringPreflight(t *testing.T) {
 	}
 	if _, err := os.Stat(p.JobLedger); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("job ledger: %v, want none created", err)
+	}
+}
+
+// A SCHEMA_ONLY authority that no step opens is still bound through the marker
+// commit: a foreign file renamed over it before the markers is refused, and the
+// job ledger gets no markers.
+func TestInitRefusesSchemaOnlyAuthorityReplacedBeforeMarkers(t *testing.T) {
+	adminDir, root, p := layout(t)
+	provisionAuthority(t, p.Authority)
+	tmp := filepath.Join(root, "staged.db")
+	foreign(t, tmp)
+	defer swapAt(t, admininit.StepMarkers, func() {
+		if err := os.Rename(tmp, p.Authority); err != nil {
+			t.Fatal(err)
+		}
+	})()
+
+	var calls int
+	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	checkNoMarkers(t, p.JobLedger)
+}
+
+// A SCHEMA_ONLY authority removed before the markers is refused the same way.
+func TestInitRefusesSchemaOnlyAuthorityRemovedBeforeMarkers(t *testing.T) {
+	adminDir, root, p := layout(t)
+	provisionAuthority(t, p.Authority)
+	defer swapAt(t, admininit.StepMarkers, func() {
+		if err := os.Remove(p.Authority); err != nil {
+			t.Fatal(err)
+		}
+	})()
+
+	var calls int
+	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	checkNoMarkers(t, p.JobLedger)
+}
+
+// Two processes: the job ledger is replaced by a file that is not a database
+// after the step's first check, so the step itself fails. The check after the
+// step still runs and reports the replacement.
+func TestInitChecksAfterFailedStep(t *testing.T) {
+	adminDir, root, p := layout(t)
+	defer admininit.SetBeforeStep(func(s admininit.Step) {
+		if s != admininit.StepMarkers {
+			return
+		}
+		tmp := p.JobLedger + ".new"
+		writeFile(t, tmp, []byte("not a database, but longer than one SQLite header page of one hundred bytes ............"))
+		if err := os.Rename(tmp, p.JobLedger); err != nil {
+			t.Fatal(err)
+		}
+	})()
+
+	var calls int
+	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused from the check after the failed step", err)
+	}
+}
+
+// Two processes: a foreign SQLite file renamed over the job ledger after the
+// step's first check and before SQLite opens the path is reported by the check
+// after the step. SQLite opens by path, so the step may already have written
+// to the replacement; init refuses, and the ledger it bound gets no markers.
+func TestInitRefusesLedgerReplacedDuringStep(t *testing.T) {
+	adminDir, root, p := layout(t)
+	tmp := filepath.Join(root, "staged.db")
+	foreign(t, tmp)
+	var bound string
+	defer admininit.SetBeforeStep(func(s admininit.Step) {
+		if s != admininit.StepMarkers {
+			return
+		}
+		bound = p.JobLedger + ".bound"
+		if err := os.Rename(p.JobLedger, bound); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, p.JobLedger); err != nil {
+			t.Fatal(err)
+		}
+	})()
+
+	var calls int
+	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	checkNoMarkers(t, bound)
+}
+
+func provisionAuthority(t *testing.T, path string) {
+	t.Helper()
+	a, err := sqlitestore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// checkNoMarkers asserts that the job ledger at path, if any, has no init
+// markers.
+func checkNoMarkers(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	got, err := jobledger.InspectInitState(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State == jobledger.InitMarkerEmpty {
+		t.Fatalf("job ledger %s got markers %q", path, got.InstallationID)
 	}
 }
 
