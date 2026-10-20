@@ -106,3 +106,155 @@ func TestInitRefusesSidecarSymlink(t *testing.T) {
 		t.Fatalf("outside = %v, want empty", got)
 	}
 }
+
+// A hard link to another installation's provisioned job ledger, put at the
+// absent ledger name after the preflight, is refused, and that ledger gets no
+// markers.
+func TestInitRefusesHardLinkAtAbsentLedger(t *testing.T) {
+	other := t.TempDir()
+	op := admininit.Paths{JobLedger: filepath.Join(other, "jobs.db"), Authority: filepath.Join(other, "authority.db")}
+	provision(t, op)
+	before := readFile(t, op.JobLedger)
+	adminDir, root, p := layout(t)
+	defer swapAt(t, admininit.StepJobLedgerSchema, func() {
+		link(t, op.JobLedger, p.JobLedger)
+	})()
+
+	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	if readFile(t, op.JobLedger) != before {
+		t.Fatal("other installation's job ledger changed")
+	}
+}
+
+// A hard link to a foreign SQLite file, put at the absent authority name after
+// the preflight, is refused before SQLite opens it.
+func TestInitRefusesHardLinkAtAbsentAuthority(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "other.db")
+	foreign(t, outside)
+	before := readFile(t, outside)
+	adminDir, root, p := layout(t)
+	defer swapAt(t, admininit.StepAuthoritySchema, func() {
+		link(t, outside, p.Authority)
+	})()
+
+	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	if readFile(t, outside) != before {
+		t.Fatal("foreign file changed")
+	}
+}
+
+// A file renamed over the empty job ledger the preflight inspected is refused
+// before SQLite opens it, and the replacement stays empty.
+func TestInitRefusesRenamedInLedger(t *testing.T) {
+	adminDir, root, p := layout(t)
+	writeFile(t, p.JobLedger, nil)
+	defer swapAt(t, admininit.StepJobLedgerSchema, func() {
+		tmp := p.JobLedger + ".new"
+		writeFile(t, tmp, nil)
+		if err := os.Rename(tmp, p.JobLedger); err != nil {
+			t.Fatal(err)
+		}
+	})()
+
+	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	if fi, err := os.Stat(p.JobLedger); err != nil || fi.Size() != 0 {
+		t.Fatalf("replacement: %v, %v; want an untouched empty file", fi, err)
+	}
+}
+
+// A foreign SQLite file renamed in at the absent authority name after the
+// preflight is refused, and it is not changed.
+func TestInitRefusesRenamedInAuthority(t *testing.T) {
+	adminDir, root, p := layout(t)
+	tmp := filepath.Join(root, "staged.db")
+	foreign(t, tmp)
+	before := readFile(t, tmp)
+	defer swapAt(t, admininit.StepAuthoritySchema, func() {
+		if err := os.Rename(tmp, p.Authority); err != nil {
+			t.Fatal(err)
+		}
+	})()
+
+	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	if readFile(t, p.Authority) != before {
+		t.Fatal("renamed-in authority file changed")
+	}
+}
+
+// A database the preflight saw as an empty file and that grew before the first
+// open is refused: the held file must have the size the preflight saw.
+func TestInitRefusesGrownPristineFile(t *testing.T) {
+	adminDir, root, p := layout(t)
+	writeFile(t, p.Authority, nil)
+	defer swapAt(t, admininit.StepAuthoritySchema, func() {
+		f, err := os.OpenFile(p.Authority, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})()
+
+	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	if got := readFile(t, p.Authority); got != "x" {
+		t.Fatalf("authority = %q, want the untouched one byte", got)
+	}
+}
+
+// An authority database that appears at the absent name while the preflight
+// reads it is refused: init never opens a SCHEMA_ONLY authority, so without the
+// recheck the markers would be written next to a file nobody provisioned.
+func TestInitRefusesDatabaseAppearingDuringPreflight(t *testing.T) {
+	other := t.TempDir()
+	op := admininit.Paths{JobLedger: filepath.Join(other, "jobs.db"), Authority: filepath.Join(other, "authority.db")}
+	provision(t, op)
+	adminDir, root, p := layout(t)
+	defer admininit.SetAfterSee(func() {
+		if err := os.Rename(op.Authority, p.Authority); err != nil {
+			t.Fatal(err)
+		}
+	})()
+
+	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	if !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	if _, err := os.Stat(p.JobLedger); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("job ledger: %v, want none created", err)
+	}
+}
+
+func link(t *testing.T, target, name string) {
+	t.Helper()
+	if err := os.Link(target, name); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}

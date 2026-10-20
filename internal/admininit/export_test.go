@@ -16,6 +16,15 @@ func SetBeforeOpen(fn func(Step)) (restore func()) {
 	return func() { beforeOpen = prev }
 }
 
+// SetAfterSee installs a hook that runs after ProvisionAndBootstrap records the
+// database paths and before the preflight inspects them, and returns a function
+// restoring the previous one.
+func SetAfterSee(fn func()) (restore func()) {
+	prev := afterSee
+	afterSee = fn
+	return func() { afterSee = prev }
+}
+
 // SetAfterCheck installs a hook that Init runs after it checks the paths and
 // before it takes the locks and opens either database, and returns a function
 // restoring the previous one.
