@@ -202,13 +202,20 @@ func sameFile(a, b string) (bool, error) {
 }
 
 // rawDir returns path up to and including its last separator, without lexical
-// cleaning, or "." when path has no separator.
+// cleaning, or the volume name plus "." when path has no separator after it.
+// On Windows both '/' and '\' are separators, so "C:/data/jobs.db" and
+// "C:\data\JOBS.db" both have a parent in C:\data.
 func rawDir(path string) string {
-	i := strings.LastIndexByte(path, os.PathSeparator)
-	if i < 0 {
-		return "."
+	return rawDirOf(path, filepath.VolumeName(path), os.IsPathSeparator)
+}
+
+func rawDirOf(path, volume string, isSep func(uint8) bool) string {
+	for i := len(path) - 1; i >= len(volume); i-- {
+		if isSep(path[i]) {
+			return path[:i+1]
+		}
 	}
-	return path[:i+1]
+	return volume + "."
 }
 
 // statIfExists returns nil info and nil error for an absent path.
