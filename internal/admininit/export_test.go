@@ -8,6 +8,14 @@ func SetAfterStep(fn func(Step) error) (restore func()) {
 	return func() { afterStep = prev }
 }
 
+// SetBeforeOpen installs a hook that runs before each durable step opens a
+// database, and returns a function restoring the previous one.
+func SetBeforeOpen(fn func(Step)) (restore func()) {
+	prev := beforeOpen
+	beforeOpen = fn
+	return func() { beforeOpen = prev }
+}
+
 // SetAfterCheck installs a hook that Init runs after it checks the paths and
 // before it takes the locks and opens either database, and returns a function
 // restoring the previous one.

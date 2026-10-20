@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/HeaInSeo/sori/authority/sqlitestore"
@@ -81,8 +82,12 @@ func NewInstallationID() (string, error) {
 // PRISTINE, SCHEMA_ONLY or INIT_MARKER_EMPTY again and resumes; after the marker
 // commit it reuses the recorded id and never calls newID.
 //
+// Each database file is held open from its first open here, and an open is
+// refused once a path stops naming its held file or turns into a symlink, or a
+// sidecar is not a regular file (boundFiles).
+//
 // newID nil means NewInstallationID.
-func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, error)) (Result, error) {
+func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, error)) (res Result, err error) {
 	if newID == nil {
 		newID = NewInstallationID
 	}
@@ -93,9 +98,14 @@ func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, e
 	if err != nil {
 		return Result{}, err
 	}
+	if ledger.State == jobledger.InitMarkerEmpty {
+		return Result{InstallationID: ledger.InstallationID}, nil
+	}
+	var files boundFiles
+	defer func() { err = errors.Join(err, files.close()) }()
 
 	if auth == sqlitestore.InitPristine {
-		if err := provisionAuthority(ctx, p.Authority); err != nil {
+		if err := files.open(StepAuthoritySchema, p.Authority, func() error { return provisionAuthority(ctx, p.Authority) }); err != nil {
 			return Result{}, err
 		}
 		if err := step(StepAuthoritySchema); err != nil {
@@ -103,28 +113,118 @@ func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, e
 		}
 	}
 	if ledger.State == jobledger.InitPristine {
-		if err := provisionJobLedger(ctx, p.JobLedger); err != nil {
+		if err := files.open(StepJobLedgerSchema, p.JobLedger, func() error { return provisionJobLedger(ctx, p.JobLedger) }); err != nil {
 			return Result{}, err
 		}
 		if err := step(StepJobLedgerSchema); err != nil {
 			return Result{}, err
 		}
 	}
-	if ledger.State == jobledger.InitMarkerEmpty {
-		return Result{InstallationID: ledger.InstallationID}, nil
-	}
 
 	id, err := newID()
 	if err != nil {
 		return Result{}, err
 	}
-	if err := writeMarkers(ctx, p.JobLedger, id); err != nil {
+	if err := files.open(StepMarkers, p.JobLedger, func() error { return writeMarkers(ctx, p.JobLedger, id) }); err != nil {
 		return Result{}, err
 	}
 	if err := step(StepMarkers); err != nil {
 		return Result{}, err
 	}
 	return Result{InstallationID: id, Bootstrapped: true}, nil
+}
+
+// beforeOpen, when set by tests, runs before each durable step opens a
+// database.
+var beforeOpen func(Step)
+
+// boundFiles holds each database file open from its first open by
+// ProvisionAndBootstrap until it returns. SQLite opens a database by path, and
+// the preflight only checks the paths: a writer of the directory could put a
+// symlink, or another file, at a final name afterwards, and SQLite would follow
+// it while server.lock guards only the data root. Each open is therefore
+// checked against the held files before and after it runs.
+type boundFiles []boundFile
+
+type boundFile struct {
+	path string
+	f    *os.File
+}
+
+// open binds path unless it is bound, then runs fn, which opens the database by
+// path, between two checks.
+func (files *boundFiles) open(s Step, path string, fn func() error) error {
+	if beforeOpen != nil {
+		beforeOpen(s)
+	}
+	if !slices.ContainsFunc(*files, func(b boundFile) bool { return b.path == path }) {
+		f, err := bind(path)
+		if err != nil {
+			return err
+		}
+		*files = append(*files, boundFile{path: path, f: f})
+	}
+	if err := files.check(); err != nil {
+		return err
+	}
+	if err := fn(); err != nil {
+		return err
+	}
+	return files.check()
+}
+
+// bind opens the database file at path. An absent file is created empty with
+// O_EXCL, which fails if anything, a symlink too, appeared at the name after the
+// preflight; an empty regular file is PRISTINE again, so a rerun after a crash
+// resumes. check then refuses an existing file that is a symlink.
+func bind(path string) (*os.File, error) {
+	// #nosec G304 -- the database path the preflight checked inside the data root.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		// #nosec G304 -- as above; check refuses it unless it is a regular file.
+		f, err = os.Open(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: bind %s: %w", ErrRefused, path, err)
+	}
+	return f, nil
+}
+
+// check refuses unless each path still names its held file through no symlink,
+// and none of its SQLite sidecar files is anything but a regular file.
+func (files boundFiles) check() error {
+	for _, b := range files {
+		fi, err := os.Lstat(b.path)
+		if err != nil {
+			return fmt.Errorf("%w: database %s: %w", ErrRefused, b.path, err)
+		}
+		held, err := b.f.Stat()
+		if err != nil {
+			return fmt.Errorf("%w: database %s: %w", ErrRefused, b.path, err)
+		}
+		if !fi.Mode().IsRegular() || !os.SameFile(fi, held) {
+			return fmt.Errorf("%w: %s is no longer the database file init bound", ErrRefused, b.path)
+		}
+		for _, s := range sidecarSuffixes {
+			fi, err := os.Lstat(b.path + s)
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+			case err != nil:
+				return fmt.Errorf("%w: %s: %w", ErrRefused, b.path+s, err)
+			case !fi.Mode().IsRegular():
+				return fmt.Errorf("%w: %s is not a regular file (%s)", ErrRefused, b.path+s, fi.Mode().Type())
+			}
+		}
+	}
+	return nil
+}
+
+func (files boundFiles) close() error {
+	var err error
+	for _, b := range files {
+		err = errors.Join(err, b.f.Close())
+	}
+	return err
 }
 
 func step(s Step) error {
