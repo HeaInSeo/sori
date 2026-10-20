@@ -136,6 +136,71 @@ func TestInitLosesToRunningServerThroughDataRootAlias(t *testing.T) {
 	}
 }
 
+// Two processes: a data-root symlink retargeted after the check moves neither
+// the lock nor the databases. top/root points at a when init checks it; before
+// the locks are taken, the link is swapped to b, whose server.lock a running
+// server holds. Init must still lock a/server.lock and create the databases in
+// a, so b holds nothing but its server's lock.
+func TestInitPinsDataRootAgainstRetarget(t *testing.T) {
+	adminDir, a, b, top := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	link := filepath.Join(top, "root")
+	symlink(t, a, link)
+	h := locktest.Hold(t, locktest.Server, t.TempDir(), b)
+	defer h.Release(t)
+	defer admininit.SetAfterCheck(func() { retarget(t, b, link) })()
+
+	p := admininit.Paths{JobLedger: filepath.Join(link, "jobs.db"), Authority: filepath.Join(link, "authority.db")}
+	var calls int
+	res, err := admininit.Init(context.Background(), adminDir, link, p, countingID(&calls))
+	if err != nil || calls != 1 {
+		t.Fatalf("init: %v, newID calls = %d", err, calls)
+	}
+	if got := names(t, b); !slices.Equal(got, []string{adminlock.ServerLockName}) {
+		t.Fatalf("retargeted root = %v, want only server.lock", got)
+	}
+	if got := names(t, a); !slices.Contains(got, adminlock.ServerLockName) {
+		t.Fatalf("checked root = %v, want server.lock", got)
+	}
+	checkInitialized(t, admininit.Paths{JobLedger: filepath.Join(a, "jobs.db"), Authority: filepath.Join(a, "authority.db")}, res.InstallationID)
+}
+
+// A directory link inside the data root is pinned the same way: root/dir points
+// at root/sub when init checks it and is swapped to a directory outside the
+// root after the check. The job ledger must land in root/sub.
+func TestInitPinsDatabasePathAgainstRetarget(t *testing.T) {
+	adminDir, root, p := layout(t)
+	sub, outside := filepath.Join(root, "sub"), t.TempDir()
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "dir")
+	symlink(t, sub, link)
+	p.JobLedger = filepath.Join(link, "jobs.db")
+	defer admininit.SetAfterCheck(func() { retarget(t, outside, link) })()
+
+	var calls int
+	res, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	if err != nil || calls != 1 {
+		t.Fatalf("init: %v, newID calls = %d", err, calls)
+	}
+	if got := names(t, outside); len(got) != 0 {
+		t.Fatalf("outside = %v, want empty", got)
+	}
+	checkInitialized(t, admininit.Paths{JobLedger: filepath.Join(sub, "jobs.db"), Authority: p.Authority}, res.InstallationID)
+}
+
+// retarget atomically replaces the symlink link with one pointing at target.
+func retarget(t *testing.T, target, link string) {
+	t.Helper()
+	tmp := link + ".new"
+	if err := os.Symlink(target, tmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // symlink makes link point at target, skipping where symlinks are unavailable.
 func symlink(t *testing.T, target, link string) {
 	t.Helper()
