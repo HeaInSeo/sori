@@ -2,9 +2,9 @@
 //
 // This file is the database phase (RW-C1 §5.1/§5.1a): it classifies the job ledger
 // and the authority database read-only, provisions their known schemas, and then
-// writes the job ledger's four init markers once. It does not take the admin or
-// server lock, and it does not create keys, policy or the activation epoch; the
-// caller holds both locks for the whole run and does those steps afterwards.
+// writes the job ledger's four init markers once. ProvisionAndBootstrap does not
+// take the admin or server lock; Init (init.go) runs it while holding both. Neither
+// creates keys, policy or the activation epoch.
 package admininit
 
 import (
