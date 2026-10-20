@@ -321,6 +321,16 @@ func TestRefusedWritesNothing(t *testing.T) {
 			p.Authority = filepath.Join(filepath.Dir(p.JobLedger), strings.ToUpper(filepath.Base(p.JobLedger)))
 			return p
 		},
+		// A normalization-insensitive volume (default macOS APFS) names one file.
+		"composed and decomposed names, both absent": func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			return normalizationAlias(p, composed, decomposed)
+		},
+		"decomposed and composed names, both absent": func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			return normalizationAlias(p, decomposed, composed)
+		},
+		"composed upper case and decomposed names, both absent": func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			return normalizationAlias(p, strings.ToUpper(composed), decomposed)
+		},
 		"job ledger path unset": func(_ *testing.T, p admininit.Paths) admininit.Paths {
 			p.JobLedger = ""
 			return p
@@ -345,6 +355,11 @@ func TestRefusedWritesNothing(t *testing.T) {
 			p.JobLedger = p.Authority + suffix
 			return p
 		}
+		cases["decomposed authority at the composed job ledger's "+suffix] = func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			p = normalizationAlias(p, composed, decomposed)
+			p.Authority += suffix
+			return p
+		}
 	}
 	for name, setup := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -357,6 +372,31 @@ func TestRefusedWritesNothing(t *testing.T) {
 			checkUnchanged(t, before, snapshot(t, base))
 		})
 	}
+}
+
+// composed and decomposed spell one name: "é" as U+00E9, and as "e" plus the
+// combining acute accent U+0301.
+const (
+	composed   = "café.db"
+	decomposed = "café.db"
+)
+
+// normalizationAlias names the job ledger ledgerName and the authority authName,
+// both in the job ledger's directory.
+func normalizationAlias(p admininit.Paths, ledgerName, authName string) admininit.Paths {
+	dir := filepath.Dir(p.JobLedger)
+	return admininit.Paths{JobLedger: filepath.Join(dir, ledgerName), Authority: filepath.Join(dir, authName)}
+}
+
+// TestNormalizationDistinctNames checks that the name rule only joins canonically
+// equivalent spellings: "café.db" and "cafe.db" are two databases.
+func TestNormalizationDistinctNames(t *testing.T) {
+	p := normalizationAlias(dataRoot(t), composed, "cafe.db")
+	res, err := admininit.ProvisionAndBootstrap(context.Background(), p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkInitialized(t, p, res.InstallationID)
 }
 
 // dotDotAlias returns "<other>/link/../<dir name>/<file name>" for path, with link

@@ -20,6 +20,7 @@ import (
 
 	"github.com/HeaInSeo/sori/authority/sqlitestore"
 	"github.com/HeaInSeo/sori/jobledger"
+	"golang.org/x/text/unicode/norm"
 )
 
 // ErrRefused is returned when either database is not in a state offline init may
@@ -167,10 +168,10 @@ func checkPaths(p Paths) error {
 
 // sameFile reports whether a and b name one file, also through a hard link or a
 // symlinked directory. Two existing files are compared by identity; when neither
-// exists, their directories are compared by identity and their names without
-// case, so that a case-insensitive volume cannot alias two absent names. On a
-// case-sensitive volume this refuses names that differ only in case, which is
-// conservative. One existing and one absent path are different files.
+// exists, their directories are compared by identity and their names by
+// sameName, so that a case- or normalization-insensitive volume cannot alias two
+// absent names. On a volume that tells such names apart this refuses them,
+// which is conservative. One existing and one absent path are different files.
 //
 // The directories are the raw parents from rawDir, not filepath.Dir: Dir cleans
 // "link/.." away lexically, while SQLite opens the raw path and the kernel
@@ -186,7 +187,7 @@ func sameFile(a, b string) (bool, error) {
 		return os.SameFile(ai, bi), nil
 	case ai != nil || bi != nil:
 		return false, nil
-	case !strings.EqualFold(filepath.Base(a), filepath.Base(b)):
+	case !sameName(filepath.Base(a), filepath.Base(b)):
 		return false, nil
 	}
 	ad, aerr := os.Stat(rawDir(a))
@@ -199,6 +200,13 @@ func sameFile(a, b string) (bool, error) {
 		return false, err
 	}
 	return os.SameFile(ad, bd), nil
+}
+
+// sameName reports whether two file names may name one file: they are equal
+// after canonical Unicode normalization (NFC) and case folding. A default macOS
+// APFS volume treats a composed "é" and "e" plus a combining accent as one name.
+func sameName(a, b string) bool {
+	return strings.EqualFold(norm.NFC.String(a), norm.NFC.String(b))
 }
 
 // rawDir returns path up to and including its last separator, without lexical
