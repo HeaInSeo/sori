@@ -109,6 +109,113 @@ func TestInitLosesToRunningServerBeforeDB(t *testing.T) {
 	}
 }
 
+// symlink makes link point at target, skipping where symlinks are unavailable.
+func symlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+}
+
+// A database path that escapes the data root through a symlink is refused
+// before any lock file is created, and nothing is created outside the root.
+func TestInitRefusesSymlinkEscape(t *testing.T) {
+	sep := string(filepath.Separator)
+	cases := map[string]func(t *testing.T, root, outside string) string{
+		"through a linked directory": func(_ *testing.T, root, _ string) string {
+			return filepath.Join(root, "link", "jobs.db")
+		},
+		// filepath.Clean would make this root/jobs.db, but the kernel follows
+		// link first and opens a file in outside's parent.
+		"link then dot-dot": func(_ *testing.T, root, _ string) string {
+			return root + sep + "link" + sep + ".." + sep + "jobs.db"
+		},
+		"final entry is a link": func(t *testing.T, root, outside string) string {
+			db := filepath.Join(outside, "jobs.db")
+			if err := os.WriteFile(db, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			symlink(t, db, filepath.Join(root, "ledger.db"))
+			return filepath.Join(root, "ledger.db")
+		},
+		"dangling final link": func(t *testing.T, root, outside string) string {
+			symlink(t, filepath.Join(outside, "absent.db"), filepath.Join(root, "ledger.db"))
+			return filepath.Join(root, "ledger.db")
+		},
+		"final name dot-dot": func(_ *testing.T, root, _ string) string {
+			return root + sep + "link" + sep + ".."
+		},
+	}
+	for name, path := range cases {
+		t.Run(name, func(t *testing.T) {
+			adminDir, root, p := layout(t)
+			outside := filepath.Join(t.TempDir(), "outside")
+			if err := os.Mkdir(outside, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			symlink(t, outside, filepath.Join(root, "link"))
+			p.JobLedger = path(t, root, outside)
+			preRoot := names(t, root)
+			preOutside := names(t, outside)
+			preParent := names(t, filepath.Dir(outside))
+
+			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			if !errors.Is(err, admininit.ErrRefused) {
+				t.Fatalf("err = %v, want ErrRefused", err)
+			}
+			if got := names(t, adminDir); len(got) != 0 {
+				t.Fatalf("admin area = %v, want empty", got)
+			}
+			for dir, want := range map[string][]string{root: preRoot, outside: preOutside, filepath.Dir(outside): preParent} {
+				if got := names(t, dir); !slices.Equal(got, want) {
+					t.Fatalf("%s = %v, want %v", dir, got, want)
+				}
+			}
+		})
+	}
+}
+
+// Relative paths keep link/.. raw as well: filepath.Abs would clean it away.
+func TestInitRefusesRelativeSymlinkEscape(t *testing.T) {
+	adminDir, root, p := layout(t)
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, outside, filepath.Join(root, "link"))
+	t.Chdir(root)
+	sep := string(filepath.Separator)
+	p.JobLedger = "link" + sep + ".." + sep + "jobs.db"
+	preParent := names(t, filepath.Dir(outside))
+	if _, err := admininit.Init(context.Background(), adminDir, ".", p, noID(t)); !errors.Is(err, admininit.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	if got := names(t, filepath.Dir(outside)); !slices.Equal(got, preParent) {
+		t.Fatalf("outside's parent = %v, want %v", got, preParent)
+	}
+}
+
+// Symlinks that stay inside the data root are accepted: a symlinked data root
+// and a linked subdirectory of it.
+func TestInitAcceptsSymlinkInsideDataRoot(t *testing.T) {
+	adminDir := t.TempDir()
+	target := t.TempDir()
+	if err := os.Mkdir(filepath.Join(target, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "root")
+	symlink(t, target, root)
+	symlink(t, filepath.Join(target, "sub"), filepath.Join(target, "inner"))
+	p := admininit.Paths{JobLedger: filepath.Join(root, "inner", "jobs.db"), Authority: filepath.Join(root, "authority.db")}
+	var calls int
+	if _, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls)); err != nil || calls != 1 {
+		t.Fatalf("init: %v, newID calls = %d", err, calls)
+	}
+	if _, err := os.Stat(filepath.Join(target, "sub", "jobs.db")); err != nil {
+		t.Fatalf("job ledger: %v", err)
+	}
+}
+
 // A database path outside the data root is refused before any lock file is created.
 func TestInitRefusesPathOutsideDataRoot(t *testing.T) {
 	adminDir, root, p := layout(t)
