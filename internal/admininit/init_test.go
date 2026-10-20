@@ -109,6 +109,33 @@ func TestInitLosesToRunningServerBeforeDB(t *testing.T) {
 	}
 }
 
+// A data root spelled through link/.. names the directory the kernel resolves,
+// not the lexically cleaned one. With top/link pointing at canon/child, init
+// through top/link/.. must find the server that holds canon/server.lock.
+func TestInitLosesToRunningServerThroughDataRootAlias(t *testing.T) {
+	adminDir, canon, top := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(canon, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, filepath.Join(canon, "child"), filepath.Join(top, "link"))
+	h := locktest.Hold(t, locktest.Server, adminDir, canon)
+	defer h.Release(t)
+
+	sep := string(filepath.Separator)
+	alias := top + sep + "link" + sep + ".."
+	p := admininit.Paths{JobLedger: alias + sep + "jobs.db", Authority: alias + sep + "authority.db"}
+	_, err := admininit.Init(context.Background(), adminDir, alias, p, noID(t))
+	if !errors.Is(err, adminlock.ErrServerRunning) {
+		t.Fatalf("err = %v, want ErrServerRunning", err)
+	}
+	if got := names(t, canon); !slices.Equal(got, []string{"child", adminlock.ServerLockName}) {
+		t.Fatalf("resolved data root = %v, want only child and server.lock", got)
+	}
+	if got := names(t, top); !slices.Equal(got, []string{"link"}) {
+		t.Fatalf("lexical data root = %v, want only link", got)
+	}
+}
+
 // symlink makes link point at target, skipping where symlinks are unavailable.
 func symlink(t *testing.T, target, link string) {
 	t.Helper()
@@ -185,7 +212,8 @@ func TestInitRefusesRelativeSymlinkEscape(t *testing.T) {
 	symlink(t, outside, filepath.Join(root, "link"))
 	t.Chdir(root)
 	sep := string(filepath.Separator)
-	p.JobLedger = "link" + sep + ".." + sep + "jobs.db"
+	// Authority is relative and inside the root, so only the job ledger can be refused.
+	p.JobLedger, p.Authority = "link"+sep+".."+sep+"jobs.db", "authority.db"
 	preParent := names(t, filepath.Dir(outside))
 	if _, err := admininit.Init(context.Background(), adminDir, ".", p, noID(t)); !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)

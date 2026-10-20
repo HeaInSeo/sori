@@ -227,6 +227,87 @@ func TestOfflineWaitsForAnotherAdminCommand(t *testing.T) {
 	}
 }
 
+// aliasOf returns a spelling of dir through a link and "..": top/link/.. with
+// top/link pointing at dir/child. The kernel resolves it to dir; filepath.Clean
+// makes it top. It skips where symlinks are unavailable.
+func aliasOf(t *testing.T, dir string) (alias, top string) {
+	t.Helper()
+	top = t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "child"), filepath.Join(top, "link")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	sep := string(filepath.Separator)
+	return top + sep + "link" + sep + "..", top
+}
+
+// Both locks are found through any spelling of their directory: an offline
+// command that names the admin area or the data root through link/.. meets the
+// locks held under the resolved directory and creates no lock file elsewhere.
+func TestLocksFollowDirectoryAlias(t *testing.T) {
+	defer adminlock.SetIntervals(10*time.Millisecond, time.Hour)()
+	ctx := context.Background()
+
+	t.Run("admin.lock", func(t *testing.T) {
+		adminDir, dataRoot := areas(t)
+		alias, top := aliasOf(t, adminDir)
+		h := locktest.Hold(t, locktest.Offline, adminDir, dataRoot)
+		defer h.Release(t)
+		short, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		defer cancel()
+		if _, err := adminlock.AcquireOffline(short, alias, t.TempDir(), true); !errors.Is(err, adminlock.ErrAdminBusy) {
+			t.Fatalf("offline: %v, want ErrAdminBusy", err)
+		}
+		if _, err := adminlock.AcquireServerStartWait(ctx, alias, t.TempDir(), 200*time.Millisecond, nil); !errors.Is(err, adminlock.ErrAdminBusy) {
+			t.Fatalf("server start: %v, want ErrAdminBusy", err)
+		}
+		if got := entries(t, top); len(got) != 1 || got[0] != "link" {
+			t.Fatalf("lexical admin area = %v, want only link", got)
+		}
+	})
+
+	t.Run("server.lock", func(t *testing.T) {
+		adminDir, dataRoot := areas(t)
+		alias, top := aliasOf(t, dataRoot)
+		s, err := adminlock.AcquireServerStart(ctx, adminDir, dataRoot, adminlock.ServerOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := s.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := adminlock.AcquireOffline(ctx, t.TempDir(), alias, true); !errors.Is(err, adminlock.ErrServerRunning) {
+			t.Fatalf("offline: %v, want ErrServerRunning", err)
+		}
+		if _, err := adminlock.AcquireServerStart(ctx, t.TempDir(), alias, adminlock.ServerOptions{}); !errors.Is(err, adminlock.ErrServerLockHeld) {
+			t.Fatalf("server start: %v, want ErrServerLockHeld", err)
+		}
+		if got := entries(t, top); len(got) != 1 || got[0] != "link" {
+			t.Fatalf("lexical data root = %v, want only link", got)
+		}
+	})
+}
+
+// An empty directory means the working directory, as with filepath.Join.
+func TestLocksInWorkingDirectoryForEmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	o, err := adminlock.AcquireOffline(context.Background(), "", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := entries(t, dir); len(got) != 2 || got[0] != adminlock.AdminLockName || got[1] != adminlock.ServerLockName {
+		t.Fatalf("working directory = %v, want admin.lock and server.lock", got)
+	}
+}
+
 // Without admin.lock (init has not run) a server start goes on and reports it.
 func TestServerStartWithoutAdminLock(t *testing.T) {
 	adminDir, dataRoot := areas(t)

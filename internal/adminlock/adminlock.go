@@ -92,7 +92,7 @@ func AcquireOffline(ctx context.Context, adminDir, dataRoot string, createAdmin 
 		perm = 0o640
 	}
 	// #nosec G304 -- fixed lock file name inside the configured admin area.
-	admin, err := os.OpenFile(filepath.Join(adminDir, AdminLockName), flags, perm)
+	admin, err := os.OpenFile(lockPath(adminDir, AdminLockName), flags, perm)
 	if err != nil {
 		return nil, fmt.Errorf("adminlock: open %s: %w", AdminLockName, err)
 	}
@@ -152,7 +152,7 @@ func acquireServerStart(ctx context.Context, adminDir, dataRoot string, opts Ser
 		return nil, ErrUnsupported
 	}
 	// #nosec G304 -- fixed lock file name inside the configured admin area.
-	admin, err := os.Open(filepath.Join(adminDir, AdminLockName))
+	admin, err := os.Open(lockPath(adminDir, AdminLockName))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		admin = nil
@@ -197,7 +197,7 @@ func (s *Server) Close() error {
 func lockServer(dataRoot string) (*os.File, error) {
 	// #nosec G302 G304 -- fixed lock file name inside the configured data root;
 	// C.5.8 gives server.lock mode 0660 so the sori group can lock it.
-	f, err := os.OpenFile(filepath.Join(dataRoot, ServerLockName), os.O_RDWR|os.O_CREATE, 0o660)
+	f, err := os.OpenFile(lockPath(dataRoot, ServerLockName), os.O_RDWR|os.O_CREATE, 0o660)
 	if err != nil {
 		return nil, fmt.Errorf("adminlock: open %s: %w", ServerLockName, err)
 	}
@@ -209,6 +209,17 @@ func lockServer(dataRoot string) (*os.File, error) {
 		return nil, errors.Join(ErrServerLockHeld, f.Close())
 	}
 	return f, nil
+}
+
+// lockPath appends name to dir without cleaning dir. filepath.Join would turn
+// "top/link/.." into "top", but the kernel follows link before the "..", and so
+// do the database opens that the lock guards. Every spelling of a directory
+// therefore names the same lock file.
+func lockPath(dir, name string) string {
+	if dir == "" {
+		return name
+	}
+	return dir + string(filepath.Separator) + name
 }
 
 // waitLock takes f's lock, trying again every pollInterval until ctx ends. When
