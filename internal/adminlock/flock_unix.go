@@ -18,6 +18,7 @@ func tryLock(f *os.File, exclusive bool) (bool, error) {
 		how = syscall.LOCK_EX
 	}
 	for {
+		// #nosec G115 -- a file descriptor always fits in int.
 		err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB)
 		switch {
 		case err == nil:

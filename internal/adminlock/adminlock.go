@@ -91,6 +91,7 @@ func AcquireOffline(ctx context.Context, adminDir, dataRoot string, createAdmin 
 		flags |= os.O_CREATE
 		perm = 0o640
 	}
+	// #nosec G304 -- fixed lock file name inside the configured admin area.
 	admin, err := os.OpenFile(filepath.Join(adminDir, AdminLockName), flags, perm)
 	if err != nil {
 		return nil, fmt.Errorf("adminlock: open %s: %w", AdminLockName, err)
@@ -150,6 +151,7 @@ func acquireServerStart(ctx context.Context, adminDir, dataRoot string, opts Ser
 	if !supported {
 		return nil, ErrUnsupported
 	}
+	// #nosec G304 -- fixed lock file name inside the configured admin area.
 	admin, err := os.Open(filepath.Join(adminDir, AdminLockName))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -193,6 +195,7 @@ func (s *Server) Close() error {
 // lockServer opens dataRoot/server.lock, creating it (mode 0660) if needed, and
 // takes it exclusive without waiting.
 func lockServer(dataRoot string) (*os.File, error) {
+	// #nosec G304 -- fixed lock file name inside the configured data root.
 	f, err := os.OpenFile(filepath.Join(dataRoot, ServerLockName), os.O_RDWR|os.O_CREATE, 0o660)
 	if err != nil {
 		return nil, fmt.Errorf("adminlock: open %s: %w", ServerLockName, err)
