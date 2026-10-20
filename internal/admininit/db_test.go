@@ -331,6 +331,20 @@ func TestRefusedWritesNothing(t *testing.T) {
 		"composed upper case and decomposed names, both absent": func(_ *testing.T, p admininit.Paths) admininit.Paths {
 			return normalizationAlias(p, strings.ToUpper(composed), decomposed)
 		},
+		// Win32 path opens drop trailing dots and spaces.
+		"trailing dot alias, both absent": func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			return normalizationAlias(p, "jobs.db", "jobs.db.")
+		},
+		"trailing space alias, both absent": func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			return normalizationAlias(p, "jobs.db ", "jobs.db")
+		},
+		// Default APFS folds case with full Unicode folding: "ß" and "ss" are one name.
+		"sharp s and ss names, both absent": func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			return normalizationAlias(p, "ß.db", "ss.db")
+		},
+		"ss and upper case sharp s names, both absent": func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			return normalizationAlias(p, "STRASSE.db", "straße.db")
+		},
 		"job ledger path unset": func(_ *testing.T, p admininit.Paths) admininit.Paths {
 			p.JobLedger = ""
 			return p
@@ -357,6 +371,15 @@ func TestRefusedWritesNothing(t *testing.T) {
 		}
 		cases["decomposed authority at the composed job ledger's "+suffix] = func(_ *testing.T, p admininit.Paths) admininit.Paths {
 			p = normalizationAlias(p, composed, decomposed)
+			p.Authority += suffix
+			return p
+		}
+		cases["trailing dot authority at the job ledger's "+suffix] = func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			p.Authority = p.JobLedger + suffix + "."
+			return p
+		}
+		cases["ss authority at the sharp s job ledger's "+suffix] = func(_ *testing.T, p admininit.Paths) admininit.Paths {
+			p = normalizationAlias(p, "ß.db", "ss.db")
 			p.Authority += suffix
 			return p
 		}
@@ -388,15 +411,20 @@ func normalizationAlias(p admininit.Paths, ledgerName, authName string) adminini
 	return admininit.Paths{JobLedger: filepath.Join(dir, ledgerName), Authority: filepath.Join(dir, authName)}
 }
 
-// TestNormalizationDistinctNames checks that the name rule only joins canonically
-// equivalent spellings: "café.db" and "cafe.db" are two databases.
+// TestNormalizationDistinctNames checks that the name rule only joins aliasing
+// spellings: "café.db" and "cafe.db", "ß.db" and "s.db", and "jobs.db" and
+// ".jobs.db" are two databases each.
 func TestNormalizationDistinctNames(t *testing.T) {
-	p := normalizationAlias(dataRoot(t), composed, "cafe.db")
-	res, err := admininit.ProvisionAndBootstrap(context.Background(), p, nil)
-	if err != nil {
-		t.Fatal(err)
+	for _, names := range [][2]string{{composed, "cafe.db"}, {"ß.db", "s.db"}, {"jobs.db", ".jobs.db"}} {
+		t.Run(names[0]+" "+names[1], func(t *testing.T) {
+			p := normalizationAlias(dataRoot(t), names[0], names[1])
+			res, err := admininit.ProvisionAndBootstrap(context.Background(), p, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkInitialized(t, p, res.InstallationID)
+		})
 	}
-	checkInitialized(t, p, res.InstallationID)
 }
 
 // dotDotAlias returns "<other>/link/../<dir name>/<file name>" for path, with link

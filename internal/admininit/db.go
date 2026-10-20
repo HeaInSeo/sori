@@ -20,6 +20,7 @@ import (
 
 	"github.com/HeaInSeo/sori/authority/sqlitestore"
 	"github.com/HeaInSeo/sori/jobledger"
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -169,8 +170,8 @@ func checkPaths(p Paths) error {
 // sameFile reports whether a and b name one file, also through a hard link or a
 // symlinked directory. Two existing files are compared by identity; when neither
 // exists, their directories are compared by identity and their names by
-// sameName, so that a case- or normalization-insensitive volume cannot alias two
-// absent names. On a volume that tells such names apart this refuses them,
+// sameName, so that a case- or normalization-insensitive volume, or Win32
+// trailing dot and space stripping, cannot alias two absent names. On a volume that tells such names apart this refuses them,
 // which is conservative. One existing and one absent path are different files.
 //
 // The directories are the raw parents from rawDir, not filepath.Dir: Dir cleans
@@ -202,11 +203,23 @@ func sameFile(a, b string) (bool, error) {
 	return os.SameFile(ad, bd), nil
 }
 
-// sameName reports whether two file names may name one file: they are equal
-// after canonical Unicode normalization (NFC) and case folding. A default macOS
-// APFS volume treats a composed "é" and "e" plus a combining accent as one name.
+// sameName reports whether two file names may name one file: their nameKeys are
+// equal. A default macOS APFS volume treats a composed "é" and "e" plus a
+// combining accent as one name, and is case-insensitive under full Unicode
+// folding, so "ß.db" and "ss.db" can name one file. A Win32 path open drops
+// trailing dots and spaces, so "jobs.db" and "jobs.db." name one file there.
 func sameName(a, b string) bool {
-	return strings.EqualFold(norm.NFC.String(a), norm.NFC.String(b))
+	return nameKey(a) == nameKey(b)
+}
+
+// nameKey drops trailing '.' and ' ' as a Win32 open does, then applies Unicode
+// canonical caseless matching: NFD, full case folding, and normalization again.
+// strings.EqualFold only applies simple folding and keeps "ß" and "ss" apart. The
+// key is applied on every OS; names it joins are refused even on a volume that
+// tells them apart, which is conservative.
+func nameKey(name string) string {
+	name = strings.TrimRight(name, ". ")
+	return norm.NFC.String(cases.Fold().String(norm.NFD.String(name)))
 }
 
 // rawDir returns path up to and including its last separator, without lexical
