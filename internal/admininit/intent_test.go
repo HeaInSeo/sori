@@ -889,6 +889,115 @@ func TestInitWaitsPastBirthTimeTick(t *testing.T) {
 	}
 }
 
+// cutKinds are the two create→record cuts C2 of one database: after the hand-over
+// (the file is 0660) and before it (the file is still owner-only).
+var cutKinds = []string{"after hand-over", "before hand-over"}
+
+// crashAtCut runs Init until it crashes at the given C2 cut of the database
+// created at step at, and returns that database's intent name and path.
+func crashAtCut(t *testing.T, adminDir, root string, p admininit.Paths, at admininit.Step, kind string) (name, path string) {
+	t.Helper()
+	name, path = "authority", p.Authority
+	if at == admininit.StepCreateJobLedger {
+		name, path = "jobledger", p.JobLedger
+	}
+	if kind == "after hand-over" {
+		crashInit(t, adminDir, root, p, at)
+		return name, path
+	}
+	restore := admininit.SetBeforeHandOver(func(s admininit.Step) error {
+		if s == at {
+			return errCrash
+		}
+		return nil
+	})
+	_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	restore()
+	if !errors.Is(err, errCrash) {
+		t.Fatalf("first run: %v, want the crash", err)
+	}
+	return name, path
+}
+
+// Codex P1 4338232085: a resume that records a C2 file keeps the descriptor it
+// checked the file by open until the record is durable, and the coarse clock is
+// past the file's birth time by then, at both cuts, as step 7 does for a file it
+// creates. Otherwise a crash after the record lets same-owner churn reuse the
+// freed inode within the birth-time tick and a later run adopt the replacement.
+func TestInitResumeRecordsCutBeforeClosingDescriptor(t *testing.T) {
+	for _, at := range []admininit.Step{admininit.StepCreateAuthority, admininit.StepCreateJobLedger} {
+		for _, kind := range cutKinds {
+			t.Run(string(at)+"/"+kind, func(t *testing.T) {
+				adminDir, root, p := layout(t)
+				name, path := crashAtCut(t, adminDir, root, p, at, kind)
+				recStep := admininit.StepRecordAuthority
+				if at == admininit.StepCreateJobLedger {
+					recStep = admininit.StepRecordJobLedger
+				}
+				checked := 0
+				restore := admininit.SetBeforeClose(func(s admininit.Step) {
+					if s != recStep {
+						return
+					}
+					rec := readIntent(t, adminDir).db(t, name)
+					var ts unix.Timespec
+					if err := unix.ClockGettime(unix.CLOCK_REALTIME_COARSE, &ts); err != nil {
+						t.Fatal(err)
+					}
+					if now := (testStamp{Sec: ts.Sec, Nsec: uint32(ts.Nsec)}); !rec.btime().before(now) { // #nosec G115 -- tv_nsec is below 1e9.
+						t.Errorf("%s: coarse clock %+v not past birth time %+v", name, now, rec.btime())
+					}
+					if !holdsFD(t, path) {
+						t.Errorf("%s: no open descriptor to %s when the resumed record is durable", name, path)
+					}
+					checked++
+				})
+				_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+				restore()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if checked != 1 {
+					t.Fatalf("checked the resumed %s record %d times, want 1", name, checked)
+				}
+				if holdsFD(t, path) {
+					t.Fatalf("%s: descriptor still open after Init returned", name)
+				}
+			})
+		}
+	}
+}
+
+// Codex P1 4338232085: with the clock held on the recovered C2 file's birth-time
+// tick, the resume keeps reading the clock until it moves past before it records
+// the file, at both cuts.
+func TestInitResumeWaitsPastCutBirthTimeTick(t *testing.T) {
+	for _, at := range []admininit.Step{admininit.StepCreateAuthority, admininit.StepCreateJobLedger} {
+		for _, kind := range cutKinds {
+			t.Run(string(at)+"/"+kind, func(t *testing.T) {
+				adminDir, root, p := layout(t)
+				name, _ := crashAtCut(t, adminDir, root, p, at, kind)
+				held := map[testStamp]int{}
+				restore := admininit.SetTickWait(func(bs int64, bn uint32, ns int64, nn uint32) (int64, uint32) {
+					b := testStamp{Sec: bs, Nsec: bn}
+					if held[b]++; held[b] <= 3 {
+						return bs, bn
+					}
+					return ns, nn
+				})
+				_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+				restore()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n := held[readIntent(t, adminDir).db(t, name).btime()]; n < 4 {
+					t.Fatalf("%s: the resume read the clock %d times for its birth time, want at least 4 (%v)", name, n, held)
+				}
+			})
+		}
+	}
+}
+
 // A clock that never passes the birth time stops init after a bounded wait,
 // with a retryable refusal.
 func TestInitStuckClockIsRetryable(t *testing.T) {

@@ -293,13 +293,32 @@ func resumeOne(adminDir string, db database, tr trust, rec *intent) error {
 	if err := untrustedACL(db.path); err != nil {
 		return err
 	}
-	if obs.perm() != 0o660 {
-		if obs, err = handOverCreated(db, obs, tr); err != nil {
-			return err
-		}
+	return recordCut(adminDir, db, obs, tr, rec)
+}
+
+// recordCut is the rest of step 7 for a C2 file: it holds the file obs saw by a
+// descriptor, completes the hand-over if the cut came before it, waits one clock
+// tick past the birth time, makes the record durable and only then closes the
+// descriptor, as createAndRecord does. Holding the descriptor keeps the inode
+// from being freed and reused before it is recorded; the tick makes any later
+// allocation get a strictly later birth time.
+func recordCut(adminDir string, db database, obs fileID, tr trust, rec *intent) (err error) {
+	f, id, err := holdCut(db, obs, tr)
+	if err != nil {
+		return err
 	}
-	rec.Databases = append(rec.Databases, dbRecord{Name: db.name, Path: db.path, fileID: obs})
-	return writeIntent(adminDir, rec)
+	defer func() { err = errors.Join(err, f.Close()) }()
+	if err := waitPast(id.btime()); err != nil {
+		return err
+	}
+	rec.Databases = append(rec.Databases, dbRecord{Name: db.name, Path: db.path, fileID: id})
+	if err := writeIntent(adminDir, rec); err != nil {
+		return err
+	}
+	if beforeClose != nil {
+		beforeClose(db.rec)
+	}
+	return nil
 }
 
 // c2Cut reports whether an unrecorded file is what step 7 leaves at a crash
@@ -313,40 +332,49 @@ func c2Cut(obs fileID, tr trust, createdAt stamp) bool {
 		(obs.perm() == 0o660 || obs.perm()&^0o600 == 0) && !createdAt.after(obs.btime())
 }
 
-// handOverCreated completes the G4 hand-over of a C2 file cut before it: it
-// opens the name, checks that the descriptor holds the file obs saw, gives it
-// group sori and mode 0660, and returns its identity read from the descriptor.
-// A different file at the name is refused durably.
-func handOverCreated(db database, obs fileID, tr trust) (id fileID, err error) {
+// holdCut opens the C2 file at the name and checks that the descriptor holds the
+// file obs saw. A file cut before the G4 hand-over is then given group sori and
+// mode 0660 on the descriptor and synced. It returns the open descriptor, which
+// the caller closes, and the identity read from it. A different file at the name
+// is refused durably.
+func holdCut(db database, obs fileID, tr trust) (_ *os.File, id fileID, err error) {
 	path := db.path
-	if beforeHandOver != nil {
+	handOver := obs.perm() != 0o660
+	if handOver && beforeHandOver != nil {
 		if err := beforeHandOver(db.create); err != nil {
-			return fileID{}, err
+			return nil, fileID{}, err
 		}
 	}
 	// #nosec G304 -- a database path Init pinned inside the data root.
 	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollow, 0)
 	if err != nil {
-		return fileID{}, fmt.Errorf("admininit: hand over %s: %w", path, err)
+		return nil, fileID{}, fmt.Errorf("admininit: hold %s: %w", path, err)
 	}
-	defer func() { err = errors.Join(err, f.Close()) }()
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, f.Close())
+		}
+	}()
 	held, err := fileIdentity(f)
 	if err != nil {
-		return fileID{}, fmt.Errorf("admininit: %w", err)
+		return nil, fileID{}, fmt.Errorf("admininit: %w", err)
 	}
 	if !held.regular() || held.Size != 0 || !obs.matches(held, useGeneration) {
-		return fileID{}, refuseDurable(ReasonUnrecorded, "%s changed during the hand-over: have %s, saw %s", path, held, obs)
+		return nil, fileID{}, refuseDurable(ReasonUnrecorded, "%s changed before it was recorded: have %s, saw %s", path, held, obs)
+	}
+	if !handOver {
+		return f, held, nil
 	}
 	if err := setGroupMode(f, int(tr.gid), 0o660); err != nil {
-		return fileID{}, fmt.Errorf("admininit: hand over %s: %w", path, err)
+		return nil, fileID{}, fmt.Errorf("admininit: hand over %s: %w", path, err)
 	}
 	if id, err = fileIdentity(f); err != nil {
-		return fileID{}, fmt.Errorf("admininit: %w", err)
+		return nil, fileID{}, fmt.Errorf("admininit: %w", err)
 	}
 	if err := errors.Join(f.Sync(), syncDir(filepath.Dir(path))); err != nil {
-		return fileID{}, fmt.Errorf("admininit: sync %s: %w", path, err)
+		return nil, fileID{}, fmt.Errorf("admininit: sync %s: %w", path, err)
 	}
-	return id, nil
+	return f, id, nil
 }
 
 // untrustedACL refuses, retryably, a database file with extended ACL entries
@@ -409,11 +437,13 @@ func createAndRecord(adminDir string, db database, tr trust, rec *intent) (err e
 }
 
 // beforeClose, when set by tests, runs after a database's record is durable and
-// before init closes the descriptor it created the file with.
+// before init closes the descriptor it created the file with or, on a resume of a
+// C2 cut, the descriptor it holds that file by.
 var beforeClose func(Step)
 
 // beforeHandOver, when set by tests, runs after a database's O_EXCL create, or a
-// resume's first look at a cut file, and before its group and mode are set; an
+// resume's first look at a cut file it must still hand over, and before its group
+// and mode are set; an
 // error stands for a crash or a failed chown or chmod there.
 var beforeHandOver func(Step) error
 
