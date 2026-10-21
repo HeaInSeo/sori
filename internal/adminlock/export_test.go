@@ -13,12 +13,21 @@ func SetIntervals(poll, log time.Duration) (restore func()) {
 	return func() { pollInterval, waitLogInterval = prevPoll, prevLog }
 }
 
-// SetBeforeServerLockCreate sets the hook that runs between finding no
-// server.lock and creating it, and returns a function restoring the old hook.
-func SetBeforeServerLockCreate(fn func()) (restore func()) {
-	prev := beforeServerLockCreate
-	beforeServerLockCreate = fn
-	return func() { beforeServerLockCreate = prev }
+// SetBeforeLockCreate sets the hook that runs between finding no lock file name
+// and creating it, and returns a function restoring the old hook.
+func SetBeforeLockCreate(fn func(name string)) (restore func()) {
+	prev := beforeLockCreate
+	beforeLockCreate = fn
+	return func() { beforeLockCreate = prev }
+}
+
+// SetBeforeLockPublish sets the hook that runs once a new lock file has its mode
+// under its temporary name and before it gets the lock file's name, and returns
+// a function restoring the old hook.
+func SetBeforeLockPublish(fn func(name, tmp string)) (restore func()) {
+	prev := beforeLockPublish
+	beforeLockPublish = fn
+	return func() { beforeLockPublish = prev }
 }
 
 // AcquireServerStartWait is AcquireServerStart without the 1–60 minute range

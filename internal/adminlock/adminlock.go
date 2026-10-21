@@ -86,13 +86,14 @@ func AcquireOffline(ctx context.Context, adminDir, dataRoot string, createAdmin 
 	if !supported {
 		return nil, ErrUnsupported
 	}
-	flags, perm := os.O_RDONLY, fs.FileMode(0)
+	var admin *os.File
+	var err error
 	if createAdmin {
-		flags |= os.O_CREATE
-		perm = 0o640
+		admin, err = openLock(adminDir, AdminLockName, os.O_RDONLY, adminLockMode)
+	} else {
+		// #nosec G304 -- fixed lock file name inside the configured admin area.
+		admin, err = os.Open(lockPath(adminDir, AdminLockName))
 	}
-	// #nosec G304 -- fixed lock file name inside the configured admin area.
-	admin, err := os.OpenFile(lockPath(adminDir, AdminLockName), flags, perm)
 	if err != nil {
 		return nil, fmt.Errorf("adminlock: open %s: %w", AdminLockName, err)
 	}
@@ -192,22 +193,31 @@ func (s *Server) Close() error {
 	return errors.Join(s.server.Close(), s.ReleaseAdmin())
 }
 
-// serverLockMode is the mode C.5.8 gives server.lock, so that a server of the
-// sori group running under another uid can open it read-write and lock it.
-const serverLockMode fs.FileMode = 0o660
+// Modes C.5.8 gives the two lock files: a server of the sori group running under
+// another uid opens admin.lock read-only for its shared lock and server.lock
+// read-write.
+const (
+	adminLockMode  fs.FileMode = 0o640
+	serverLockMode fs.FileMode = 0o660
+)
 
-// openServerLockAttempts bounds how often openServerLock retries when the name
-// is created or removed between its two opens.
-const openServerLockAttempts = 3
+// openLockAttempts bounds how often openLock retries when the name is created
+// or removed between its open and its publication.
+const openLockAttempts = 3
 
-// beforeServerLockCreate runs after openServerLock found no server.lock and
-// before it creates one. Tests use it to make the name appear in between.
-var beforeServerLockCreate = func() {}
+// beforeLockCreate runs after openLock found no lock file and before it creates
+// one. beforeLockPublish runs once the new file has its mode and before it gets
+// the lock file's name. Tests use them to make the name appear in between and to
+// cut the creation where a crash could.
+var (
+	beforeLockCreate  = func(string) {}
+	beforeLockPublish = func(string, string) {}
+)
 
 // lockServer opens dataRoot/server.lock, creating it (mode 0660) if needed, and
 // takes it exclusive without waiting.
 func lockServer(dataRoot string) (*os.File, error) {
-	f, err := openServerLock(lockPath(dataRoot, ServerLockName))
+	f, err := openLock(dataRoot, ServerLockName, os.O_RDWR, serverLockMode)
 	if err != nil {
 		return nil, fmt.Errorf("adminlock: open %s: %w", ServerLockName, err)
 	}
@@ -221,38 +231,63 @@ func lockServer(dataRoot string) (*os.File, error) {
 	return f, nil
 }
 
-// openServerLock opens server.lock read-write. An existing file is opened as it
-// is and its mode is left alone. Otherwise the file is created with O_EXCL, and
-// only then, by the process that created it, is its mode set to 0660 on the open
-// descriptor: the umask masks the create mode (0022 leaves 0640), which would
-// lock a server of the sori group under another uid out of the file. If the name
-// appears or disappears between the two opens, it tries again a bounded number
-// of times. A dangling symlink at the name is refused rather than followed.
-func openServerLock(path string) (*os.File, error) {
+// openLock opens the lock file name in dir with flag. An existing file is opened
+// as it is and its mode is left alone. Otherwise publishLock creates it with mode,
+// and the name is opened then. If the name appears between the open and the
+// publication, it tries again a bounded number of times. A dangling symlink at
+// the name is refused rather than followed.
+func openLock(dir, name string, flag int, mode fs.FileMode) (*os.File, error) {
+	path := lockPath(dir, name)
 	var err error
-	for range openServerLockAttempts {
+	for range openLockAttempts {
 		var f *os.File
-		// #nosec G304 -- fixed lock file name inside the configured data root.
-		f, err = os.OpenFile(path, os.O_RDWR, 0)
+		// #nosec G304 -- fixed lock file name inside the configured area.
+		f, err = os.OpenFile(path, flag, 0)
 		if !errors.Is(err, fs.ErrNotExist) {
 			return f, err
 		}
-		beforeServerLockCreate()
-		// #nosec G302 G304 -- fixed lock file name inside the configured data root;
-		// C.5.8 gives server.lock mode 0660 so the sori group can lock it.
-		f, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, serverLockMode)
+		beforeLockCreate(name)
+		err = publishLock(dir, name, mode)
 		if err == nil {
-			// #nosec G302 -- C.5.8 server.lock mode 0660, set only on the file just created.
-			if err := f.Chmod(serverLockMode); err != nil {
-				return nil, errors.Join(fmt.Errorf("set mode %s: %w", serverLockMode, err), f.Close())
-			}
-			return f, nil
+			// #nosec G304 -- fixed lock file name inside the configured area.
+			return os.OpenFile(path, flag, 0)
 		}
 		if !errors.Is(err, fs.ErrExist) {
 			return nil, err
 		}
 	}
 	return nil, err
+}
+
+// publishLock creates the lock file name in dir with mode, so that the name never
+// shows a file with any other mode. The umask masks a create mode (0022 turns
+// 0660 into 0640, 0077 turns 0640 into 0600), which would lock a server of the
+// sori group under another uid out of the file, and a later open leaves an
+// existing file's mode alone. So the file is first created under a temporary
+// name in dir, its mode is set on the descriptor and synced, and only then is it
+// linked to the name, which fails with fs.ErrExist if the name exists in any
+// form. The temporary name is removed in every case. A crash before the link
+// leaves no lock file, only a temporary name, and the next process creates the
+// lock file again.
+func publishLock(dir, name string, mode fs.FileMode) (err error) {
+	tmpDir := dir
+	if tmpDir == "" {
+		tmpDir = "."
+	}
+	tmp, err := os.CreateTemp(tmpDir, "."+name+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, tmp.Close(), os.Remove(tmp.Name())) }()
+	// #nosec G302 -- C.5.8 lock file mode, set only on the file this process created.
+	if err := tmp.Chmod(mode); err != nil {
+		return fmt.Errorf("set mode %s: %w", mode, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	beforeLockPublish(name, tmp.Name())
+	return os.Link(tmp.Name(), lockPath(dir, name))
 }
 
 // lockPath appends name to dir without cleaning dir. filepath.Join would turn
