@@ -13,6 +13,14 @@ func SetIntervals(poll, log time.Duration) (restore func()) {
 	return func() { pollInterval, waitLogInterval = prevPoll, prevLog }
 }
 
+// SetBeforeServerLockCreate sets the hook that runs between finding no
+// server.lock and creating it, and returns a function restoring the old hook.
+func SetBeforeServerLockCreate(fn func()) (restore func()) {
+	prev := beforeServerLockCreate
+	beforeServerLockCreate = fn
+	return func() { beforeServerLockCreate = prev }
+}
+
 // AcquireServerStartWait is AcquireServerStart without the 1–60 minute range
 // check, so tests can use a short wait.
 func AcquireServerStartWait(ctx context.Context, adminDir, dataRoot string, wait time.Duration, logf func(string, ...any)) (*Server, error) {

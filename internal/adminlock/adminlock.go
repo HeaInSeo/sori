@@ -192,12 +192,22 @@ func (s *Server) Close() error {
 	return errors.Join(s.server.Close(), s.ReleaseAdmin())
 }
 
+// serverLockMode is the mode C.5.8 gives server.lock, so that a server of the
+// sori group running under another uid can open it read-write and lock it.
+const serverLockMode fs.FileMode = 0o660
+
+// openServerLockAttempts bounds how often openServerLock retries when the name
+// is created or removed between its two opens.
+const openServerLockAttempts = 3
+
+// beforeServerLockCreate runs after openServerLock found no server.lock and
+// before it creates one. Tests use it to make the name appear in between.
+var beforeServerLockCreate = func() {}
+
 // lockServer opens dataRoot/server.lock, creating it (mode 0660) if needed, and
 // takes it exclusive without waiting.
 func lockServer(dataRoot string) (*os.File, error) {
-	// #nosec G302 G304 -- fixed lock file name inside the configured data root;
-	// C.5.8 gives server.lock mode 0660 so the sori group can lock it.
-	f, err := os.OpenFile(lockPath(dataRoot, ServerLockName), os.O_RDWR|os.O_CREATE, 0o660)
+	f, err := openServerLock(lockPath(dataRoot, ServerLockName))
 	if err != nil {
 		return nil, fmt.Errorf("adminlock: open %s: %w", ServerLockName, err)
 	}
@@ -209,6 +219,40 @@ func lockServer(dataRoot string) (*os.File, error) {
 		return nil, errors.Join(ErrServerLockHeld, f.Close())
 	}
 	return f, nil
+}
+
+// openServerLock opens server.lock read-write. An existing file is opened as it
+// is and its mode is left alone. Otherwise the file is created with O_EXCL, and
+// only then, by the process that created it, is its mode set to 0660 on the open
+// descriptor: the umask masks the create mode (0022 leaves 0640), which would
+// lock a server of the sori group under another uid out of the file. If the name
+// appears or disappears between the two opens, it tries again a bounded number
+// of times. A dangling symlink at the name is refused rather than followed.
+func openServerLock(path string) (*os.File, error) {
+	var err error
+	for range openServerLockAttempts {
+		var f *os.File
+		// #nosec G304 -- fixed lock file name inside the configured data root.
+		f, err = os.OpenFile(path, os.O_RDWR, 0)
+		if !errors.Is(err, fs.ErrNotExist) {
+			return f, err
+		}
+		beforeServerLockCreate()
+		// #nosec G302 G304 -- fixed lock file name inside the configured data root;
+		// C.5.8 gives server.lock mode 0660 so the sori group can lock it.
+		f, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, serverLockMode)
+		if err == nil {
+			// #nosec G302 -- C.5.8 server.lock mode 0660, set only on the file just created.
+			if err := f.Chmod(serverLockMode); err != nil {
+				return nil, errors.Join(fmt.Errorf("set mode %s: %w", serverLockMode, err), f.Close())
+			}
+			return f, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, err
+		}
+	}
+	return nil, err
 }
 
 // lockPath appends name to dir without cleaning dir. filepath.Join would turn
