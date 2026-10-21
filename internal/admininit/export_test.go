@@ -80,6 +80,30 @@ func SetBeforeClose(fn func(Step)) (restore func()) {
 	return func() { beforeClose = prev }
 }
 
+// SetBeforeHandOver installs a hook that runs after a database's O_EXCL create,
+// or a resume's first look at a cut file, and before Init sets its group and
+// mode; an error it returns stops Init there.
+// It returns a function restoring the previous hook.
+func SetBeforeHandOver(fn func(Step) error) (restore func()) {
+	prev := beforeHandOver
+	beforeHandOver = fn
+	return func() { beforeHandOver = prev }
+}
+
+// SetNoBirthTimeAt makes the step 4a probe of the directory dir report a
+// filesystem without birth times, as a nested mount of one would, and returns a
+// function restoring the probe.
+func SetNoBirthTimeAt(dir string) (restore func()) {
+	prev := probeIdentity
+	probeIdentity = func(path string) (fileID, error) {
+		if path == dir {
+			return fileID{}, errNoBirthTime
+		}
+		return prev(path)
+	}
+	return func() { probeIdentity = prev }
+}
+
 // SetAfterCheck installs a hook that Init runs after it checks the paths and
 // before it takes the locks and opens either database, and returns a function
 // restoring the previous one.

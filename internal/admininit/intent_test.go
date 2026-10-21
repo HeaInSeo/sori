@@ -540,6 +540,186 @@ func TestInitRefusesOlderUnrecordedFile(t *testing.T) {
 	checkRefusedStands(t, adminDir, root, p)
 }
 
+// I-T2 C2 before the hand-over: a crash, or a failed chown or chmod, after the
+// O_EXCL create and before the group and mode are set leaves an owner-only empty
+// file. The plain rerun accepts it as the C2 cut, hands it over and records it
+// with mode 0660, under umask 077 too.
+func TestInitResumesCutBeforeHandOver(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	const id1 = "00000000000000000000000000000001"
+	_, gid := testIDs()
+	for _, at := range []admininit.Step{admininit.StepCreateAuthority, admininit.StepCreateJobLedger} {
+		t.Run(string(at), func(t *testing.T) {
+			adminDir, root, p := layout(t)
+			path, name := p.Authority, "authority"
+			if at == admininit.StepCreateJobLedger {
+				path, name = p.JobLedger, "jobledger"
+			}
+			calls := 0
+			restore := admininit.SetBeforeHandOver(func(s admininit.Step) error {
+				if s == at {
+					return errCrash
+				}
+				return nil
+			})
+			_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+			restore()
+			if !errors.Is(err, errCrash) {
+				t.Fatalf("first run: %v, want the crash", err)
+			}
+			if fi, err := os.Lstat(path); err != nil || fi.Mode().Perm() != 0o600 || fi.Size() != 0 {
+				t.Fatalf("cut left %v, %v; want an empty 0600 file", fi, err)
+			}
+			res, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.InstallationID != id1 || calls != 1 {
+				t.Fatalf("rerun = %+v after %d id calls; want %q after 1", res, calls, id1)
+			}
+			in := readIntent(t, adminDir)
+			if d := in.db(t, name); d.Mode&0o7777 != 0o660 || d.GID != gid {
+				t.Fatalf("%s recorded mode %o gid %d; want 0660 group %d", name, d.Mode, d.GID, gid)
+			}
+			if exists(t, filepath.Join(adminDir, admininit.RefusedName)) {
+				t.Fatal("init-refused written")
+			}
+			checkHandOver(t, p, gid)
+			checkInitialized(t, p, id1)
+		})
+	}
+}
+
+// The resume hands over only the cut file it checked: another empty owner-only
+// file renamed over the name between the check and the hand-over is refused
+// durably and left as it is.
+func TestInitRefusesSwapDuringCutHandOver(t *testing.T) {
+	adminDir, root, p := layout(t)
+	restore := admininit.SetBeforeHandOver(func(s admininit.Step) error {
+		if s == admininit.StepCreateAuthority {
+			return errCrash
+		}
+		return nil
+	})
+	_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	restore()
+	if !errors.Is(err, errCrash) {
+		t.Fatalf("first run: %v, want the crash", err)
+	}
+	swapped := false
+	restore = admininit.SetBeforeHandOver(func(s admininit.Step) error {
+		if s != admininit.StepCreateAuthority || swapped {
+			return nil
+		}
+		swapped = true
+		tmp := p.Authority + ".swap"
+		writeFile(t, tmp, nil)
+		return os.Rename(tmp, p.Authority)
+	})
+	_, err = admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	restore()
+	if !swapped {
+		t.Fatal("the resume did not reach the hand-over")
+	}
+	wantRefusal(t, err, admininit.ReasonUnrecorded, true)
+	if fi, err := os.Lstat(p.Authority); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("swapped file now %v, %v; want it left 0600", fi, err)
+	}
+	checkRefusedStands(t, adminDir, root, p)
+}
+
+// The owner-only C2 cut is accepted only as the file init created: an unrecorded
+// file that is older than the intent, not empty, linked twice or readable by the
+// group without being 0660 is still refused durably.
+func TestInitRefusesForeignOwnerOnlyFile(t *testing.T) {
+	cases := map[string]struct {
+		mode  os.FileMode
+		data  []byte
+		older bool
+		link  bool
+	}{
+		"0600 older than the intent": {mode: 0o600, older: true},
+		"0600 not empty":             {mode: 0o600, data: []byte("x")},
+		"0600 two links":             {mode: 0o600, link: true},
+		"0640":                       {mode: 0o640},
+		"0606":                       {mode: 0o606},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			adminDir, root, p := layout(t)
+			staged := filepath.Join(root, "staged")
+			if c.older {
+				writeFile(t, staged, c.data)
+				time.Sleep(20 * time.Millisecond)
+			}
+			crashInit(t, adminDir, root, p, admininit.StepIntent)
+			if !c.older {
+				writeFile(t, staged, c.data)
+			}
+			if err := os.Chmod(staged, c.mode); err != nil {
+				t.Fatal(err)
+			}
+			if c.link {
+				if err := os.Link(staged, staged+".2"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Rename(staged, p.Authority); err != nil {
+				t.Fatal(err)
+			}
+			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			wantRefusal(t, err, admininit.ReasonUnrecorded, true)
+			if fi, err := os.Lstat(p.Authority); err != nil || fi.Mode().Perm() != c.mode {
+				t.Fatalf("refused file now %v, %v; want it left at %o", fi, err, c.mode)
+			}
+			checkRefusedStands(t, adminDir, root, p)
+		})
+	}
+}
+
+// I-T2 step 4a for every database: a database directory on a filesystem without
+// birth times, such as a nested mount below the data root, is refused before
+// init-intent is written or either database is created, and on a resume before
+// anything more is created. The refusal is retryable.
+func TestInitProbesEveryDatabaseFilesystem(t *testing.T) {
+	adminDir, root := t.TempDir(), trustedDir(t)
+	sub := filepath.Join(root, "ledger")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	trust(t, sub)
+	p := admininit.Paths{JobLedger: filepath.Join(sub, "jobs.db"), Authority: filepath.Join(root, "authority.db")}
+	restore := admininit.SetNoBirthTimeAt(sub)
+	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	wantRefusal(t, err, admininit.ReasonUnsupportedIdentity, false)
+	for _, n := range []string{admininit.IntentName, admininit.RefusedName} {
+		if exists(t, filepath.Join(adminDir, n)) {
+			t.Fatalf("%s written", n)
+		}
+	}
+	if exists(t, p.Authority) || exists(t, p.JobLedger) {
+		t.Fatal("a database was created")
+	}
+	restore()
+
+	crashInit(t, adminDir, root, p, admininit.StepIntent)
+	before := readIntent(t, adminDir)
+	restore = admininit.SetNoBirthTimeAt(sub)
+	_, err = admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	restore()
+	wantRefusal(t, err, admininit.ReasonUnsupportedIdentity, false)
+	if exists(t, p.Authority) || exists(t, p.JobLedger) || exists(t, filepath.Join(adminDir, admininit.RefusedName)) {
+		t.Fatal("the resume created a database or recorded a refusal")
+	}
+	if after := readIntent(t, adminDir); after.Nonce != before.Nonce || len(after.Databases) != 0 {
+		t.Fatalf("intent changed: %+v -> %+v", before, after)
+	}
+	if _, err := admininit.Init(context.Background(), adminDir, root, p, nil); err != nil {
+		t.Fatalf("rerun on a supported filesystem: %v", err)
+	}
+}
+
 // I-T2 step 6: a recorded database replaced by another file, or removed, is
 // refused durably on the rerun.
 func TestInitRefusesChangedRecordedFile(t *testing.T) {
