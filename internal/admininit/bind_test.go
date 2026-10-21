@@ -15,6 +15,12 @@ import (
 	"github.com/HeaInSeo/sori/jobledger"
 )
 
+// The binding tests drive the database phase (ProvisionAndBootstrap) directly.
+// Init creates and records both files before the phase (TRUST r4 §3.2 step 7)
+// and refuses any file it did not create, so the absent-name and existing-file
+// cases of bind are reached only through the phase itself. Init's own identity
+// checks are in intent_test.go.
+
 // swapAt runs swap once, just before the hook point at.
 func swapAt(t *testing.T, at admininit.Step, swap func()) (restore func()) {
 	t.Helper()
@@ -31,7 +37,7 @@ func swapAt(t *testing.T, at admininit.Step, swap func()) (restore func()) {
 // into another data root before SQLite opens it, while a server holds that
 // root's server.lock. Init must refuse and write nothing there.
 func TestInitRefusesFinalNameSymlinkedAfterPreflight(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	outside := t.TempDir()
 	h := locktest.Hold(t, locktest.Server, t.TempDir(), outside)
 	defer h.Release(t)
@@ -42,7 +48,7 @@ func TestInitRefusesFinalNameSymlinkedAfterPreflight(t *testing.T) {
 		symlink(t, filepath.Join(outside, "jobs.db"), p.JobLedger)
 	})()
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -54,13 +60,13 @@ func TestInitRefusesFinalNameSymlinkedAfterPreflight(t *testing.T) {
 // A symlink that appears at an absent final name after the preflight is not
 // followed when the file is first opened: nothing is created at its target.
 func TestInitRefusesSymlinkBeforeFirstOpen(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	outside := t.TempDir()
 	defer swapAt(t, admininit.StepAuthoritySchema, func() {
 		symlink(t, filepath.Join(outside, "authority.db"), p.Authority)
 	})()
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -72,7 +78,7 @@ func TestInitRefusesSymlinkBeforeFirstOpen(t *testing.T) {
 // A job ledger replaced by another regular file before the markers are written
 // is refused, and the replacement gets no markers.
 func TestInitRefusesReplacedDatabase(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	defer swapAt(t, admininit.StepMarkers, func() {
 		tmp := p.JobLedger + ".new"
 		writeFile(t, tmp, nil)
@@ -82,7 +88,7 @@ func TestInitRefusesReplacedDatabase(t *testing.T) {
 	})()
 
 	var calls int
-	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, countingID(&calls))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -94,13 +100,13 @@ func TestInitRefusesReplacedDatabase(t *testing.T) {
 // A WAL sidecar that is a symlink out of the root is refused before SQLite
 // opens the database next to it.
 func TestInitRefusesSidecarSymlink(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	outside := t.TempDir()
 	defer swapAt(t, admininit.StepJobLedgerSchema, func() {
 		symlink(t, filepath.Join(outside, "jobs.db-wal"), p.JobLedger+"-wal")
 	})()
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -117,12 +123,12 @@ func TestInitRefusesHardLinkAtAbsentLedger(t *testing.T) {
 	op := admininit.Paths{JobLedger: filepath.Join(other, "jobs.db"), Authority: filepath.Join(other, "authority.db")}
 	provision(t, op)
 	before := readFile(t, op.JobLedger)
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	defer swapAt(t, admininit.StepJobLedgerSchema, func() {
 		link(t, op.JobLedger, p.JobLedger)
 	})()
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -137,12 +143,12 @@ func TestInitRefusesHardLinkAtAbsentAuthority(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "other.db")
 	foreign(t, outside)
 	before := readFile(t, outside)
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	defer swapAt(t, admininit.StepAuthoritySchema, func() {
 		link(t, outside, p.Authority)
 	})()
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -154,7 +160,7 @@ func TestInitRefusesHardLinkAtAbsentAuthority(t *testing.T) {
 // A file renamed over the empty job ledger the preflight inspected is refused
 // before SQLite opens it, and the replacement stays empty.
 func TestInitRefusesRenamedInLedger(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	writeFile(t, p.JobLedger, nil)
 	defer swapAt(t, admininit.StepJobLedgerSchema, func() {
 		tmp := p.JobLedger + ".new"
@@ -164,7 +170,7 @@ func TestInitRefusesRenamedInLedger(t *testing.T) {
 		}
 	})()
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -176,8 +182,8 @@ func TestInitRefusesRenamedInLedger(t *testing.T) {
 // A foreign SQLite file renamed in at the absent authority name after the
 // preflight is refused, and it is not changed.
 func TestInitRefusesRenamedInAuthority(t *testing.T) {
-	adminDir, root, p := layout(t)
-	tmp := filepath.Join(root, "staged.db")
+	p := dataRoot(t)
+	tmp := filepath.Join(filepath.Dir(p.JobLedger), "staged.db")
 	foreign(t, tmp)
 	before := readFile(t, tmp)
 	defer swapAt(t, admininit.StepAuthoritySchema, func() {
@@ -186,7 +192,7 @@ func TestInitRefusesRenamedInAuthority(t *testing.T) {
 		}
 	})()
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -198,7 +204,7 @@ func TestInitRefusesRenamedInAuthority(t *testing.T) {
 // A database the preflight saw as an empty file and that grew before the first
 // open is refused: the held file must have the size the preflight saw.
 func TestInitRefusesGrownPristineFile(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	writeFile(t, p.Authority, nil)
 	defer swapAt(t, admininit.StepAuthoritySchema, func() {
 		f, err := os.OpenFile(p.Authority, os.O_WRONLY|os.O_APPEND, 0)
@@ -213,7 +219,7 @@ func TestInitRefusesGrownPristineFile(t *testing.T) {
 		}
 	})()
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -229,14 +235,14 @@ func TestInitRefusesDatabaseAppearingDuringPreflight(t *testing.T) {
 	other := t.TempDir()
 	op := admininit.Paths{JobLedger: filepath.Join(other, "jobs.db"), Authority: filepath.Join(other, "authority.db")}
 	provision(t, op)
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	defer admininit.SetAfterSee(func() {
 		if err := os.Rename(op.Authority, p.Authority); err != nil {
 			t.Fatal(err)
 		}
 	})()
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -249,9 +255,9 @@ func TestInitRefusesDatabaseAppearingDuringPreflight(t *testing.T) {
 // commit: a foreign file renamed over it before the markers is refused, and the
 // job ledger gets no markers.
 func TestInitRefusesSchemaOnlyAuthorityReplacedBeforeMarkers(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	provisionAuthority(t, p.Authority)
-	tmp := filepath.Join(root, "staged.db")
+	tmp := filepath.Join(filepath.Dir(p.JobLedger), "staged.db")
 	foreign(t, tmp)
 	defer swapAt(t, admininit.StepMarkers, func() {
 		if err := os.Rename(tmp, p.Authority); err != nil {
@@ -260,7 +266,7 @@ func TestInitRefusesSchemaOnlyAuthorityReplacedBeforeMarkers(t *testing.T) {
 	})()
 
 	var calls int
-	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, countingID(&calls))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -269,7 +275,7 @@ func TestInitRefusesSchemaOnlyAuthorityReplacedBeforeMarkers(t *testing.T) {
 
 // A SCHEMA_ONLY authority removed before the markers is refused the same way.
 func TestInitRefusesSchemaOnlyAuthorityRemovedBeforeMarkers(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	provisionAuthority(t, p.Authority)
 	defer swapAt(t, admininit.StepMarkers, func() {
 		if err := os.Remove(p.Authority); err != nil {
@@ -278,7 +284,7 @@ func TestInitRefusesSchemaOnlyAuthorityRemovedBeforeMarkers(t *testing.T) {
 	})()
 
 	var calls int
-	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, countingID(&calls))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -289,7 +295,7 @@ func TestInitRefusesSchemaOnlyAuthorityRemovedBeforeMarkers(t *testing.T) {
 // after the step's first check, so the step itself fails. The check after the
 // step still runs and reports the replacement.
 func TestInitChecksAfterFailedStep(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	defer admininit.SetBeforeStep(func(s admininit.Step) {
 		if s != admininit.StepMarkers {
 			return
@@ -302,7 +308,7 @@ func TestInitChecksAfterFailedStep(t *testing.T) {
 	})()
 
 	var calls int
-	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, countingID(&calls))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused from the check after the failed step", err)
 	}
@@ -313,8 +319,8 @@ func TestInitChecksAfterFailedStep(t *testing.T) {
 // after the step. SQLite opens by path, so the step may already have written
 // to the replacement; init refuses, and the ledger it bound gets no markers.
 func TestInitRefusesLedgerReplacedDuringStep(t *testing.T) {
-	adminDir, root, p := layout(t)
-	tmp := filepath.Join(root, "staged.db")
+	p := dataRoot(t)
+	tmp := filepath.Join(filepath.Dir(p.JobLedger), "staged.db")
 	foreign(t, tmp)
 	var bound string
 	defer admininit.SetBeforeStep(func(s admininit.Step) {
@@ -331,7 +337,7 @@ func TestInitRefusesLedgerReplacedDuringStep(t *testing.T) {
 	})()
 
 	var calls int
-	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, countingID(&calls))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}

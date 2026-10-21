@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -14,16 +15,56 @@ import (
 	"github.com/HeaInSeo/sori/internal/adminlock/locktest"
 )
 
+// TestMain makes the test user the init principal and its group the sori group,
+// and stops the G1 ancestor walk below the temporary directory, whose own
+// ancestors the tests do not control.
 func TestMain(m *testing.M) {
 	locktest.RunHolderIfRequested()
+	tmp, err := filepath.EvalSymlinks(testTempBase())
+	if err != nil {
+		panic(err)
+	}
+	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid()) // #nosec G115 -- ids fit 32 bits.
+	admininit.SetTestTrust(uid, gid, uid, tmp)
 	os.Exit(m.Run())
 }
 
-// layout returns an admin area, a data root and the two database paths inside it.
+// testTempBase is the directory t.TempDir creates its directories in: GOTMPDIR
+// when it is set (the Makefile sets it), else os.TempDir.
+func testTempBase() string {
+	if dir := os.Getenv("GOTMPDIR"); dir != "" {
+		return dir
+	}
+	return os.TempDir()
+}
+
+// layout returns an admin area, a trusted data root and the two database paths
+// inside it.
 func layout(t *testing.T) (adminDir, root string, p admininit.Paths) {
 	t.Helper()
-	adminDir, root = t.TempDir(), t.TempDir()
+	adminDir, root = t.TempDir(), trustedDir(t)
 	return adminDir, root, admininit.Paths{JobLedger: filepath.Join(root, "jobs.db"), Authority: filepath.Join(root, "authority.db")}
+}
+
+// trustedDir returns a new temporary directory in the G1 layout: mode 2770 with
+// the test user's group. Init needs file birth times, which only its Linux
+// build reads, so other platforms skip.
+func trustedDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("Init needs Linux statx birth times")
+	}
+	dir := t.TempDir()
+	trust(t, dir)
+	return dir
+}
+
+// trust gives an existing directory the G1 mode 2770.
+func trust(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Chmod(dir, 0o770|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func names(t *testing.T, dir string) []string {
@@ -68,8 +109,8 @@ func TestInitHoldsLocksAndBootstraps(t *testing.T) {
 		t.Fatalf("res = %+v, newID calls = %d, probed = %v", res, calls, probed)
 	}
 	checkInitialized(t, p, res.InstallationID)
-	if got := names(t, adminDir); !slices.Equal(got, []string{adminlock.AdminLockName}) {
-		t.Fatalf("admin area = %v, want only admin.lock", got)
+	if got := names(t, adminDir); !slices.Equal(got, []string{adminlock.AdminLockName, admininit.IntentName}) {
+		t.Fatalf("admin area = %v, want only admin.lock and init-intent", got)
 	}
 
 	// Both locks are released when Init returns.
@@ -142,7 +183,7 @@ func TestInitLosesToRunningServerThroughDataRootAlias(t *testing.T) {
 // server holds. Init must still lock a/server.lock and create the databases in
 // a, so b holds nothing but its server's lock.
 func TestInitPinsDataRootAgainstRetarget(t *testing.T) {
-	adminDir, a, b, top := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	adminDir, a, b, top := t.TempDir(), trustedDir(t), t.TempDir(), t.TempDir()
 	link := filepath.Join(top, "root")
 	symlink(t, a, link)
 	h := locktest.Hold(t, locktest.Server, t.TempDir(), b)
@@ -173,6 +214,7 @@ func TestInitPinsDatabasePathAgainstRetarget(t *testing.T) {
 	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	trust(t, sub)
 	link := filepath.Join(root, "dir")
 	symlink(t, sub, link)
 	p.JobLedger = filepath.Join(link, "jobs.db")
@@ -292,10 +334,11 @@ func TestInitRefusesRelativeSymlinkEscape(t *testing.T) {
 // and a linked subdirectory of it.
 func TestInitAcceptsSymlinkInsideDataRoot(t *testing.T) {
 	adminDir := t.TempDir()
-	target := t.TempDir()
+	target := trustedDir(t)
 	if err := os.Mkdir(filepath.Join(target, "sub"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	trust(t, filepath.Join(target, "sub"))
 	root := filepath.Join(t.TempDir(), "root")
 	symlink(t, target, root)
 	symlink(t, filepath.Join(target, "sub"), filepath.Join(target, "inner"))

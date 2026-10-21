@@ -26,10 +26,10 @@ func TestInitRefusesExistingHardLinkedLedger(t *testing.T) {
 	h := locktest.Hold(t, locktest.Server, t.TempDir(), other)
 	defer h.Release(t)
 	before := readFile(t, op.JobLedger)
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	link(t, op.JobLedger, p.JobLedger)
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -48,10 +48,10 @@ func TestInitRefusesExistingHardLinkedAuthority(t *testing.T) {
 	op := admininit.Paths{JobLedger: filepath.Join(other, "jobs.db"), Authority: filepath.Join(other, "authority.db")}
 	provision(t, op)
 	before := readFile(t, op.Authority)
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	link(t, op.Authority, p.Authority)
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, noID(t))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -66,14 +66,14 @@ func TestInitRefusesExistingHardLinkedAuthority(t *testing.T) {
 // A hard link made to the bound job ledger from another data root before the
 // markers is refused, and neither name gets markers.
 func TestInitRefusesLinkAddedToBoundLedger(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	alias := filepath.Join(t.TempDir(), "jobs.db")
 	defer swapAt(t, admininit.StepMarkers, func() {
 		link(t, p.JobLedger, alias)
 	})()
 
 	var calls int
-	_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	_, err := admininit.ProvisionAndBootstrap(context.Background(), p, countingID(&calls))
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -84,7 +84,7 @@ func TestInitRefusesLinkAddedToBoundLedger(t *testing.T) {
 // A FIFO put over the empty job ledger the preflight inspected is refused at
 // once: bind does not block waiting for a writer to open it.
 func TestInitRefusesFIFOWithoutBlocking(t *testing.T) {
-	adminDir, root, p := layout(t)
+	p := dataRoot(t)
 	writeFile(t, p.JobLedger, nil)
 	defer swapAt(t, admininit.StepJobLedgerSchema, func() {
 		if err := os.Remove(p.JobLedger); err != nil {
@@ -97,7 +97,7 @@ func TestInitRefusesFIFOWithoutBlocking(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := admininit.Init(context.Background(), adminDir, root, p, func() (string, error) { return admininit.NewInstallationID() })
+		_, err := admininit.ProvisionAndBootstrap(context.Background(), p, func() (string, error) { return admininit.NewInstallationID() })
 		done <- err
 	}()
 	select {

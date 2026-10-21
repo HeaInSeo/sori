@@ -91,7 +91,14 @@ func NewInstallationID() (string, error) {
 // failed (boundFiles).
 //
 // newID nil means NewInstallationID.
-func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, error)) (res Result, err error) {
+func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, error)) (Result, error) {
+	return provision(ctx, p, newID, nil)
+}
+
+// provision is ProvisionAndBootstrap. With want set, as Init calls it after it
+// created and recorded both files (TRUST r4 §3.2 step 8), each bound file must
+// also match its recorded identity tuple.
+func provision(ctx context.Context, p Paths, newID func() (string, error), want map[string]fileID) (res Result, err error) {
 	if newID == nil {
 		newID = NewInstallationID
 	}
@@ -115,7 +122,7 @@ func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, e
 	if ledger.State == jobledger.InitMarkerEmpty {
 		return Result{InstallationID: ledger.InstallationID}, nil
 	}
-	files := boundFiles{seen: seen, paths: []string{p.JobLedger, p.Authority}}
+	files := boundFiles{seen: seen, want: want, paths: []string{p.JobLedger, p.Authority}}
 	defer func() { err = errors.Join(err, files.close()) }()
 
 	if auth == sqlitestore.InitPristine {
@@ -238,6 +245,7 @@ func sameSeen(a, b fs.FileInfo) bool {
 // is swapped in between a check and SQLite's own open of the path.
 type boundFiles struct {
 	seen  seenFiles
+	want  map[string]fileID
 	paths []string
 	files []boundFile
 }
@@ -261,21 +269,9 @@ func (files *boundFiles) open(s Step, path string, fn func() error) error {
 		return fmt.Errorf("%w: %s was not inspected", ErrRefused, path)
 	}
 	for _, p := range files.paths {
-		if slices.ContainsFunc(files.files, func(b boundFile) bool { return b.path == p }) {
-			continue
-		}
-		seen, ok := files.seen[p]
-		if !ok {
-			return fmt.Errorf("%w: %s was not inspected", ErrRefused, p)
-		}
-		if seen == nil && p != path && s != StepMarkers {
-			continue
-		}
-		f, err := bind(p, seen)
-		if err != nil {
+		if err := files.bindOne(s, path, p); err != nil {
 			return err
 		}
-		files.files = append(files.files, boundFile{path: p, f: f})
 	}
 	if err := files.check(); err != nil {
 		return err
@@ -284,6 +280,39 @@ func (files *boundFiles) open(s Step, path string, fn func() error) error {
 		beforeStep(s)
 	}
 	return errors.Join(fn(), files.check())
+}
+
+// bindOne binds the database at p for step s, which opens path, unless it is
+// already bound or is absent and not yet due. With a recorded identity (want),
+// the bound file must also match it.
+func (files *boundFiles) bindOne(s Step, path, p string) error {
+	if slices.ContainsFunc(files.files, func(b boundFile) bool { return b.path == p }) {
+		return nil
+	}
+	seen, ok := files.seen[p]
+	if !ok {
+		return fmt.Errorf("%w: %s was not inspected", ErrRefused, p)
+	}
+	if seen == nil && p != path && s != StepMarkers {
+		return nil
+	}
+	f, err := bind(p, seen)
+	if err != nil {
+		return err
+	}
+	files.files = append(files.files, boundFile{path: p, f: f})
+	want, ok := files.want[p]
+	if !ok {
+		return nil
+	}
+	id, err := fileIdentity(f)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrRefused, p, err)
+	}
+	if !want.matches(id, useGeneration) {
+		return fmt.Errorf("%w: %s is not the file init-intent recorded: have %s, recorded %s", ErrRefused, p, id, want)
+	}
+	return nil
 }
 
 // bind opens the database file at path as the preflight saw it. If the

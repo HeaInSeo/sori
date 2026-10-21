@@ -16,11 +16,22 @@ import (
 //
 // It creates admin.lock in adminDir, the first file init writes, and takes it
 // exclusive. It then takes dataRoot/server.lock exclusive without waiting and
-// holds both while ProvisionAndBootstrap runs. If a server holds server.lock it
-// returns adminlock.ErrServerRunning before either database is opened. Both
-// database paths must resolve, through any symlinks, to files inside dataRoot,
-// because server.lock guards only that directory. Keys, policy and the
-// activation epoch are not written here.
+// holds both while the rest runs. If a server holds server.lock it returns
+// adminlock.ErrServerRunning before either database is opened. Both database
+// paths must resolve, through any symlinks, to files inside dataRoot, because
+// server.lock guards only that directory. Keys, policy and the activation epoch
+// are not written here.
+//
+// Under the locks it runs the data-root trust steps of SORI-D01-TRUST-r4 §3.2
+// (trust.go, intent.go): a recorded refusal stands; the data root must be on a
+// filesystem with file birth times and pass the G1 preflight; a first init
+// refuses any existing database or sidecar name and writes init-intent first;
+// a resume checks every recorded file by its identity tuple; each absent
+// database is created 0660 group sori and recorded before its schema; the
+// database phase (ProvisionAndBootstrap) runs bound to the recorded tuples; and
+// both names and the installation id are checked against the record at the end.
+// Identity and binding refusals are recorded in init-refused, so a plain rerun
+// refuses instead of adopting a replaced file.
 //
 // dataRoot and both database paths are resolved once, and the resolved paths
 // are used for the containment check, for server.lock and for every database
@@ -49,7 +60,7 @@ func Init(ctx context.Context, adminDir, dataRoot string, p Paths, newID func() 
 		return Result{}, err
 	}
 	defer func() { err = errors.Join(err, locks.Close()) }()
-	return ProvisionAndBootstrap(ctx, pinned, newID)
+	return initLocked(ctx, adminDir, realRoot, pinned, newID)
 }
 
 // afterCheck, when set by a test, runs after the paths are checked and before
