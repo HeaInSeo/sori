@@ -361,6 +361,144 @@ func TestAdminLockRefusesDanglingSymlink(t *testing.T) {
 	noTemporaryNames(t, adminDir)
 }
 
+// loseWithCleanupFailure runs acquire while another process publishes the lock
+// file name first and the temporary name of this attempt cannot be removed: right
+// before the link, the name appears as a 0600 file and dir turns read-only, so
+// the link fails with EEXIST and the removal with EACCES. It checks that acquire
+// fails with the removal error, naming the temporary name that is left, instead
+// of taking the race for the ordinary one and opening the winner's file.
+func loseWithCleanupFailure(t *testing.T, dir, name string, acquire func() (interface{ Close() error }, error)) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	calls := 0
+	restore := adminlock.SetBeforeLockPublish(func(n, _ string) {
+		if n != name {
+			return
+		}
+		calls++
+		if calls > 1 {
+			return
+		}
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Error(err)
+		}
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	l, err := acquire()
+	restore()
+	if cerr := os.Chmod(dir, 0o755); cerr != nil {
+		t.Fatal(cerr)
+	}
+	if err == nil {
+		_ = l.Close()
+		t.Fatal("acquired the locks although the temporary name could not be removed")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("err = %v, want it to carry the removal's permission error", err)
+	}
+	if calls != 1 {
+		t.Errorf("publication hook ran %d times, want 1", calls)
+	}
+	if got := lockMode(t, dir, name); got != 0o600 {
+		t.Errorf("%s published by the other process has mode %04o, want 0600 unchanged", name, got)
+	}
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	left := 0
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			left++
+			if !strings.Contains(err.Error(), e.Name()) {
+				t.Errorf("err = %v, want it to name the temporary name %s left behind", err, e.Name())
+			}
+		}
+	}
+	if left != 1 {
+		t.Errorf("%d temporary names left in %s, want the 1 the error reports", left, dir)
+	}
+}
+
+// Codex P2 4342525020: losing the publication race is retried only when the link
+// failed solely because the name exists. A failure to clean up the temporary
+// name is returned, not hidden behind the winner's lock file, and the locks
+// taken so far are released.
+func TestLockLostPublicationReportsCleanupFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes names from a read-only directory")
+	}
+	t.Run("admin.lock by init", func(t *testing.T) {
+		adminDir, dataRoot := areas(t)
+		loseWithCleanupFailure(t, adminDir, adminlock.AdminLockName, func() (interface{ Close() error }, error) {
+			return initLocks(adminDir, dataRoot)
+		})
+		if _, err := os.Lstat(filepath.Join(dataRoot, adminlock.ServerLockName)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("server.lock: %v, want not created", err)
+		}
+	})
+	for _, p := range lockPaths {
+		t.Run("server.lock by "+p.name, func(t *testing.T) {
+			adminDir, dataRoot := areas(t)
+			loseWithCleanupFailure(t, dataRoot, adminlock.ServerLockName, func() (interface{ Close() error }, error) {
+				return acquire(t, p.offline, adminDir, dataRoot)
+			})
+			// admin.lock was released: another init can take it at once.
+			o, err := adminlock.AcquireOffline(context.Background(), adminDir, t.TempDir(), true)
+			if err != nil {
+				t.Fatalf("admin.lock still held after the failure: %v", err)
+			}
+			if err := o.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A link that fails for another reason than an existing name is no publication
+// race: it is returned at once, without a second creation attempt. Here the
+// temporary name turns into an empty directory right before the link, so the
+// link fails with EPERM, the cleanup still succeeds and no lock file name
+// appears.
+func TestLockPublicationFailureIsNotRetried(t *testing.T) {
+	adminDir, dataRoot := areas(t)
+	creates := 0
+	defer adminlock.SetBeforeLockCreate(func(n string) {
+		if n == adminlock.ServerLockName {
+			creates++
+		}
+	})()
+	defer adminlock.SetBeforeLockPublish(func(n, tmp string) {
+		if n != adminlock.ServerLockName {
+			return
+		}
+		if err := os.Remove(tmp); err != nil {
+			t.Error(err)
+		}
+		if err := os.Mkdir(tmp, 0o700); err != nil {
+			t.Error(err)
+		}
+	})()
+	l, err := acquire(t, true, adminDir, dataRoot)
+	if err == nil {
+		_ = l.Close()
+		t.Fatal("acquired the locks although server.lock could not be published")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("err = %v, want it to carry the link's permission error", err)
+	}
+	if creates != 1 {
+		t.Errorf("server.lock creation attempted %d times, want 1", creates)
+	}
+	if _, err := os.Lstat(filepath.Join(dataRoot, adminlock.ServerLockName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("server.lock: %v, want not created", err)
+	}
+	noTemporaryNames(t, dataRoot)
+}
+
 // errCut stands for a crash of the creating process.
 var errCut = errors.New("creation cut")
 

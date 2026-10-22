@@ -247,12 +247,13 @@ func openLock(dir, name string, flag int, mode fs.FileMode) (*os.File, error) {
 			return f, err
 		}
 		beforeLockCreate(name)
-		err = publishLock(dir, name, mode)
+		var lost bool
+		lost, err = publishLock(dir, name, mode)
 		if err == nil {
 			// #nosec G304 -- fixed lock file name inside the configured area.
 			return os.OpenFile(path, flag, 0)
 		}
-		if !errors.Is(err, fs.ErrExist) {
+		if !lost {
 			return nil, err
 		}
 	}
@@ -269,25 +270,35 @@ func openLock(dir, name string, flag int, mode fs.FileMode) (*os.File, error) {
 // form. The temporary name is removed in every case. A crash before the link
 // leaves no lock file, only a temporary name, and the next process creates the
 // lock file again.
-func publishLock(dir, name string, mode fs.FileMode) (err error) {
+//
+// lost reports that the link failed only because the name exists, which is the
+// ordinary race with a concurrent creator. A failure to close or remove the
+// temporary name is returned with lost false, so that it is never taken for
+// that race and the residue is not left behind silently.
+func publishLock(dir, name string, mode fs.FileMode) (lost bool, err error) {
 	tmpDir := dir
 	if tmpDir == "" {
 		tmpDir = "."
 	}
 	tmp, err := os.CreateTemp(tmpDir, "."+name+".tmp-*")
 	if err != nil {
-		return err
+		return false, err
 	}
-	defer func() { err = errors.Join(err, tmp.Close(), os.Remove(tmp.Name())) }()
+	defer func() {
+		if cerr := errors.Join(tmp.Close(), os.Remove(tmp.Name())); cerr != nil {
+			lost, err = false, errors.Join(err, fmt.Errorf("clean up %s: %w", tmp.Name(), cerr))
+		}
+	}()
 	// #nosec G302 -- C.5.8 lock file mode, set only on the file this process created.
 	if err := tmp.Chmod(mode); err != nil {
-		return fmt.Errorf("set mode %s: %w", mode, err)
+		return false, fmt.Errorf("set mode %s: %w", mode, err)
 	}
 	if err := tmp.Sync(); err != nil {
-		return err
+		return false, err
 	}
 	beforeLockPublish(name, tmp.Name())
-	return os.Link(tmp.Name(), lockPath(dir, name))
+	err = os.Link(tmp.Name(), lockPath(dir, name))
+	return errors.Is(err, fs.ErrExist), err
 }
 
 // lockPath appends name to dir without cleaning dir. filepath.Join would turn
