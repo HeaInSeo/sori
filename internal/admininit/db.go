@@ -2,9 +2,9 @@
 //
 // This file is the database phase (RW-C1 §5.1/§5.1a): it classifies the job ledger
 // and the authority database read-only, provisions their known schemas, and then
-// writes the job ledger's four init markers once. It does not take the admin or
-// server lock, and it does not create keys, policy or the activation epoch; the
-// caller holds both locks for the whole run and does those steps afterwards.
+// writes the job ledger's four init markers once. ProvisionAndBootstrap does not
+// take the admin or server lock; Init (init.go) runs it while holding both. Neither
+// creates keys, policy or the activation epoch.
 package admininit
 
 import (
@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/HeaInSeo/sori/authority/sqlitestore"
@@ -81,21 +82,51 @@ func NewInstallationID() (string, error) {
 // PRISTINE, SCHEMA_ONLY or INIT_MARKER_EMPTY again and resumes; after the marker
 // commit it reuses the recorded id and never calls newID.
 //
+// Both database files are held open from the first durable step until it
+// returns, a SCHEMA_ONLY authority that needs no provisioning too. Each held file
+// must be the one the preflight inspected, or a new one if the preflight saw
+// none, and have no other hard link. A step is refused once a path stops naming
+// its held file or turns into a symlink, a held file gains a link, or a sidecar
+// is not a regular file, and the check runs again after each step even if it
+// failed (boundFiles).
+//
 // newID nil means NewInstallationID.
 func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, error)) (Result, error) {
+	return provision(ctx, p, newID, nil)
+}
+
+// provision is ProvisionAndBootstrap. With want set, as Init calls it after it
+// created and recorded both files (TRUST r4 §3.2 step 8), each bound file must
+// also match its recorded identity tuple.
+func provision(ctx context.Context, p Paths, newID func() (string, error), want map[string]fileID) (res Result, err error) {
 	if newID == nil {
 		newID = NewInstallationID
 	}
 	if err := checkPaths(p); err != nil {
 		return Result{}, err
 	}
+	seen, err := seeFiles(p)
+	if err != nil {
+		return Result{}, err
+	}
+	if afterSee != nil {
+		afterSee()
+	}
 	ledger, auth, err := preflight(ctx, p)
 	if err != nil {
 		return Result{}, err
 	}
+	if err := seen.unchanged(p); err != nil {
+		return Result{}, err
+	}
+	if ledger.State == jobledger.InitMarkerEmpty {
+		return Result{InstallationID: ledger.InstallationID}, nil
+	}
+	files := boundFiles{seen: seen, want: want, paths: []string{p.JobLedger, p.Authority}}
+	defer func() { err = errors.Join(err, files.close()) }()
 
 	if auth == sqlitestore.InitPristine {
-		if err := provisionAuthority(ctx, p.Authority); err != nil {
+		if err := files.open(StepAuthoritySchema, p.Authority, func() error { return provisionAuthority(ctx, p.Authority) }); err != nil {
 			return Result{}, err
 		}
 		if err := step(StepAuthoritySchema); err != nil {
@@ -103,28 +134,264 @@ func ProvisionAndBootstrap(ctx context.Context, p Paths, newID func() (string, e
 		}
 	}
 	if ledger.State == jobledger.InitPristine {
-		if err := provisionJobLedger(ctx, p.JobLedger); err != nil {
+		if err := files.open(StepJobLedgerSchema, p.JobLedger, func() error { return provisionJobLedger(ctx, p.JobLedger) }); err != nil {
 			return Result{}, err
 		}
 		if err := step(StepJobLedgerSchema); err != nil {
 			return Result{}, err
 		}
 	}
-	if ledger.State == jobledger.InitMarkerEmpty {
-		return Result{InstallationID: ledger.InstallationID}, nil
-	}
 
 	id, err := newID()
 	if err != nil {
 		return Result{}, err
 	}
-	if err := writeMarkers(ctx, p.JobLedger, id); err != nil {
+	if err := files.open(StepMarkers, p.JobLedger, func() error { return writeMarkers(ctx, p.JobLedger, id) }); err != nil {
 		return Result{}, err
 	}
 	if err := step(StepMarkers); err != nil {
 		return Result{}, err
 	}
 	return Result{InstallationID: id, Bootstrapped: true}, nil
+}
+
+// beforeOpen, when set by tests, runs before each durable step opens a
+// database.
+var beforeOpen func(Step)
+
+// beforeStep, when set by tests, runs after a durable step's first check and
+// before the step opens its database by path.
+var beforeStep func(Step)
+
+// afterSee, when set by tests, runs after the database paths are recorded and
+// before the preflight inspects them.
+var afterSee func()
+
+// seenFiles is what the preflight saw at the two database paths: the Lstat of a
+// regular file, or nil for an absent one.
+type seenFiles map[string]fs.FileInfo
+
+// seeFiles records both database paths before the preflight inspects them. A
+// path that is neither absent nor a regular file with one link is refused before
+// it is read.
+func seeFiles(p Paths) (seenFiles, error) {
+	seen := seenFiles{}
+	for _, path := range []string{p.JobLedger, p.Authority} {
+		fi, err := os.Lstat(path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			fi = nil
+		case err != nil:
+			return nil, fmt.Errorf("%w: database %s: %w", ErrRefused, path, err)
+		case !fi.Mode().IsRegular():
+			return nil, fmt.Errorf("%w: database %s is not a regular file (%s)", ErrRefused, path, fi.Mode().Type())
+		default:
+			if err := singleLink(path, fi); err != nil {
+				return nil, err
+			}
+		}
+		seen[path] = fi
+	}
+	return seen, nil
+}
+
+// singleLink refuses a database file with another hard link. The other name may
+// be in another data root, whose server would use the same file under its own
+// server.lock and its own sidecar names, so init cannot exclude it. A count of
+// zero, a held file whose name was removed, is refused too.
+func singleLink(path string, fi fs.FileInfo) error {
+	if n, ok := linkCount(fi); ok && n != 1 {
+		return fmt.Errorf("%w: database %s has %d hard links, want 1", ErrRefused, path, n)
+	}
+	return nil
+}
+
+// unchanged refuses unless each path is still absent, or still names the same
+// file with the same size, after the preflight read it by path.
+func (seen seenFiles) unchanged(p Paths) error {
+	now, err := seeFiles(p)
+	if err != nil {
+		return err
+	}
+	for path, was := range seen {
+		if !sameSeen(was, now[path]) {
+			return fmt.Errorf("%w: database %s changed during the preflight", ErrRefused, path)
+		}
+	}
+	return nil
+}
+
+// sameSeen reports whether two observations of one path are both absent, or
+// one file with one size.
+func sameSeen(a, b fs.FileInfo) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return os.SameFile(a, b) && a.Size() == b.Size()
+}
+
+// boundFiles holds both database files open from the first durable step of
+// ProvisionAndBootstrap until it returns. SQLite opens a database by path, and
+// the preflight only checks the paths: a writer of the directory could put a
+// symlink, a hard link or a renamed-in file at a final name afterwards, and
+// SQLite would use it while server.lock guards only the data root. Each file is
+// therefore bound to what the preflight saw (bind), and each step is checked
+// against both held files before and after it runs. Both are bound, not only the
+// one a step writes: the markers commit that the authority beside the ledger is
+// the one provisioned or inspected, so a SCHEMA_ONLY authority that no step
+// opens must still be the bound file at the marker commit.
+//
+// The checks detect a replacement; they do not stop SQLite from opening one that
+// is swapped in between a check and SQLite's own open of the path.
+type boundFiles struct {
+	seen  seenFiles
+	want  map[string]fileID
+	paths []string
+	files []boundFile
+}
+
+type boundFile struct {
+	path string
+	f    *os.File
+}
+
+// open binds the databases, then runs fn, which opens the database at path by
+// path, between two checks. Every database the preflight saw is bound at the
+// first step; one it saw absent is created when its own step opens it, so a
+// crash before then leaves it absent. By the marker step both are bound. The
+// second check runs even if fn fails: fn may have written to a replacement
+// before it failed.
+func (files *boundFiles) open(s Step, path string, fn func() error) error {
+	if beforeOpen != nil {
+		beforeOpen(s)
+	}
+	if !slices.Contains(files.paths, path) {
+		return fmt.Errorf("%w: %s was not inspected", ErrRefused, path)
+	}
+	for _, p := range files.paths {
+		if err := files.bindOne(s, path, p); err != nil {
+			return err
+		}
+	}
+	if err := files.check(); err != nil {
+		return err
+	}
+	if beforeStep != nil {
+		beforeStep(s)
+	}
+	return errors.Join(fn(), files.check())
+}
+
+// bindOne binds the database at p for step s, which opens path, unless it is
+// already bound or is absent and not yet due. With a recorded identity (want),
+// the bound file must also match it.
+func (files *boundFiles) bindOne(s Step, path, p string) error {
+	if slices.ContainsFunc(files.files, func(b boundFile) bool { return b.path == p }) {
+		return nil
+	}
+	seen, ok := files.seen[p]
+	if !ok {
+		return fmt.Errorf("%w: %s was not inspected", ErrRefused, p)
+	}
+	if seen == nil && p != path && s != StepMarkers {
+		return nil
+	}
+	f, err := bind(p, seen)
+	if err != nil {
+		return err
+	}
+	files.files = append(files.files, boundFile{path: p, f: f})
+	want, ok := files.want[p]
+	if !ok {
+		return nil
+	}
+	id, err := fileIdentity(f)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrRefused, p, err)
+	}
+	if !want.matches(id, useGeneration) {
+		return fmt.Errorf("%w: %s is not the file init-intent recorded: have %s, recorded %s", ErrRefused, p, id, want)
+	}
+	return nil
+}
+
+// bind opens the database file at path as the preflight saw it. If the
+// preflight saw no file, it is created empty with O_EXCL, which fails if
+// anything, a symlink or a hard link too, appeared at the name since. An empty
+// regular file is PRISTINE again, so a rerun after a crash resumes. If the
+// preflight saw a file, the name is opened without following a symlink or
+// blocking on a FIFO, and the held file must be a regular file and the file the
+// preflight saw, with the size it saw: an empty file for an empty PRISTINE one.
+func bind(path string, seen fs.FileInfo) (*os.File, error) {
+	if seen == nil {
+		// #nosec G304 -- the database path the preflight checked inside the data root.
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("%w: bind %s, absent at the preflight: %w", ErrRefused, path, err)
+		}
+		return f, nil
+	}
+	// #nosec G304 -- as above; the held file is checked against the preflight's.
+	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollow, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%w: bind %s: %w", ErrRefused, path, err)
+	}
+	held, err := f.Stat()
+	switch {
+	case err != nil:
+		err = fmt.Errorf("%w: bind %s: %w", ErrRefused, path, err)
+	case !held.Mode().IsRegular():
+		err = fmt.Errorf("%w: %s is not a regular file (%s)", ErrRefused, path, held.Mode().Type())
+	case !sameSeen(seen, held):
+		err = fmt.Errorf("%w: %s is not the database file the preflight inspected", ErrRefused, path)
+	default:
+		err = singleLink(path, held)
+	}
+	if err != nil {
+		return nil, errors.Join(err, f.Close())
+	}
+	return f, nil
+}
+
+// check refuses unless each path still names its held file through no symlink,
+// the held file has no other hard link, and none of its SQLite sidecar files is
+// anything but a regular file.
+func (files boundFiles) check() error {
+	for _, b := range files.files {
+		fi, err := os.Lstat(b.path)
+		if err != nil {
+			return fmt.Errorf("%w: database %s: %w", ErrRefused, b.path, err)
+		}
+		held, err := b.f.Stat()
+		if err != nil {
+			return fmt.Errorf("%w: database %s: %w", ErrRefused, b.path, err)
+		}
+		if !fi.Mode().IsRegular() || !os.SameFile(fi, held) {
+			return fmt.Errorf("%w: %s is no longer the database file init bound", ErrRefused, b.path)
+		}
+		if err := singleLink(b.path, held); err != nil {
+			return err
+		}
+		for _, s := range sidecarSuffixes {
+			fi, err := os.Lstat(b.path + s)
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+			case err != nil:
+				return fmt.Errorf("%w: %s: %w", ErrRefused, b.path+s, err)
+			case !fi.Mode().IsRegular():
+				return fmt.Errorf("%w: %s is not a regular file (%s)", ErrRefused, b.path+s, fi.Mode().Type())
+			}
+		}
+	}
+	return nil
+}
+
+func (files boundFiles) close() error {
+	var err error
+	for _, b := range files.files {
+		err = errors.Join(err, b.f.Close())
+	}
+	return err
 }
 
 func step(s Step) error {
