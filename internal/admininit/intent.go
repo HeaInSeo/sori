@@ -72,7 +72,15 @@ func preflightTrust(adminDir, realRoot string, p Paths) (rootID, trust, error) {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return rootID{}, trust{}, fmt.Errorf("admininit: %s: %w", RefusedName, err)
 	}
-	// Step 3, the activation epoch, is not written by this package yet.
+	// Step 3: an activation epoch means an earlier init completed. Any entry
+	// under the name counts, including a symlink or a directory. Nothing is
+	// written: the installation id and keys are never issued twice.
+	epoch := adminPath(adminDir, EpochName)
+	if _, err := os.Lstat(epoch); err == nil {
+		return rootID{}, trust{}, refuse(ReasonAlreadyComplete, "%s exists: init already completed; it never reissues the installation id or keys", epoch)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return rootID{}, trust{}, fmt.Errorf("admininit: %s: %w", EpochName, err)
+	}
 
 	// Step 4a first: without birth times nothing below can be judged.
 	if !identitySupported {

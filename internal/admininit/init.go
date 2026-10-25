@@ -23,7 +23,8 @@ import (
 // are not written here.
 //
 // Under the locks it runs the data-root trust steps of SORI-D01-TRUST-r4 §3.2
-// (trust.go, intent.go): a recorded refusal stands; the data root must be on a
+// (trust.go, intent.go): a recorded refusal stands; an existing activation epoch
+// in adminDir refuses as already complete, with nothing written; the data root must be on a
 // filesystem with file birth times and pass the G1 preflight; a first init
 // refuses any existing database or sidecar name and writes init-intent first;
 // a resume checks every recorded file by its identity tuple; each absent
