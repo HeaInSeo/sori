@@ -38,11 +38,16 @@ const (
 	RefusedName = "init-refused"
 )
 
+// EpochName is the activation epoch in the admin area, written last by a
+// complete init (D01.3-r6 C.5.7 r5). Init only checks whether the name exists.
+const EpochName = "epoch"
+
 // Refusal reasons. A durable reason is recorded in init-refused before Init
 // returns it, and every later run refuses with ReasonRefusedStands.
 const (
 	// Not durable: nothing was attempted, or the operator can fix and rerun.
 	ReasonRefusedStands       = "INIT_REFUSED_STANDS"
+	ReasonAlreadyComplete     = "INIT_ALREADY_COMPLETE"
 	ReasonUnsupportedIdentity = "UNSUPPORTED_FILE_IDENTITY"
 	ReasonUntrustedDataRoot   = "UNTRUSTED_DATA_ROOT"
 	ReasonIntentPaths         = "INTENT_PATHS_DIFFER"

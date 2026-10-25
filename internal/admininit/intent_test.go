@@ -1141,6 +1141,86 @@ func TestInitBindingRefusalStands(t *testing.T) {
 	checkRefusedStands(t, adminDir, root, p)
 }
 
+// I-T2 step 3: an activation epoch in the admin area refuses as already
+// complete (D01.3-r6 C.5.7 r5, RW-C1 §5.2) before the preflight, on a first
+// init and on a rerun after the database phase, whatever the entry is. Nothing
+// is written: no init-intent change, no init-refused, no database, and the
+// installation id is not reissued. A recorded refusal (step 2) still wins.
+func TestInitRefusesWhenEpochExists(t *testing.T) {
+	place := map[string]func(t *testing.T, path string){
+		"file": func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("{}"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"empty file": func(t *testing.T, path string) {
+			if err := os.WriteFile(path, nil, 0o640); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"dangling symlink": func(t *testing.T, path string) {
+			if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"directory": func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, put := range place {
+		t.Run("first init/"+name, func(t *testing.T) {
+			adminDir, root, p := layout(t)
+			put(t, filepath.Join(adminDir, admininit.EpochName))
+			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			wantRefusal(t, err, admininit.ReasonAlreadyComplete, false)
+			checkNothingRecorded(t, adminDir, root)
+		})
+		t.Run("rerun/"+name, func(t *testing.T) {
+			adminDir, root, p := layout(t)
+			res, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			intentBefore, err := os.ReadFile(filepath.Join(adminDir, admininit.IntentName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			put(t, filepath.Join(adminDir, admininit.EpochName))
+			before := listing(t, root)
+			_, err = admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			wantRefusal(t, err, admininit.ReasonAlreadyComplete, false)
+			if exists(t, filepath.Join(adminDir, admininit.RefusedName)) {
+				t.Fatal("init-refused written")
+			}
+			intentAfter, err := os.ReadFile(filepath.Join(adminDir, admininit.IntentName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(intentBefore, intentAfter) {
+				t.Fatalf("init-intent changed: %s -> %s", intentBefore, intentAfter)
+			}
+			if after := listing(t, root); !slices.Equal(before, after) {
+				t.Fatalf("rerun changed the data root: %v -> %v", before, after)
+			}
+			if in := readIntent(t, adminDir); in.InstallationID != res.InstallationID {
+				t.Fatalf("installation id %q, want %q", in.InstallationID, res.InstallationID)
+			}
+		})
+	}
+	t.Run("recorded refusal wins", func(t *testing.T) {
+		adminDir, root, p := layout(t)
+		for _, n := range []string{admininit.RefusedName, admininit.EpochName} {
+			if err := os.WriteFile(filepath.Join(adminDir, n), []byte("{}"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+		wantRefusal(t, err, admininit.ReasonRefusedStands, false)
+	})
+}
+
 // I-T2 step 4a: a data root on a filesystem without birth times (tmpfs on this
 // kernel) is refused before anything is recorded, and the refusal is retryable.
 func TestInitRefusesUnsupportedFilesystem(t *testing.T) {
