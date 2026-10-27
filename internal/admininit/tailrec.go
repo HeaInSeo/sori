@@ -165,6 +165,21 @@ func validKeyID(s string) bool {
 
 var b64url = base64.RawURLEncoding.Strict()
 
+// decodeB64url decodes an unpadded base64url field and requires that
+// re-encoding reproduces the field exactly. The decoder skips CR and LF, which
+// a canonical JSON string can carry as escapes, so decoding alone would accept
+// them.
+func decodeB64url(s string) ([]byte, error) {
+	b, err := b64url.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	if b64url.EncodeToString(b) != s {
+		return nil, errors.New("base64url does not re-encode to the same text")
+	}
+	return b, nil
+}
+
 // defaultPolicyDocument is the template sori-local-default-policy:v1 for
 // installation I (FMT-PREP-r2 §4.2, RW-C1 §3.2): canonical, no newline.
 func defaultPolicyDocument(installationID string) ([]byte, error) {
@@ -461,7 +476,7 @@ func parseKeyring(data []byte) (Keyring, error) {
 		if secret, err = str(ko, "secret_b64url"); err != nil {
 			return bad(err)
 		}
-		if mk.Secret, err = b64url.DecodeString(secret); err != nil {
+		if mk.Secret, err = decodeB64url(secret); err != nil {
 			return bad(fmt.Errorf("keys[%d]: secret_b64url is not unpadded base64url", i))
 		}
 		k.Keys = append(k.Keys, mk)
@@ -507,7 +522,7 @@ func parsePolicyState(data []byte) (PolicyState, error) {
 			return bad(err)
 		}
 	}
-	if s.Document, err = b64url.DecodeString(doc); err != nil {
+	if s.Document, err = decodeB64url(doc); err != nil {
 		return bad(errors.New("document_b64url is not unpadded base64url"))
 	}
 	if err := s.validate(); err != nil {

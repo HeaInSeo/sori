@@ -209,6 +209,55 @@ func readPolicyState(b []byte) error { _, err := parsePolicyState(b); return err
 func readKeyring(b []byte) error     { _, err := parseKeyring(b); return err }
 func readRaw(b []byte) error         { _, err := decodeCanon(b, false); return err }
 
+// TestTailB64urlRejectsCRLF: a JSON-escaped CR or LF inside secret_b64url or
+// document_b64url is still canonical JSON, and the base64url decoder skips
+// it, so the strict readers must refuse it themselves.
+func TestTailB64urlRejectsCRLF(t *testing.T) {
+	bs := string(rune(92))
+	secret := `"secret_b64url":"`
+	doc := `"document_b64url":"`
+	for _, c := range []struct {
+		name   string
+		rec    string
+		field  string
+		read   func([]byte) error
+		reason string
+	}{
+		{"keyring", vecV3, secret, readKeyring, "secret_b64url is not unpadded base64url"},
+		{"policy state", vecV2, doc, readPolicyState, "document_b64url is not unpadded base64url"},
+	} {
+		at := strings.Index(c.rec, c.field)
+		if at < 0 {
+			t.Fatalf("%s: no %s", c.name, c.field)
+		}
+		start := at + len(c.field)
+		for _, esc := range []string{bs + "n", bs + "r", bs + "r" + bs + "n"} {
+			for _, pos := range []struct {
+				name string
+				off  int
+			}{{"leading", 0}, {"inner", 8}} {
+				t.Run(c.name+" "+escName(esc)+" "+pos.name, func(t *testing.T) {
+					b := []byte(c.rec[:start+pos.off] + esc + c.rec[start+pos.off:])
+					if _, err := decodeCanon(b, true); err != nil {
+						t.Fatalf("mutated record is not canonical, so it does not test the field: %v", err)
+					}
+					err := c.read(b)
+					if err == nil {
+						t.Fatalf("%s with %s accepted", c.name, esc)
+					}
+					var te *TailError
+					if !errors.As(err, &te) || te.Kind != TailInvariant || !strings.Contains(err.Error(), c.reason) {
+						t.Fatalf("error %v, want TailError kind %s cause %q", err, TailInvariant, c.reason)
+					}
+				})
+			}
+		}
+	}
+}
+
+// escName names an escape sequence for a subtest without the backslash.
+func escName(s string) string { return strings.ReplaceAll(s, string(rune(92)), "bs-") }
+
 // TestCanonParserRefusals covers the value model limits one by one.
 func TestCanonParserRefusals(t *testing.T) {
 	for _, c := range []struct{ in, reason string }{

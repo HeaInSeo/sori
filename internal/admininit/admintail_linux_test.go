@@ -277,6 +277,14 @@ func TestInitPreEpochCheck(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		// A JSON-escaped LF or CR keeps the record canonical; the base64url
+		// field itself must be refused.
+		"keyring secret escaped LF": func(t *testing.T, d string) {
+			escapeInField(t, filepath.Join(d, admininit.KeysDirName, admininit.KeyringName), `"secret_b64url":"`, "n")
+		},
+		"policy document escaped CR": func(t *testing.T, d string) {
+			escapeInField(t, filepath.Join(d, admininit.PolicyDirName, admininit.PolicyStateName), `"document_b64url":"`, "r")
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			adminDir, root, p := layout(t)
@@ -330,6 +338,25 @@ func TestInitPreEpochCheck(t *testing.T) {
 			}
 		}
 	})
+}
+
+// escapeInField inserts the JSON escape backslash-c at the start of the string
+// value that follows field in the record at path.
+func escapeInField(t *testing.T, path, field, c string) {
+	t.Helper()
+	b, err := os.ReadFile(path) // #nosec G304 -- test admin area.
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	at := strings.Index(s, field)
+	if at < 0 {
+		t.Fatalf("%s: no %s", path, field)
+	}
+	at += len(field)
+	if err := os.WriteFile(path, []byte(s[:at]+string(rune(92))+c+s[at:]), 0o640); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestReadStatusTakesAdminLockShared: Status waits for admin.lock shared, so
