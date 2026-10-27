@@ -47,6 +47,16 @@ func refusal(t *testing.T, err error) *admininit.Refusal {
 	return r
 }
 
+// dropEpoch removes the epoch a complete init wrote, leaving the state of a
+// lost epoch publication (FMT-PREP-r2 §6 C6f, absent), so a test can rerun the
+// earlier steps.
+func dropEpoch(t *testing.T, adminDir string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(adminDir, admininit.EpochName)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func wantRefusal(t *testing.T, err error, reason string, durable bool) {
 	t.Helper()
 	r := refusal(t, err)
@@ -90,7 +100,7 @@ func checkRefusedStands(t *testing.T, adminDir, root string, p admininit.Paths) 
 		t.Fatal("init-refused not written")
 	}
 	before := listing(t, root)
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	wantRefusal(t, err, admininit.ReasonRefusedStands, false)
 	if after := listing(t, root); !slices.Equal(before, after) {
 		t.Fatalf("rerun changed the data root: %v -> %v", before, after)
@@ -214,7 +224,7 @@ func crashAt(at admininit.Step) (restore func()) {
 func crashInit(t *testing.T, adminDir, root string, p admininit.Paths, at admininit.Step) {
 	t.Helper()
 	restore := crashAt(at)
-	_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 	restore()
 	if !errors.Is(err, errCrash) {
 		t.Fatalf("init stopped at %s: %v, want the crash", at, err)
@@ -252,7 +262,7 @@ func TestInitRecordsIntentAndHandsOver(t *testing.T) {
 	defer syscall.Umask(old)
 	_, gid := testIDs()
 	adminDir, root, p := layout(t)
-	res, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	res, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +295,8 @@ func TestInitRecordsIntentAndHandsOver(t *testing.T) {
 	if err := errors.Join(ledger.Close(), auth.Close()); err != nil {
 		t.Fatal(err)
 	}
-	again, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	dropEpoch(t, adminDir)
+	again, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	if err != nil || again.InstallationID != res.InstallationID || again.Bootstrapped {
 		t.Fatalf("rerun = %+v, %v; want reuse of %q", again, err, res.InstallationID)
 	}
@@ -377,7 +388,7 @@ func TestInitRefusesUntrustedDataRoot(t *testing.T) {
 			} else {
 				setup(t, root, p)
 			}
-			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 			wantRefusal(t, err, admininit.ReasonUntrustedDataRoot, false)
 			for _, n := range []string{admininit.IntentName, admininit.RefusedName} {
 				if exists(t, filepath.Join(adminDir, n)) {
@@ -424,7 +435,7 @@ func TestInitRefusesUntrustedAncestor(t *testing.T) {
 			setup(t, anc)
 			adminDir := t.TempDir()
 			p := admininit.Paths{JobLedger: filepath.Join(root, "jobs.db"), Authority: filepath.Join(root, "authority.db")}
-			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 			wantRefusal(t, err, admininit.ReasonUntrustedDataRoot, false)
 			checkNothingRecorded(t, adminDir, root)
 		})
@@ -435,7 +446,7 @@ func TestInitRefusesUntrustedAncestor(t *testing.T) {
 		}
 		defer admininit.ProductionAncestors()()
 		adminDir, root, p := layout(t)
-		_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+		_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 		wantRefusal(t, err, admininit.ReasonUntrustedDataRoot, false)
 		checkNothingRecorded(t, adminDir, root)
 	})
@@ -467,7 +478,7 @@ func TestInitRefusesPreexistingFiles(t *testing.T) {
 			adminDir, root, p := layout(t)
 			setup(t, p)
 			before := listing(t, root)
-			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 			wantRefusal(t, err, admininit.ReasonPreexisting, true)
 			if exists(t, filepath.Join(adminDir, admininit.IntentName)) {
 				t.Fatal("init-intent written")
@@ -500,12 +511,12 @@ func TestInitCrashCuts(t *testing.T) {
 			adminDir, root, p := layout(t)
 			calls := 0
 			restore := crashAt(at)
-			_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, countingID(&calls))
 			restore()
 			if !errors.Is(err, errCrash) {
 				t.Fatalf("first run: %v, want the crash", err)
 			}
-			res, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+			res, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, countingID(&calls))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -535,7 +546,7 @@ func TestInitRefusesOlderUnrecordedFile(t *testing.T) {
 	if err := os.Rename(staged, p.Authority); err != nil {
 		t.Fatal(err)
 	}
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	wantRefusal(t, err, admininit.ReasonUnrecorded, true)
 	checkRefusedStands(t, adminDir, root, p)
 }
@@ -563,7 +574,7 @@ func TestInitResumesCutBeforeHandOver(t *testing.T) {
 				}
 				return nil
 			})
-			_, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, countingID(&calls))
 			restore()
 			if !errors.Is(err, errCrash) {
 				t.Fatalf("first run: %v, want the crash", err)
@@ -571,7 +582,7 @@ func TestInitResumesCutBeforeHandOver(t *testing.T) {
 			if fi, err := os.Lstat(path); err != nil || fi.Mode().Perm() != 0o600 || fi.Size() != 0 {
 				t.Fatalf("cut left %v, %v; want an empty 0600 file", fi, err)
 			}
-			res, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+			res, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, countingID(&calls))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -602,7 +613,7 @@ func TestInitRefusesSwapDuringCutHandOver(t *testing.T) {
 		}
 		return nil
 	})
-	_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 	restore()
 	if !errors.Is(err, errCrash) {
 		t.Fatalf("first run: %v, want the crash", err)
@@ -617,7 +628,7 @@ func TestInitRefusesSwapDuringCutHandOver(t *testing.T) {
 		writeFile(t, tmp, nil)
 		return os.Rename(tmp, p.Authority)
 	})
-	_, err = admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err = admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	restore()
 	if !swapped {
 		t.Fatal("the resume did not reach the hand-over")
@@ -668,7 +679,7 @@ func TestInitRefusesForeignOwnerOnlyFile(t *testing.T) {
 			if err := os.Rename(staged, p.Authority); err != nil {
 				t.Fatal(err)
 			}
-			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 			wantRefusal(t, err, admininit.ReasonUnrecorded, true)
 			if fi, err := os.Lstat(p.Authority); err != nil || fi.Mode().Perm() != c.mode {
 				t.Fatalf("refused file now %v, %v; want it left at %o", fi, err, c.mode)
@@ -691,7 +702,7 @@ func TestInitProbesEveryDatabaseFilesystem(t *testing.T) {
 	trust(t, sub)
 	p := admininit.Paths{JobLedger: filepath.Join(sub, "jobs.db"), Authority: filepath.Join(root, "authority.db")}
 	restore := admininit.SetNoBirthTimeAt(sub)
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	wantRefusal(t, err, admininit.ReasonUnsupportedIdentity, false)
 	for _, n := range []string{admininit.IntentName, admininit.RefusedName} {
 		if exists(t, filepath.Join(adminDir, n)) {
@@ -706,7 +717,7 @@ func TestInitProbesEveryDatabaseFilesystem(t *testing.T) {
 	crashInit(t, adminDir, root, p, admininit.StepIntent)
 	before := readIntent(t, adminDir)
 	restore = admininit.SetNoBirthTimeAt(sub)
-	_, err = admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err = admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	restore()
 	wantRefusal(t, err, admininit.ReasonUnsupportedIdentity, false)
 	if exists(t, p.Authority) || exists(t, p.JobLedger) || exists(t, filepath.Join(adminDir, admininit.RefusedName)) {
@@ -715,7 +726,7 @@ func TestInitProbesEveryDatabaseFilesystem(t *testing.T) {
 	if after := readIntent(t, adminDir); after.Nonce != before.Nonce || len(after.Databases) != 0 {
 		t.Fatalf("intent changed: %+v -> %+v", before, after)
 	}
-	if _, err := admininit.Init(context.Background(), adminDir, root, p, nil); err != nil {
+	if _, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil); err != nil {
 		t.Fatalf("rerun on a supported filesystem: %v", err)
 	}
 }
@@ -734,7 +745,7 @@ func TestInitRefusesChangedRecordedFile(t *testing.T) {
 		if err := os.Rename(tmp, p.JobLedger); err != nil {
 			t.Fatal(err)
 		}
-		_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+		_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 		wantRefusal(t, err, admininit.ReasonIdentity, true)
 		checkRefusedStands(t, adminDir, root, p)
 	})
@@ -744,7 +755,7 @@ func TestInitRefusesChangedRecordedFile(t *testing.T) {
 		if err := os.Remove(p.Authority); err != nil {
 			t.Fatal(err)
 		}
-		_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+		_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 		wantRefusal(t, err, admininit.ReasonRemoved, true)
 		checkRefusedStands(t, adminDir, root, p)
 	})
@@ -753,7 +764,7 @@ func TestInitRefusesChangedRecordedFile(t *testing.T) {
 		crashInit(t, adminDir, root, p, admininit.StepIntent)
 		other := trustedDir(t)
 		op := admininit.Paths{JobLedger: filepath.Join(other, "jobs.db"), Authority: filepath.Join(other, "authority.db")}
-		_, err := admininit.Init(context.Background(), adminDir, other, op, noID(t))
+		_, err := admininit.Init(context.Background(), adminDir, other, testHostID, op, noID(t))
 		wantRefusal(t, err, admininit.ReasonDataRoot, true)
 		checkRefusedStands(t, adminDir, other, op)
 	})
@@ -779,7 +790,7 @@ func TestInitComparesEveryTupleField(t *testing.T) {
 				t.Skip("this filesystem reports no inode generation")
 			}
 			editIntent(t, adminDir, "jobledger", field, edit)
-			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 			wantRefusal(t, err, admininit.ReasonIdentity, true)
 		})
 	}
@@ -802,7 +813,7 @@ func TestInitRefusesSameOwnerChurnWithinTick(t *testing.T) {
 		}
 		return errCrash
 	})
-	_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 	restore()
 	if !errors.Is(err, errCrash) {
 		t.Fatalf("first run: %v", err)
@@ -827,7 +838,7 @@ func TestInitRefusesSameOwnerChurnWithinTick(t *testing.T) {
 	if !reused {
 		t.Skip("the filesystem did not reuse the inode number in 4000 files")
 	}
-	_, err = admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err = admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	wantRefusal(t, err, admininit.ReasonIdentity, true)
 }
 
@@ -855,7 +866,7 @@ func TestInitRecordsBeforeClosingDescriptor(t *testing.T) {
 		}
 		checked++
 	})()
-	if _, err := admininit.Init(context.Background(), adminDir, root, p, nil); err != nil {
+	if _, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil); err != nil {
 		t.Fatal(err)
 	}
 	if checked != 2 {
@@ -878,7 +889,7 @@ func TestInitWaitsPastBirthTimeTick(t *testing.T) {
 		}
 		return ns, nn
 	})()
-	if _, err := admininit.Init(context.Background(), adminDir, root, p, nil); err != nil {
+	if _, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil); err != nil {
 		t.Fatal(err)
 	}
 	in := readIntent(t, adminDir)
@@ -911,7 +922,7 @@ func crashAtCut(t *testing.T, adminDir, root string, p admininit.Paths, at admin
 		}
 		return nil
 	})
-	_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 	restore()
 	if !errors.Is(err, errCrash) {
 		t.Fatalf("first run: %v, want the crash", err)
@@ -952,7 +963,7 @@ func TestInitResumeRecordsCutBeforeClosingDescriptor(t *testing.T) {
 					}
 					checked++
 				})
-				_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+				_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 				restore()
 				if err != nil {
 					t.Fatal(err)
@@ -985,7 +996,7 @@ func TestInitResumeWaitsPastCutBirthTimeTick(t *testing.T) {
 					}
 					return ns, nn
 				})
-				_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+				_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 				restore()
 				if err != nil {
 					t.Fatal(err)
@@ -1003,7 +1014,7 @@ func TestInitResumeWaitsPastCutBirthTimeTick(t *testing.T) {
 func TestInitStuckClockIsRetryable(t *testing.T) {
 	adminDir, root, p := layout(t)
 	restore := admininit.SetTickWait(func(bs int64, bn uint32, _ int64, _ uint32) (int64, uint32) { return bs, bn })
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	restore()
 	if !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
@@ -1011,7 +1022,7 @@ func TestInitStuckClockIsRetryable(t *testing.T) {
 	if exists(t, filepath.Join(adminDir, admininit.RefusedName)) {
 		t.Fatal("init-refused written for a stuck clock")
 	}
-	if _, err := admininit.Init(context.Background(), adminDir, root, p, nil); err != nil {
+	if _, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil); err != nil {
 		t.Fatalf("rerun with a working clock: %v", err)
 	}
 }
@@ -1036,7 +1047,7 @@ func TestInitPhaseBindsRecordedTuple(t *testing.T) {
 		}
 		return nil
 	})()
-	_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 	wantRefusal(t, err, admininit.ReasonBinding, true)
 	if fi, err := os.Stat(p.Authority); err != nil || fi.Size() != 0 {
 		t.Fatalf("replacement authority: %v, %v; want it untouched and empty", fi, err)
@@ -1063,7 +1074,7 @@ func TestInitRechecksNamesAfterPhase(t *testing.T) {
 		}
 		return nil
 	})()
-	_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 	wantRefusal(t, err, admininit.ReasonIdentity, true)
 	if id := readIntent(t, adminDir).InstallationID; id != "" {
 		t.Fatalf("installation id %q recorded for a replaced ledger", id)
@@ -1091,7 +1102,7 @@ func holdsFD(t *testing.T, path string) bool {
 // which is refused durably.
 func TestInitRefusesInstallationIDChangedInPlace(t *testing.T) {
 	adminDir, root, p := layout(t)
-	if _, err := admininit.Init(context.Background(), adminDir, root, p, nil); err != nil {
+	if _, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil); err != nil {
 		t.Fatal(err)
 	}
 	other := t.TempDir()
@@ -1108,7 +1119,8 @@ func TestInitRefusesInstallationIDChangedInPlace(t *testing.T) {
 	if err := os.WriteFile(p.JobLedger, []byte(readFile(t, op.JobLedger)), 0o660); err != nil {
 		t.Fatal(err)
 	}
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	dropEpoch(t, adminDir)
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	wantRefusal(t, err, admininit.ReasonInstallationID, true)
 	checkRefusedStands(t, adminDir, root, p)
 }
@@ -1135,7 +1147,7 @@ func TestInitBindingRefusalStands(t *testing.T) {
 			t.Fatal(err)
 		}
 	})()
-	_, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 	wantRefusal(t, err, admininit.ReasonBinding, true)
 	checkNoMarkers(t, p.JobLedger+".bound")
 	checkRefusedStands(t, adminDir, root, p)
@@ -1173,13 +1185,13 @@ func TestInitRefusesWhenEpochExists(t *testing.T) {
 		t.Run("first init/"+name, func(t *testing.T) {
 			adminDir, root, p := layout(t)
 			put(t, filepath.Join(adminDir, admininit.EpochName))
-			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 			wantRefusal(t, err, admininit.ReasonAlreadyComplete, false)
 			checkNothingRecorded(t, adminDir, root)
 		})
 		t.Run("rerun/"+name, func(t *testing.T) {
 			adminDir, root, p := layout(t)
-			res, err := admininit.Init(context.Background(), adminDir, root, p, nil)
+			res, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1187,9 +1199,10 @@ func TestInitRefusesWhenEpochExists(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			dropEpoch(t, adminDir)
 			put(t, filepath.Join(adminDir, admininit.EpochName))
 			before := listing(t, root)
-			_, err = admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			_, err = admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 			wantRefusal(t, err, admininit.ReasonAlreadyComplete, false)
 			if exists(t, filepath.Join(adminDir, admininit.RefusedName)) {
 				t.Fatal("init-refused written")
@@ -1216,7 +1229,7 @@ func TestInitRefusesWhenEpochExists(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+		_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 		wantRefusal(t, err, admininit.ReasonRefusedStands, false)
 	})
 }
@@ -1236,7 +1249,7 @@ func TestInitRefusesUnsupportedFilesystem(t *testing.T) {
 	trust(t, base)
 	adminDir := t.TempDir()
 	p := admininit.Paths{JobLedger: filepath.Join(base, "jobs.db"), Authority: filepath.Join(base, "authority.db")}
-	_, err = admininit.Init(context.Background(), adminDir, base, p, noID(t))
+	_, err = admininit.Init(context.Background(), adminDir, base, testHostID, p, noID(t))
 	wantRefusal(t, err, admininit.ReasonUnsupportedIdentity, false)
 	checkNothingRecorded(t, adminDir, base)
 }

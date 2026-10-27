@@ -26,7 +26,29 @@ func TestMain(m *testing.M) {
 	}
 	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid()) // #nosec G115 -- ids fit 32 bits.
 	admininit.SetTestTrust(uid, gid, uid, tmp)
+	if crashChild != nil {
+		crashChild()
+	}
 	os.Exit(m.Run())
+}
+
+// crashChild, set by the Linux crash-cut tests, runs Init in a re-executed
+// test process and kills that process at a cut when the environment asks for
+// it; otherwise it returns at once.
+var crashChild func()
+
+// testHostID is the explicit server.host_id every test passes to Init
+// (FMT-PREP-r2 §8.2: no fallback).
+const testHostID = "h1"
+
+// refusalReason returns the reason of an init refusal, or "" for any other
+// error or none.
+func refusalReason(err error) string {
+	var r *admininit.Refusal
+	if errors.As(err, &r) {
+		return r.Reason
+	}
+	return ""
 }
 
 // testTempBase is the directory t.TempDir creates its directories in: GOTMPDIR
@@ -101,7 +123,7 @@ func TestInitHoldsLocksAndBootstraps(t *testing.T) {
 	})()
 
 	var calls int
-	res, err := admininit.Init(ctx, adminDir, root, p, countingID(&calls))
+	res, err := admininit.Init(ctx, adminDir, root, testHostID, p, countingID(&calls))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +131,9 @@ func TestInitHoldsLocksAndBootstraps(t *testing.T) {
 		t.Fatalf("res = %+v, newID calls = %d, probed = %v", res, calls, probed)
 	}
 	checkInitialized(t, p, res.InstallationID)
-	if got := names(t, adminDir); !slices.Equal(got, []string{adminlock.AdminLockName, admininit.IntentName}) {
-		t.Fatalf("admin area = %v, want only admin.lock and init-intent", got)
+	want := []string{adminlock.AdminLockName, admininit.EpochName, admininit.IntentName, admininit.KeysDirName, admininit.PolicyDirName}
+	if got := names(t, adminDir); !slices.Equal(got, want) {
+		t.Fatalf("admin area = %v, want %v", got, want)
 	}
 
 	// Both locks are released when Init returns.
@@ -122,8 +145,16 @@ func TestInitHoldsLocksAndBootstraps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A rerun reuses the installation id.
-	res2, err := admininit.Init(ctx, adminDir, root, p, noID(t))
+	// A complete init refuses a rerun (C6g).
+	if _, err := admininit.Init(ctx, adminDir, root, testHostID, p, noID(t)); refusalReason(err) != admininit.ReasonAlreadyComplete {
+		t.Fatalf("rerun after epoch = %v, want %s", err, admininit.ReasonAlreadyComplete)
+	}
+	// With epoch absent (a lost epoch publication, C6f), a rerun reuses the
+	// installation id.
+	if err := os.Remove(filepath.Join(adminDir, admininit.EpochName)); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := admininit.Init(ctx, adminDir, root, testHostID, p, noID(t))
 	if err != nil || res2.Bootstrapped || res2.InstallationID != res.InstallationID {
 		t.Fatalf("rerun = %+v, %v; want reuse of %q", res2, err, res.InstallationID)
 	}
@@ -135,7 +166,7 @@ func TestInitLosesToRunningServerBeforeDB(t *testing.T) {
 	adminDir, root, p := layout(t)
 	h := locktest.Hold(t, locktest.Server, adminDir, root)
 
-	_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+	_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 	if !errors.Is(err, adminlock.ErrServerRunning) {
 		t.Fatalf("err = %v, want ErrServerRunning", err)
 	}
@@ -145,7 +176,7 @@ func TestInitLosesToRunningServerBeforeDB(t *testing.T) {
 
 	h.Release(t)
 	var calls int
-	if _, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls)); err != nil || calls != 1 {
+	if _, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, countingID(&calls)); err != nil || calls != 1 {
 		t.Fatalf("init after the server exited: %v, newID calls = %d", err, calls)
 	}
 }
@@ -165,7 +196,7 @@ func TestInitLosesToRunningServerThroughDataRootAlias(t *testing.T) {
 	sep := string(filepath.Separator)
 	alias := top + sep + "link" + sep + ".."
 	p := admininit.Paths{JobLedger: alias + sep + "jobs.db", Authority: alias + sep + "authority.db"}
-	_, err := admininit.Init(context.Background(), adminDir, alias, p, noID(t))
+	_, err := admininit.Init(context.Background(), adminDir, alias, testHostID, p, noID(t))
 	if !errors.Is(err, adminlock.ErrServerRunning) {
 		t.Fatalf("err = %v, want ErrServerRunning", err)
 	}
@@ -192,7 +223,7 @@ func TestInitPinsDataRootAgainstRetarget(t *testing.T) {
 
 	p := admininit.Paths{JobLedger: filepath.Join(link, "jobs.db"), Authority: filepath.Join(link, "authority.db")}
 	var calls int
-	res, err := admininit.Init(context.Background(), adminDir, link, p, countingID(&calls))
+	res, err := admininit.Init(context.Background(), adminDir, link, testHostID, p, countingID(&calls))
 	if err != nil || calls != 1 {
 		t.Fatalf("init: %v, newID calls = %d", err, calls)
 	}
@@ -221,7 +252,7 @@ func TestInitPinsDatabasePathAgainstRetarget(t *testing.T) {
 	defer admininit.SetAfterCheck(func() { retarget(t, outside, link) })()
 
 	var calls int
-	res, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls))
+	res, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, countingID(&calls))
 	if err != nil || calls != 1 {
 		t.Fatalf("init: %v, newID calls = %d", err, calls)
 	}
@@ -293,7 +324,7 @@ func TestInitRefusesSymlinkEscape(t *testing.T) {
 			preOutside := names(t, outside)
 			preParent := names(t, filepath.Dir(outside))
 
-			_, err := admininit.Init(context.Background(), adminDir, root, p, noID(t))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, noID(t))
 			if !errors.Is(err, admininit.ErrRefused) {
 				t.Fatalf("err = %v, want ErrRefused", err)
 			}
@@ -322,7 +353,7 @@ func TestInitRefusesRelativeSymlinkEscape(t *testing.T) {
 	// Authority is relative and inside the root, so only the job ledger can be refused.
 	p.JobLedger, p.Authority = "link"+sep+".."+sep+"jobs.db", "authority.db"
 	preParent := names(t, filepath.Dir(outside))
-	if _, err := admininit.Init(context.Background(), adminDir, ".", p, noID(t)); !errors.Is(err, admininit.ErrRefused) {
+	if _, err := admininit.Init(context.Background(), adminDir, ".", testHostID, p, noID(t)); !errors.Is(err, admininit.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
 	if got := names(t, filepath.Dir(outside)); !slices.Equal(got, preParent) {
@@ -344,7 +375,7 @@ func TestInitAcceptsSymlinkInsideDataRoot(t *testing.T) {
 	symlink(t, filepath.Join(target, "sub"), filepath.Join(target, "inner"))
 	p := admininit.Paths{JobLedger: filepath.Join(root, "inner", "jobs.db"), Authority: filepath.Join(root, "authority.db")}
 	var calls int
-	if _, err := admininit.Init(context.Background(), adminDir, root, p, countingID(&calls)); err != nil || calls != 1 {
+	if _, err := admininit.Init(context.Background(), adminDir, root, testHostID, p, countingID(&calls)); err != nil || calls != 1 {
 		t.Fatalf("init: %v, newID calls = %d", err, calls)
 	}
 	if _, err := os.Stat(filepath.Join(target, "sub", "jobs.db")); err != nil {
@@ -364,7 +395,7 @@ func TestInitRefusesPathOutsideDataRoot(t *testing.T) {
 	}
 	for name, paths := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := admininit.Init(context.Background(), adminDir, root, paths, noID(t))
+			_, err := admininit.Init(context.Background(), adminDir, root, testHostID, paths, noID(t))
 			if !errors.Is(err, admininit.ErrRefused) {
 				t.Fatalf("err = %v, want ErrRefused", err)
 			}

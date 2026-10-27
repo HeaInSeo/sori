@@ -42,8 +42,8 @@ func databases(p Paths) []database {
 
 // initLocked runs TRUST r4 §3.2 steps 2 and 4–9 while Init holds both locks.
 // realRoot and p are the resolved data root and database paths.
-func initLocked(ctx context.Context, adminDir, realRoot string, p Paths, newID func() (string, error)) (Result, error) {
-	root, tr, err := preflightTrust(adminDir, realRoot, p)
+func initLocked(ctx context.Context, adminDir, realRoot, hostID string, p Paths, newID func() (string, error)) (Result, error) {
+	root, tr, err := preflightTrust(adminDir, realRoot, hostID, p)
 	if err != nil {
 		return Result{}, err
 	}
@@ -58,12 +58,17 @@ func initLocked(ctx context.Context, adminDir, realRoot string, p Paths, newID f
 	if err := finish(adminDir, p, tr, rec, res); err != nil {
 		return Result{}, recordRefusal(adminDir, err)
 	}
+	// Step 10 (FMT-PREP-r2 §6). Its refusals are not durable and none writes
+	// init-refused (§7).
+	if err := writeAdminTail(ctx, adminDir, hostID, p, tr, res.InstallationID); err != nil {
+		return Result{}, err
+	}
 	return res, nil
 }
 
 // preflightTrust is TRUST r4 §3.2 steps 2 to 4. Its refusals are not durable:
 // nothing has been attempted, or the operator can fix the layout and rerun.
-func preflightTrust(adminDir, realRoot string, p Paths) (rootID, trust, error) {
+func preflightTrust(adminDir, realRoot, hostID string, p Paths) (rootID, trust, error) {
 	// Step 2: a durable refusal stands.
 	refused := adminPath(adminDir, RefusedName)
 	if _, err := os.Lstat(refused); err == nil {
@@ -82,6 +87,12 @@ func preflightTrust(adminDir, realRoot string, p Paths) (rootID, trust, error) {
 		return rootID{}, trust{}, fmt.Errorf("admininit: %s: %w", EpochName, err)
 	}
 
+	// Step 4, the admin-tail preflight (FMT-PREP-r2 §7): server.host_id is
+	// required and valid, there is no fallback.
+	if err := ValidateHostID(hostID); err != nil {
+		return rootID{}, trust{}, refuse(ReasonHostIDInvalid, "%w", err)
+	}
+
 	// Step 4a first: without birth times nothing below can be judged.
 	if !identitySupported {
 		return rootID{}, trust{}, refuse(ReasonUnsupportedIdentity, "this platform cannot read file birth times; init needs Linux statx")
@@ -96,6 +107,11 @@ func preflightTrust(adminDir, realRoot string, p Paths) (rootID, trust, error) {
 	tr, err := lookupTrust()
 	if err != nil {
 		return rootID{}, trust{}, refuse(ReasonUntrustedDataRoot, "%w", err)
+	}
+	// Step 4, admin-tail preflight (FMT-PREP-r2 §7): only names init creates,
+	// and keys/ and policy/, if present, are directories of the init principal.
+	if err := preflightAdminArea(adminDir, tr.uid); err != nil {
+		return rootID{}, trust{}, err
 	}
 	if err := checkG1(realRoot, p, tr); err != nil {
 		return rootID{}, trust{}, err

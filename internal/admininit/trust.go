@@ -52,6 +52,11 @@ const (
 	ReasonUntrustedDataRoot   = "UNTRUSTED_DATA_ROOT"
 	ReasonIntentPaths         = "INTENT_PATHS_DIFFER"
 
+	// Not durable, admin tail (FMT-PREP-r2 §7). None writes init-refused.
+	ReasonHostIDInvalid     = "HOST_ID_INVALID"
+	ReasonAdminAreaNotEmpty = "ADMIN_AREA_NOT_EMPTY"
+	ReasonAdminTailInvalid  = "ADMIN_TAIL_INVALID"
+
 	// Durable.
 	ReasonPreexisting    = "PREEXISTING_DATABASE"
 	ReasonDataRoot       = "DATA_ROOT_MISMATCH"
