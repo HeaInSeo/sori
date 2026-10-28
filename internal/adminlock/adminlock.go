@@ -133,6 +133,24 @@ type Server struct {
 	AdminLockMissing bool
 }
 
+// AcquireAdminShared takes the existing admin.lock in adminDir shared, waiting
+// until ctx ends, for a read-only admin readback such as init status
+// (FMT-PREP-r2 §6). It never creates admin.lock. Closing the file releases it.
+func AcquireAdminShared(ctx context.Context, adminDir string) (*os.File, error) {
+	if !supported {
+		return nil, ErrUnsupported
+	}
+	// #nosec G304 -- fixed lock file name inside the configured admin area.
+	admin, err := os.Open(lockPath(adminDir, AdminLockName))
+	if err != nil {
+		return nil, fmt.Errorf("adminlock: open %s: %w", AdminLockName, err)
+	}
+	if err := waitLock(ctx, admin, false, nil); err != nil {
+		return nil, errors.Join(err, admin.Close())
+	}
+	return admin, nil
+}
+
 // AcquireServerStart takes admin.lock in adminDir shared, waiting at most
 // opts.AdminLockWait while a sori-admin command holds it, and then
 // dataRoot/server.lock exclusive without waiting. It returns ErrAdminBusy when the

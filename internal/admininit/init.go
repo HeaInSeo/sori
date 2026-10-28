@@ -38,7 +38,13 @@ import (
 // are used for the containment check, for server.lock and for every database
 // open. A symlink retargeted after the check therefore cannot move the
 // databases away from the root whose server.lock Init holds.
-func Init(ctx context.Context, adminDir, dataRoot string, p Paths, newID func() (string, error)) (res Result, err error) {
+//
+// hostID is server.host_id, the stable server identity the activation epoch
+// records (FMT-PREP-r2 §8.2). It is required and used exactly as given: Init
+// never falls back to a hostname, machine id, address, generated value or any
+// configuration default. A value outside the §8.2 grammar is refused
+// HOST_ID_INVALID in the step-4 preflight, before init-intent is written.
+func Init(ctx context.Context, adminDir, dataRoot, hostID string, p Paths, newID func() (string, error)) (res Result, err error) {
 	if err := checkPaths(p); err != nil {
 		return Result{}, err
 	}
@@ -61,7 +67,7 @@ func Init(ctx context.Context, adminDir, dataRoot string, p Paths, newID func() 
 		return Result{}, err
 	}
 	defer func() { err = errors.Join(err, locks.Close()) }()
-	return initLocked(ctx, adminDir, realRoot, pinned, newID)
+	return initLocked(ctx, adminDir, realRoot, hostID, pinned, newID)
 }
 
 // afterCheck, when set by a test, runs after the paths are checked and before
