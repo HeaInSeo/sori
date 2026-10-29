@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strconv"
 )
 
@@ -39,7 +41,8 @@ type StartFacts struct {
 // InspectStartFacts reads the start facts of the store at path without
 // changing it. Like InspectInitState it never uses Open, which would create a
 // schema or switch the journal mode; a non-empty file is read through a
-// read-only, query-only connection. A store that cannot be read with certainty
+// read-only, query-only connection, immutable when no WAL content or journal
+// exists (startQuery). A store that cannot be read with certainty
 // (a non-regular file, a stray sidecar, a failed integrity check, an unreadable
 // or malformed marker) returns an error and no facts.
 func InspectStartFacts(ctx context.Context, path string) (StartFacts, error) {
@@ -53,7 +56,7 @@ func InspectStartFacts(ctx context.Context, path string) (StartFacts, error) {
 	case pristine:
 		return StartFacts{Pristine: true}, nil
 	}
-	db, err := sql.Open("sqlite", fileURI(path)+"?mode=ro&_pragma=query_only(1)")
+	db, err := sql.Open("sqlite", fileURI(path)+startQuery(path))
 	if err != nil {
 		return StartFacts{}, fmt.Errorf("jobledger: start facts: open %s: %w", path, err)
 	}
@@ -65,6 +68,25 @@ func InspectStartFacts(ctx context.Context, path string) (StartFacts, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	return startFacts(ctx, tx, path)
+}
+
+// startQuery returns the connection options for reading the start facts. When
+// the database has no write-ahead log content and no rollback journal, every
+// committed page is in the main file, and the file is opened immutable: SQLite
+// then reads it without creating or touching a -wal or -shm file, so the read
+// writes nothing at all. A non-empty -wal or a -journal needs SQLite's own
+// read-only recovery path, which may create or map the -shm index.
+func startQuery(path string) string {
+	const ro = "?mode=ro&_pragma=query_only(1)"
+	if fi, err := os.Lstat(path + "-wal"); err == nil && (!fi.Mode().IsRegular() || fi.Size() != 0) {
+		return ro
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return ro
+	}
+	if _, err := os.Lstat(path + "-journal"); !errors.Is(err, fs.ErrNotExist) {
+		return ro
+	}
+	return "?mode=ro&immutable=1&_pragma=query_only(1)"
 }
 
 func startFacts(ctx context.Context, tx *sql.Tx, path string) (StartFacts, error) {

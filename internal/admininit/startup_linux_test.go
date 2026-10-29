@@ -29,14 +29,8 @@ func fsState(t *testing.T, dirs ...string) string {
 				return err
 			}
 			st, _ := fi.Sys().(*syscall.Stat_t)
-			fmt.Fprintf(&b, "%s %s uid=%d gid=%d size=%d ino=%d", path, fi.Mode(), st.Uid, st.Gid, fi.Size(), st.Ino)
-			// A read-only SQLite connection to a WAL database maps an existing
-			// -shm index and updates its times; that is bookkeeping, not store
-			// content (as InspectInitState documents). Its existence, size, mode
-			// and bytes are still compared; every other file's times too.
-			if !strings.HasSuffix(path, "-shm") {
-				fmt.Fprintf(&b, " mtime=%d.%d ctime=%d.%d", st.Mtim.Sec, st.Mtim.Nsec, st.Ctim.Sec, st.Ctim.Nsec)
-			}
+			fmt.Fprintf(&b, "%s %s uid=%d gid=%d size=%d ino=%d mtime=%d.%d ctime=%d.%d",
+				path, fi.Mode(), st.Uid, st.Gid, fi.Size(), st.Ino, st.Mtim.Sec, st.Mtim.Nsec, st.Ctim.Sec, st.Ctim.Nsec)
 			if fi.Mode().IsRegular() {
 				data, err := os.ReadFile(path) // #nosec G304 -- test directories.
 				if err != nil {
@@ -92,6 +86,16 @@ func corrupt(t *testing.T, path string) {
 	}
 	if err := os.WriteFile(path, append([]byte(" "), data...), 0o640); err != nil { // #nosec G306 -- test admin area.
 		t.Fatal(err)
+	}
+}
+
+// removeDB removes a database file and its SQLite sidecars.
+func removeDB(t *testing.T, path string) {
+	t.Helper()
+	for _, s := range []string{"", "-wal", "-shm", "-journal"} {
+		if err := os.Remove(path + s); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -194,9 +198,7 @@ func TestClassifyStartRows(t *testing.T) {
 	t.Run("S1c epoch with pristine data root", func(t *testing.T) {
 		adminDir, root, p, _ := initialized(t)
 		for _, path := range []string{p.JobLedger, p.Authority} {
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
-			}
+			removeDB(t, path)
 		}
 		c := classifyNoWrite(t, adminDir, root, testHostID, p, nil)
 		wantRow(t, c, admininit.RowS1c)
@@ -212,9 +214,8 @@ func TestClassifyStartRows(t *testing.T) {
 	t.Run("S1c epoch with empty files", func(t *testing.T) {
 		adminDir, root, p, _ := initialized(t)
 		for _, path := range []string{p.JobLedger, p.Authority} {
-			if err := os.Truncate(path, 0); err != nil {
-				t.Fatal(err)
-			}
+			removeDB(t, path)
+			writeEmpty(t, path)
 		}
 		wantRow(t, classifyNoWrite(t, adminDir, root, testHostID, p, nil), admininit.RowS1c)
 	})

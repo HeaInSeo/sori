@@ -15,9 +15,11 @@ package admininit
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 
-	"github.com/HeaInSeo/sori/authority/sqlitestore"
 	"github.com/HeaInSeo/sori/jobledger"
 )
 
@@ -72,7 +74,7 @@ type adminFacts struct {
 type storeFacts struct {
 	err          error // the store could not be read with certainty
 	facts        jobledger.StartFacts
-	authPristine bool // the authority database is absent, empty or schema-less
+	authPristine bool // the authority database file is absent or empty
 }
 
 // ClassifyStart classifies a server start (FMT-PREP-r2 §9.2, §9.3) for the
@@ -92,11 +94,25 @@ func readStoreFacts(ctx context.Context, p Paths) storeFacts {
 		return storeFacts{err: fmt.Errorf("%w: database path not set", ErrRefused)}
 	}
 	f, err := jobledger.InspectStartFacts(ctx, p.JobLedger)
+	if err != nil {
+		return storeFacts{err: err}
+	}
 	// The authority database carries no markers. Only its pristine state is a
 	// start fact here: with epoch present a pristine authority beside a marked
-	// ledger means the data root was replaced or lost a file (S1c).
-	auth, _ := sqlitestore.InspectInitState(ctx, p.Authority)
-	return storeFacts{err: err, facts: f, authPristine: auth == sqlitestore.InitPristine}
+	// ledger means the data root was replaced or lost a file (S1c). It is read
+	// from the file's metadata only: sqlitestore.InspectInitState opens a
+	// non-empty file through SQLite's read-only WAL path, which can create or
+	// map -wal/-shm files, and the classifier must not write.
+	fi, err := os.Lstat(p.Authority)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return storeFacts{facts: f, authPristine: true}
+	case err != nil:
+		return storeFacts{err: fmt.Errorf("authority %s: %w", p.Authority, err)}
+	case !fi.Mode().IsRegular():
+		return storeFacts{err: fmt.Errorf("authority %s is not a regular file (%s)", p.Authority, fi.Mode().Type())}
+	}
+	return storeFacts{facts: f, authPristine: fi.Size() == 0}
 }
 
 func hold(row StartRow, format string, args ...any) StartClass {
