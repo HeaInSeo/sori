@@ -9,9 +9,12 @@ package admininit
 // The classifier reads; it never writes. It takes no lock (the server process
 // of P-d, not part of this slice, holds L2 around it), never opens a database
 // for writing, never creates a pristine path, writes no marker, WAL, schema or
-// admin file and never falls back to a memory store. The data root's marker,
-// schema and content facts are read before anything the server could later
-// write.
+// admin file and never falls back to a memory store. No file or SQLite sidecar
+// (-wal, -shm, -journal) is created, changed or removed: the job ledger is read
+// only immutable, and a ledger that needs WAL or journal recovery to be read
+// (a crash image) is not read at all but held as S12 RO/HOLD. The data root's
+// marker, schema and content facts are read before anything the server could
+// later write.
 
 import (
 	"context"
@@ -103,6 +106,11 @@ func readStoreFacts(ctx context.Context, p Paths) storeFacts {
 	// from the file's metadata only: sqlitestore.InspectInitState opens a
 	// non-empty file through SQLite's read-only WAL path, which can create or
 	// map -wal/-shm files, and the classifier must not write.
+	//
+	// Slice limit (FMT-PREP-r2 §9.1 P-b asks content-emptiness of both
+	// databases): this slice reads only the authority file's existence and
+	// size. A non-empty authority file is taken as not pristine; its schema
+	// and content-emptiness are not read.
 	fi, err := os.Lstat(p.Authority)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
