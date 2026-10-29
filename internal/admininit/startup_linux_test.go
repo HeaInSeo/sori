@@ -280,6 +280,65 @@ func TestClassifyStartRows(t *testing.T) {
 	})
 }
 
+// crashImage returns a data root holding a crash image of an initialized
+// installation's data root: the authority database, and the job ledger's main
+// file and non-empty -wal copied while a writer still holds the store open with
+// one committed, not checkpointed transaction. With shm the writer's -shm index
+// is copied too, as a stale index beside the image.
+func crashImage(t *testing.T, shm bool) (adminDir, root string, p admininit.Paths) {
+	t.Helper()
+	adminDir, src, srcPaths, id := initialized(t)
+	_, root, p = layout(t)
+	s, err := jobledger.Open(srcPaths.JobLedger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if _, err := s.AllocateNamespace(context.Background(), jobledger.Guard{InstallationID: id, ActivationEpoch: 1}, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	sidecars := []string{"", "-wal"}
+	if shm {
+		sidecars = append(sidecars, "-shm")
+	}
+	for _, sfx := range sidecars {
+		copyFile(t, srcPaths.JobLedger+sfx, p.JobLedger+sfx)
+	}
+	copyFile(t, srcPaths.Authority, p.Authority)
+	if fi, err := os.Stat(p.JobLedger + "-wal"); err != nil || fi.Size() == 0 {
+		t.Fatalf("crash image of %s has no WAL content: %v", src, err)
+	}
+	return adminDir, root, p
+}
+
+// TestClassifyStartCrashImageNoWrite: a data root whose job ledger has
+// committed pages only in its -wal (a crash image) cannot be read without
+// SQLite's WAL recovery, which creates or rewrites the -shm index. The
+// classifier must not write: it holds the start as S12 RO/HOLD and leaves the
+// main file, the -wal and any -shm byte- and metadata-identical (pair F1).
+func TestClassifyStartCrashImageNoWrite(t *testing.T) {
+	t.Run("no -shm", func(t *testing.T) {
+		adminDir, root, p := crashImage(t, false)
+		wantRow(t, classifyNoWrite(t, adminDir, root, testHostID, p, nil), admininit.RowS12)
+		if _, err := os.Lstat(p.JobLedger + "-shm"); !os.IsNotExist(err) {
+			t.Fatalf("%s-shm exists after classify: %v", p.JobLedger, err)
+		}
+	})
+	t.Run("stale -shm", func(t *testing.T) {
+		adminDir, root, p := crashImage(t, true)
+		wantRow(t, classifyNoWrite(t, adminDir, root, testHostID, p, nil), admininit.RowS12)
+	})
+	t.Run("-journal", func(t *testing.T) {
+		adminDir, root, p, _ := initialized(t)
+		writeEmpty(t, p.JobLedger+"-journal")
+		wantRow(t, classifyNoWrite(t, adminDir, root, testHostID, p, nil), admininit.RowS12)
+	})
+}
+
 // TestClassifyStartLastObservedPolicy: the carried RW-C1 §3.2 runtime checks
 // (FMT-PREP-r2 §4.3): high_water below the last observed revision, or the same
 // revision with another digest, is S6, never RW.
