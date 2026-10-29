@@ -29,8 +29,14 @@ func fsState(t *testing.T, dirs ...string) string {
 				return err
 			}
 			st, _ := fi.Sys().(*syscall.Stat_t)
-			fmt.Fprintf(&b, "%s %s uid=%d gid=%d size=%d ino=%d mtime=%d.%d ctime=%d.%d",
-				path, fi.Mode(), st.Uid, st.Gid, fi.Size(), st.Ino, st.Mtim.Sec, st.Mtim.Nsec, st.Ctim.Sec, st.Ctim.Nsec)
+			fmt.Fprintf(&b, "%s %s uid=%d gid=%d size=%d ino=%d", path, fi.Mode(), st.Uid, st.Gid, fi.Size(), st.Ino)
+			// A read-only SQLite connection to a WAL database maps an existing
+			// -shm index and updates its times; that is bookkeeping, not store
+			// content (as InspectInitState documents). Its existence, size, mode
+			// and bytes are still compared; every other file's times too.
+			if !strings.HasSuffix(path, "-shm") {
+				fmt.Fprintf(&b, " mtime=%d.%d ctime=%d.%d", st.Mtim.Sec, st.Mtim.Nsec, st.Ctim.Sec, st.Ctim.Nsec)
+			}
 			if fi.Mode().IsRegular() {
 				data, err := os.ReadFile(path) // #nosec G304 -- test directories.
 				if err != nil {
