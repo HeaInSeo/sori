@@ -273,11 +273,17 @@ func checkNoContent(ctx context.Context, tx *sql.Tx) error {
 			return fmt.Errorf("jobledger: read %s: %w", table, err)
 		}
 		if n != 0 {
-			return fmt.Errorf("store has content in %s", table)
+			return &contentError{table: table}
 		}
 	}
 	return nil
 }
+
+// contentError is checkNoContent's refusal of a store with a row in a content
+// table, distinct from a failure to read the table.
+type contentError struct{ table string }
+
+func (e *contentError) Error() string { return "store has content in " + e.table }
 
 // readMeta returns every ledger_meta row.
 func readMeta(ctx context.Context, tx *sql.Tx) (map[string]string, error) {
