@@ -10,6 +10,9 @@ import (
 	"strconv"
 )
 
+// memoryPath is SQLite's name for a private in-memory database.
+const memoryPath = ":memory:"
+
 // StartFacts are the read-only facts a server start classifier needs about one
 // job ledger (SORI-D01-W021B-FMT-PREP-r2 §9.1 P-b). They are reported as facts,
 // not as the three offline-init outcomes of InspectInitState, so that "not
@@ -46,7 +49,7 @@ type StartFacts struct {
 // (a non-regular file, a stray sidecar, a failed integrity check, an unreadable
 // or malformed marker) returns an error and no facts.
 func InspectStartFacts(ctx context.Context, path string) (StartFacts, error) {
-	if path == "" || path == ":memory:" {
+	if path == "" || path == memoryPath {
 		return StartFacts{}, fmt.Errorf("%w: %q", ErrTransientPath, path)
 	}
 	pristine, err := inspectFile(path)
